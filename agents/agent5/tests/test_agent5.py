@@ -1,0 +1,550 @@
+"""
+Agent 5 Test Suite
+Run with: pytest booked/agents/agent5/tests/ -v
+
+Tests cover:
+  - Schema.org JSON-LD output correctness (all required fields)
+  - Schema.org field mapping from KB + content package
+  - HTML escaping (XSS prevention)
+  - Page builder produces valid HTML with all sections
+  - Calendar worker naming and URL conventions
+  - iCal mode vs PMS API mode detection
+  - Cloudflare Pages URL construction (both modes)
+  - Slug fallback generation
+  - Agent node output contract (success and failure paths)
+  - GrowthBook snippet structure
+"""
+
+import json
+import re
+import pytest
+from unittest.mock import MagicMock, patch
+
+from agents.agent5.models import (
+    CalendarConfig,
+    DeployMode,
+    LandingPage,
+    PageStatus,
+)
+from agents.agent5.schema_markup import (
+    build_schema_from_inputs,
+    generate_schema_jsonld,
+)
+from agents.agent5.calendar_sync import (
+    _worker_name,
+    _worker_url,
+    provision_calendar_sync,
+)
+from agents.agent5.cloudflare_deployer import (
+    _build_page_url,
+    _build_deployment_bundle,
+)
+from agents.agent5.page_builder import (
+    _esc,
+    _format_description,
+    build_landing_page_html,
+)
+from agents.agent5.ab_testing import generate_growthbook_snippet
+
+
+# ── Fixtures ──────────────────────────────────────────────────────────────
+
+def make_kb(with_coords: bool = True) -> dict:
+    kb = {
+        "property_id": "prop-test-001",
+        "client_id": "client-001",
+        "vibe_profile": "romantic_escape",
+        "slug": "vista-azule",
+        "name": {"value": "Vista Azule", "source": "intake_portal"},
+        "description": {"value": "A stunning beachfront property.", "source": "intake_portal"},
+        "bedrooms": {"value": 4, "source": "intake_portal"},
+        "bathrooms": {"value": 3.5, "source": "intake_portal"},
+        "max_occupancy": {"value": 10, "source": "intake_portal"},
+        "property_type": {"value": "beach house", "source": "intake_portal"},
+        "city": {"value": "Carolina Beach", "source": "intake_portal"},
+        "state": {"value": "NC", "source": "intake_portal"},
+        "zip_code": {"value": "28428", "source": "intake_portal"},
+        "booking_url": "https://pmc.example.com/book/vista-azule",
+        "ical_url": "https://airbnb.com/calendar/ical/12345.ics",
+        "amenities": [
+            {"value": "Heated Pool", "source": "intake_portal"},
+            {"value": "Hot Tub", "source": "intake_portal"},
+            {"value": "WiFi", "source": "intake_portal"},
+        ],
+        "airbnb_rating": {"value": 4.87, "source": "airbnb"},
+        "airbnb_review_count": {"value": 142, "source": "airbnb"},
+        "avg_nightly_rate": {"value": 450.0, "source": "airbnb"},
+        "owner_story": "We found this home and fell in love immediately.",
+        "guest_reviews": [
+            {"text": "Absolutely magical.", "reviewer_name": "Sarah", "is_guest_book": True},
+            {"text": "Best vacation ever.", "reviewer_name": "Mike", "is_guest_book": False,
+             "star_rating": 5},
+        ],
+        "photos": [
+            {"url": "https://r2.example.com/enhanced/photo_001.jpg", "source": "airbnb"},
+            {"url": "https://r2.example.com/enhanced/photo_002.jpg", "source": "airbnb"},
+        ],
+    }
+    if with_coords:
+        kb["latitude"] = {"value": 34.0354, "source": "airbnb"}
+        kb["longitude"] = {"value": -77.8970, "source": "airbnb"}
+    return kb
+
+
+def make_content_package() -> dict:
+    return {
+        "hero_headline": "Where the ocean meets the two of you",
+        "vibe_tagline": "A private beachfront retreat",
+        "property_description": "Vista Azule is the kind of place that makes time slow down.\n\nThe master suite rises directly above the water.",
+        "feature_spotlights": [
+            {"feature_name": "Rooftop Deck", "headline": "The sky is yours",
+             "description": "Private rooftop with outdoor kitchen overlooking the Atlantic."},
+        ],
+        "amenity_highlights": {
+            "Heated Pool": "Stay in long past sunset.",
+            "Hot Tub": "For mornings too good to leave.",
+        },
+        "neighborhood_intro": "Carolina Beach moves at its own pace.",
+        "faqs": [
+            {"question": "Is the pool heated?", "answer": "Yes, year-round at 82°F."},
+            {"question": "Distance to beach?", "answer": "3-minute walk."},
+        ],
+        "owner_story_refined": "Twelve sunsets in and we never wanted to leave.",
+        "seo_page_title": "Vista Azule | Carolina Beach | Romantic Retreat",
+        "seo_meta_description": "Romantic 4BR beachfront in Carolina Beach NC. Private pool, rooftop deck. Book direct.",
+    }
+
+
+def make_visual_media() -> dict:
+    return {
+        "hero_photo_url": "https://r2.example.com/enhanced/hero.jpg",
+        "category_winners": {"view": "https://r2.example.com/enhanced/view.jpg"},
+        "videos_queued": True,
+        "review_videos_pending": False,
+    }
+
+
+def make_local_guide() -> dict:
+    return {
+        "area_introduction": "Carolina Beach stretches in both directions.",
+        "dont_miss_picks": [
+            {"name": "Britt's Donuts", "description": "A Carolina Beach institution for 80 years."},
+        ],
+        "primary_recommendations": [
+            {
+                "name": "Oceanic Restaurant",
+                "category": "eat_and_drink",
+                "composite_rating": 4.7,
+                "price_level": "$$$",
+                "distance_miles": 0.4,
+                "photo_url": "https://maps.google.com/photo/ocean.jpg",
+                "description": None,
+            },
+        ],
+        "location_name": "Carolina Beach, NC",
+    }
+
+
+# ── Schema.org Tests ──────────────────────────────────────────────────────
+
+class TestSchemaMarkup:
+    def test_output_is_valid_script_tag(self):
+        script = generate_schema_jsonld(
+            name="Vista Azule",
+            description="A stunning property",
+            page_url="https://vista-azule.staylio.ai",
+            booking_url="https://pmc.example.com/book",
+            address_line1=None,
+            city="Carolina Beach",
+            state="NC",
+            zip_code="28428",
+            latitude=34.035,
+            longitude=-77.897,
+            bedrooms=4,
+            bathrooms=3.5,
+            max_occupancy=10,
+            amenities=["Pool", "Hot Tub", "WiFi"],
+            hero_photo_url="https://r2.example.com/hero.jpg",
+            google_rating=4.87,
+            google_review_count=142,
+            avg_nightly_rate=450.0,
+            slug="vista-azule",
+        )
+        assert script.startswith('<script type="application/ld+json">')
+        assert script.endswith("</script>")
+
+    def test_schema_type_is_vacation_rental(self):
+        script = generate_schema_jsonld(
+            name="Test Property", description=None, page_url="https://test.staylio.ai",
+            booking_url=None, address_line1=None, city="Test City", state="NC",
+            zip_code=None, latitude=None, longitude=None, bedrooms=None,
+            bathrooms=None, max_occupancy=None, amenities=[], hero_photo_url=None,
+            google_rating=None, google_review_count=None, avg_nightly_rate=None, slug="test"
+        )
+        # Extract JSON from script tag
+        json_str = script.replace('<script type="application/ld+json">', "").replace("</script>", "").strip()
+        data = json.loads(json_str)
+        assert data["@type"] == "VacationRental"
+        assert data["@context"] == "https://schema.org"
+
+    def test_all_numeric_fields_populate(self):
+        script = generate_schema_jsonld(
+            name="Test", description="Desc", page_url="https://test.staylio.ai",
+            booking_url="https://book.example.com", address_line1="123 Beach Rd",
+            city="Wilmington", state="NC", zip_code="28401",
+            latitude=34.2, longitude=-77.9, bedrooms=3, bathrooms=2.0,
+            max_occupancy=8, amenities=["WiFi"], hero_photo_url="https://r2.example.com/photo.jpg",
+            google_rating=4.5, google_review_count=100, avg_nightly_rate=300.0, slug="test"
+        )
+        json_str = script.split(">", 1)[1].rsplit("<", 1)[0].strip()
+        data = json.loads(json_str)
+        assert data["numberOfRooms"] == 3
+        assert data["numberOfBathroomsTotal"] == 2.0
+        assert data["occupancy"]["value"] == 8
+        assert data["aggregateRating"]["ratingValue"] == 4.5
+        assert data["geo"]["latitude"] == 34.2
+
+    def test_build_schema_from_inputs_uses_kb_fields(self):
+        kb = make_kb()
+        cp = make_content_package()
+        vm = make_visual_media()
+        script = build_schema_from_inputs(kb, cp, vm, "https://vista-azule.staylio.ai", "vista-azule")
+        assert "Vista Azule" in script
+        assert "Carolina Beach" in script
+
+    def test_amenity_feature_list_generated(self):
+        script = generate_schema_jsonld(
+            name="T", description=None, page_url="https://t.staylio.ai",
+            booking_url=None, address_line1=None, city=None, state=None,
+            zip_code=None, latitude=None, longitude=None, bedrooms=None,
+            bathrooms=None, max_occupancy=None,
+            amenities=["Pool", "Hot Tub", "WiFi", "BBQ"],
+            hero_photo_url=None, google_rating=None, google_review_count=None,
+            avg_nightly_rate=None, slug="t"
+        )
+        json_str = script.split(">", 1)[1].rsplit("<", 1)[0].strip()
+        data = json.loads(json_str)
+        assert "amenityFeature" in data
+        assert len(data["amenityFeature"]) == 4
+
+    def test_booking_action_uses_booking_url(self):
+        script = generate_schema_jsonld(
+            name="T", description=None, page_url="https://t.staylio.ai",
+            booking_url="https://pmc.example.com/book/vista-azule",
+            address_line1=None, city=None, state=None, zip_code=None,
+            latitude=None, longitude=None, bedrooms=None, bathrooms=None,
+            max_occupancy=None, amenities=[], hero_photo_url=None,
+            google_rating=None, google_review_count=None, avg_nightly_rate=None, slug="t"
+        )
+        assert "https://pmc.example.com/book/vista-azule" in script
+
+
+# ── HTML Escaping Tests ───────────────────────────────────────────────────
+
+class TestHTMLEscaping:
+    """
+    XSS prevention tests. Any user-supplied content passing through _esc()
+    must be safe for HTML embedding.
+    """
+    def test_ampersand_escaped(self):
+        assert _esc("Fish & Chips") == "Fish &amp; Chips"
+
+    def test_less_than_escaped(self):
+        assert _esc("<script>alert(1)</script>") == "&lt;script&gt;alert(1)&lt;/script&gt;"
+
+    def test_double_quote_escaped(self):
+        assert _esc('say "hello"') == "say &quot;hello&quot;"
+
+    def test_single_quote_escaped(self):
+        assert _esc("it's fine") == "it&#39;s fine"
+
+    def test_none_returns_empty_string(self):
+        assert _esc(None) == ""
+
+    def test_integer_converted(self):
+        assert _esc(42) == "42"
+
+
+# ── Page Builder Tests ────────────────────────────────────────────────────
+
+class TestPageBuilder:
+    def test_page_builds_without_error(self):
+        """build_landing_page_html should return non-empty HTML."""
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert html
+        assert len(html) > 5000
+
+    def test_page_is_valid_html_structure(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert "<!DOCTYPE html>" in html
+        assert "<html" in html
+        assert "</html>" in html
+        assert "<head>" in html
+        assert "<body" in html
+        assert "</body>" in html
+
+    def test_page_contains_schema_script(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert 'application/ld+json' in html
+        assert 'VacationRental' in html
+
+    def test_page_contains_hero_headline(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert "Where the ocean meets the two of you" in html
+
+    def test_all_cta_buttons_use_booking_url(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        # All CTAs must point to the booking URL
+        assert "pmc.example.com/book" in html
+        # All must have UTM parameters
+        assert "utm_source=booked" in html
+
+    def test_page_contains_utm_parameters(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert "utm_medium=landing_page" in html
+        assert "utm_campaign=vista-azule" in html
+
+    def test_guest_book_section_appears_when_reviews_present(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert "Guest Book" in html
+        assert "Absolutely magical." in html
+
+    def test_page_builds_with_empty_agent_outputs(self):
+        """Page should degrade gracefully when agent outputs are empty."""
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package={},
+            visual_media={},
+            local_guide={},
+            page_url="https://test.staylio.ai",
+            slug="test",
+        )
+        assert html
+        assert "<!DOCTYPE html>" in html
+
+    def test_description_split_into_paragraphs(self):
+        result = _format_description("First paragraph.\n\nSecond paragraph.")
+        assert "<p>First paragraph.</p>" in result
+        assert "<p>Second paragraph.</p>" in result
+
+    def test_fa_section_appears(self):
+        html = build_landing_page_html(
+            kb=make_kb(),
+            content_package=make_content_package(),
+            visual_media=make_visual_media(),
+            local_guide=make_local_guide(),
+            page_url="https://vista-azule.staylio.ai",
+            slug="vista-azule",
+        )
+        assert "Is the pool heated?" in html
+        assert "82°F" in html
+
+
+# ── Calendar Sync Tests ───────────────────────────────────────────────────
+
+class TestCalendarSync:
+    def test_worker_name_is_stable(self):
+        """Same property_id always produces same worker name."""
+        name1 = _worker_name("prop-001")
+        name2 = _worker_name("prop-001")
+        assert name1 == name2
+        assert name1.startswith("staylio-cal-")
+
+    def test_worker_names_differ_per_property(self):
+        assert _worker_name("prop-001") != _worker_name("prop-002")
+
+    def test_worker_url_format(self):
+        url = _worker_url("prop-001")
+        assert url.startswith("https://staylio-cal-")
+        assert "workers.dev" in url
+
+    def test_ical_mode_returns_config(self):
+        with patch("booked.agents.agent5.calendar_sync._deploy_ical_worker",
+                   return_value="https://worker.example.com/calendar"):
+            config = provision_calendar_sync(
+                property_id="prop-001",
+                ical_url="https://airbnb.com/ical/12345.ics",
+            )
+        assert config.ical_url == "https://airbnb.com/ical/12345.ics"
+        assert config.cache_endpoint == "https://worker.example.com/calendar"
+
+    def test_pms_mode_records_type(self):
+        config = provision_calendar_sync(
+            property_id="prop-001",
+            ical_url=None,
+            pms_type="guesty",
+            pms_api_connected=True,
+        )
+        assert config.pms_type == "guesty"
+        assert config.pms_api_connected is True
+
+    def test_unsupported_pms_type_excluded(self):
+        config = provision_calendar_sync(
+            property_id="prop-001",
+            ical_url=None,
+            pms_type="unknown_pms",
+        )
+        assert config.pms_type is None
+
+
+# ── Cloudflare Deployer Tests ─────────────────────────────────────────────
+
+class TestCloudflareDeployer:
+    def test_subdomain_url_format(self):
+        url = _build_page_url("vista-azule", DeployMode.STAYLIO_SUBDOMAIN, None)
+        assert url == "https://vista-azule.staylio.ai"
+
+    def test_cname_url_uses_custom_domain(self):
+        url = _build_page_url("vista-azule", DeployMode.CNAME_CUSTOM, "stays.pmc.com")
+        assert url == "https://stays.pmc.com"
+
+    def test_deployment_bundle_contains_html(self):
+        import tarfile, io
+        bundle = _build_deployment_bundle("test-slug", "<html><body>Test</body></html>")
+        tar = tarfile.open(fileobj=io.BytesIO(bundle))
+        names = tar.getnames()
+        assert "index.html" in names
+        # Verify HTML content
+        member = tar.extractfile("index.html")
+        content = member.read().decode()
+        assert "Test" in content
+
+    def test_simulation_mode_returns_success(self):
+        """Without Cloudflare credentials, should simulate and return success."""
+        from agents.agent5.cloudflare_deployer import deploy_property_page
+        with patch.dict("os.environ", {"CLOUDFLARE_API_KEY": "", "CLOUDFLARE_ACCOUNT_ID": ""}):
+            success, url, dep_id = deploy_property_page(
+                property_id="p1",
+                slug="test-slug",
+                html_content="<html></html>",
+            )
+        assert success is True
+        assert "test-slug.staylio.ai" in url
+
+
+# ── Agent Node Contract Tests ─────────────────────────────────────────────
+
+class TestAgent5NodeContract:
+    def test_successful_build_sets_flags(self):
+        from agents.agent5.agent import agent5_node
+
+        kb = make_kb()
+        state = {
+            "property_id": "prop-test-001",
+            "knowledge_base": kb,
+            "content_package": make_content_package(),
+            "visual_media_package": make_visual_media(),
+            "local_guide": make_local_guide(),
+            "errors": [],
+        }
+
+        with patch("booked.agents.agent5.agent.get_cached_knowledge_base", return_value=kb), \
+             patch("booked.agents.agent5.agent._load_from_cache_or_state",
+                   side_effect=lambda state, pid, key, label: state.get(key, {})), \
+             patch("booked.agents.agent5.agent.provision_calendar_sync",
+                   return_value=CalendarConfig(cache_endpoint="https://worker.example.com/cal")), \
+             patch("booked.agents.agent5.agent.deploy_property_page",
+                   return_value=(True, "https://vista-azule.staylio.ai", "dep-001")), \
+             patch("booked.agents.agent5.agent._save_landing_page"), \
+             patch("booked.agents.agent5.agent._get_client_tier", return_value="base"), \
+             patch("booked.agents.agent5.agent.cache_knowledge_base"), \
+             patch("booked.agents.agent5.agent.update_pipeline_status"):
+
+            result = agent5_node(state)
+
+        assert result["agent5_complete"] is True
+        assert result["agent6_ready"] is True
+        assert result["page_url"] == "https://vista-azule.staylio.ai"
+
+    def test_deployment_failure_returns_error(self):
+        from agents.agent5.agent import agent5_node
+
+        kb = make_kb()
+        state = {
+            "property_id": "prop-test-001",
+            "knowledge_base": kb,
+            "content_package": make_content_package(),
+            "visual_media_package": make_visual_media(),
+            "local_guide": make_local_guide(),
+            "errors": [],
+        }
+
+        with patch("booked.agents.agent5.agent.get_cached_knowledge_base", return_value=kb), \
+             patch("booked.agents.agent5.agent._load_from_cache_or_state",
+                   side_effect=lambda state, pid, key, label: state.get(key, {})), \
+             patch("booked.agents.agent5.agent.provision_calendar_sync",
+                   return_value=CalendarConfig()), \
+             patch("booked.agents.agent5.agent.deploy_property_page",
+                   return_value=(False, "https://vista-azule.staylio.ai", None)), \
+             patch("booked.agents.agent5.agent._get_client_tier", return_value="base"), \
+             patch("booked.agents.agent5.agent.update_pipeline_status"):
+
+            result = agent5_node(state)
+
+        assert result["agent5_complete"] is False
+        assert len(result["errors"]) > 0
+
+    def test_missing_kb_returns_error(self):
+        from agents.agent5.agent import agent5_node
+
+        state = {
+            "property_id": "ghost-prop",
+            "knowledge_base": None,
+            "errors": [],
+        }
+
+        with patch("booked.agents.agent5.agent.get_cached_knowledge_base", return_value=None), \
+             patch("booked.agents.agent5.agent.update_pipeline_status"):
+
+            result = agent5_node(state)
+
+        assert result["agent5_complete"] is False
