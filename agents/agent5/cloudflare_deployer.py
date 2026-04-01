@@ -21,12 +21,17 @@ CNAME mode is a vanity layer over the same hosting.
 
 Cloudflare Pages free tier: unlimited sites, unlimited bandwidth,
 500 builds/month. Zero per-property hosting cost at any scale.
+
+FIX NOTES (v6 → v7):
+  Cloudflare Pages Direct Upload API requires a ZIP file, not tar.gz.
+  Changed _build_deployment_bundle to produce a zip using zipfile module.
+  Form field name must be 'file' with filename ending in .zip.
 """
 
 import hashlib
 import logging
 import os
-import tarfile
+import zipfile
 import io
 from typing import Optional
 
@@ -76,7 +81,7 @@ def deploy_property_page(
     page_url = _build_page_url(slug, deploy_mode, custom_domain)
 
     try:
-        # Create deployment bundle (tar archive with index.html)
+        # Create deployment bundle (zip archive with index.html)
         bundle = _build_deployment_bundle(slug, html_content)
 
         # Upload to Cloudflare Pages Direct Upload API
@@ -134,22 +139,20 @@ def _build_page_url(
 
 def _build_deployment_bundle(slug: str, html_content: str) -> bytes:
     """
-    Create a minimal tar archive for Cloudflare Pages Direct Upload.
+    Create a zip archive for Cloudflare Pages Direct Upload API.
+    Cloudflare Pages requires a ZIP file — tar.gz is not accepted.
     Contains: index.html at the root for the property slug route.
     """
     buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        # The page lives at /index.html — Cloudflare serves it at the subdomain root
-        html_bytes = html_content.encode("utf-8")
-        info = tarfile.TarInfo(name="index.html")
-        info.size = len(html_bytes)
-        tar.addfile(info, io.BytesIO(html_bytes))
+    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("index.html", html_content.encode("utf-8"))
     return buf.getvalue()
 
 
 def _upload_to_pages(slug: str, bundle: bytes) -> Optional[str]:
     """
     Upload a deployment bundle to Cloudflare Pages via Direct Upload API.
+    Sends a ZIP file as multipart/form-data.
     Returns the deployment ID or None on failure.
     """
     try:
@@ -157,7 +160,7 @@ def _upload_to_pages(slug: str, bundle: bytes) -> Optional[str]:
             resp = client.post(
                 f"{CLOUDFLARE_PAGES_BASE}/{PAGES_PROJECT_NAME}/deployments",
                 headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"},
-                files={"file": (f"{slug}.tar.gz", bundle, "application/gzip")},
+                files={"file": (f"{slug}.zip", bundle, "application/zip")},
             )
             resp.raise_for_status()
             return resp.json().get("result", {}).get("id")
