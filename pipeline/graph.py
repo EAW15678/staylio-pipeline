@@ -33,13 +33,20 @@ FAILURE RECOVERY:
     (LLM rate limits, transient API errors)
   - Human escalation: Agent 2 quality gate failure routes to AM review queue
     Agent 3 provenance flag routes to AM review queue
+
+FIX NOTES (v6 → v7):
+  InvalidUpdateError fix — when Agents 2, 3, and 4 run in parallel they each
+  return a state dict. LangGraph merges all three dicts and raises
+  InvalidUpdateError if any key receives more than one value in the same step.
+  Fix: annotate every PipelineState field with a reducer function.
+  - Scalar fields (str, bool, dict): _last() — last-write-wins
+  - List fields (errors, meta_campaigns): _concat() — accumulate across agents
 """
 
 import logging
 from typing import Annotated, TypedDict
 
 from langgraph.graph import StateGraph, END
-from langgraph.graph.message import add_messages
 
 from agents.agent1.agent import agent1_node
 from agents.agent2.agent import agent2_node
@@ -52,64 +59,85 @@ from agents.agent7.agent import agent7_node
 logger = logging.getLogger(__name__)
 
 
-# ── Pipeline State ────────────────────────────────────────────────────────
+# ── Reducer helpers ───────────────────────────────────────────────────────────
+# LangGraph requires every field that more than one parallel node might write
+# to be annotated with a reducer.  We use two simple reducers:
+#
+#   _last    — last-write-wins (correct for scalars: str, bool, dict)
+#   _concat  — list concatenation (correct for error/event accumulator lists)
+
+def _last(a, b):
+    """Return the most-recent value.  Used for scalar and dict fields."""
+    return b
+
+
+def _concat(a, b):
+    """Concatenate two lists.  None-safe.  Used for errors and meta_campaigns."""
+    return (a or []) + (b or [])
+
+
+# ── Pipeline State ────────────────────────────────────────────────────────────
 
 class PipelineState(TypedDict):
     """
     Shared state passed between all agents in the pipeline.
     LangGraph manages checkpointing and recovery of this state.
+
+    Every field is annotated with a reducer so that LangGraph can merge
+    the concurrent updates produced by the parallel fan-out of Agents 2/3/4
+    without raising InvalidUpdateError.
     """
     # Identity
-    property_id: str
-    client_id: str
+    property_id:          Annotated[str,   _last]
+    client_id:            Annotated[str,   _last]
 
     # Agent 1 outputs
-    knowledge_base: dict
-    knowledge_base_ready: bool
-    agent1_complete: bool
+    knowledge_base:       Annotated[dict,  _last]
+    knowledge_base_ready: Annotated[bool,  _last]
+    agent1_complete:      Annotated[bool,  _last]
 
     # Parallel agent signals
-    agent2_ready: bool
-    agent3_ready: bool
-    agent4_ready: bool
+    agent2_ready:         Annotated[bool,  _last]
+    agent3_ready:         Annotated[bool,  _last]
+    agent4_ready:         Annotated[bool,  _last]
 
     # Agent 2 outputs
-    content_package: dict
-    agent2_complete: bool
-    agent2_needs_review: bool
+    content_package:      Annotated[dict,  _last]
+    agent2_complete:      Annotated[bool,  _last]
+    agent2_needs_review:  Annotated[bool,  _last]
 
     # Agent 3 outputs
-    visual_media_package: dict
-    agent3_complete: bool
+    visual_media_package: Annotated[dict,  _last]
+    agent3_complete:      Annotated[bool,  _last]
 
     # Agent 4 outputs
-    local_guide: dict
-    agent4_complete: bool
+    local_guide:          Annotated[dict,  _last]
+    agent4_complete:      Annotated[bool,  _last]
 
     # Agent 5 outputs
-    page_url: str
-    page_slug: str
-    agent5_complete: bool
-    agent6_ready: bool
+    page_url:             Annotated[str,   _last]
+    page_slug:            Annotated[str,   _last]
+    agent5_complete:      Annotated[bool,  _last]
+    agent6_ready:         Annotated[bool,  _last]
 
     # Agent 6 outputs
-    social_calendar: dict
-    meta_campaigns: list
-    spark_cluster_id: str
-    agent6_complete: bool
-    agent7_ready: bool
+    social_calendar:      Annotated[dict,  _last]
+    meta_campaigns:       Annotated[list,  _concat]
+    spark_cluster_id:     Annotated[str,   _last]
+    agent6_complete:      Annotated[bool,  _last]
+    agent7_ready:         Annotated[bool,  _last]
 
     # Agent 7 outputs
-    attribution_tier: str
-    pixel_snippet: str
-    agent7_complete: bool
-    pipeline_complete: bool
+    attribution_tier:     Annotated[str,   _last]
+    pixel_snippet:        Annotated[str,   _last]
+    agent7_complete:      Annotated[bool,  _last]
+    pipeline_complete:    Annotated[bool,  _last]
 
-    # Cross-agent
-    errors: list[str]
+    # Cross-agent — errors from any agent are accumulated
+    errors:               Annotated[list,  _concat]
 
 
-# ── Routing functions ─────────────────────────────────────────────────────
+# ── Routing functions ─────────────────────────────────────────────────────────
 
 def route_after_agent1(state: PipelineState) -> str:
     """After Agent 1: if successful, fan out to parallel agents."""
@@ -129,7 +157,6 @@ def route_after_parallel(state: PipelineState) -> str:
         logger.warning(f"[Pipeline] Agent 2 incomplete — page will launch without content")
     if not state.get("agent3_complete"):
         logger.warning(f"[Pipeline] Agent 3 incomplete — page will launch without enhanced photos")
-    # Agent 5 proceeds regardless — page degrades gracefully without perfect inputs
     return "agent5"
 
 
@@ -141,7 +168,7 @@ def route_after_agent5(state: PipelineState) -> str:
     return "post_launch_agents"
 
 
-# ── Graph Construction ────────────────────────────────────────────────────
+# ── Graph Construction ────────────────────────────────────────────────────────
 
 def build_pipeline_graph() -> StateGraph:
     """
@@ -168,22 +195,18 @@ def build_pipeline_graph() -> StateGraph:
         "agent1",
         route_after_agent1,
         {
-            "parallel_agents": "agent2",   # Fan-out handled by LangGraph parallel execution
+            "parallel_agents": "agent2",
             "pipeline_failed": "pipeline_failed",
         },
     )
 
-    # Run Agents 2, 3, 4 in parallel after Agent 1
-    # LangGraph parallel execution: add same source node for all parallel branches
     graph.add_edge("agent1", "agent3")
     graph.add_edge("agent1", "agent4")
 
     # ── Parallel agents → Agent 5 ─────────────────────────────────────────
-    # Agent 5 waits for Agents 2 AND 3 (join)
-    # LangGraph handles the join: add edges from all parallel nodes to Agent 5
     graph.add_edge("agent2", "agent5")
     graph.add_edge("agent3", "agent5")
-    graph.add_edge("agent4", "agent5")   # Agent 4 also signals Agent 5 (local guide ready)
+    graph.add_edge("agent4", "agent5")
 
     # ── Agent 5 → post-launch agents ──────────────────────────────────────
     graph.add_conditional_edges(
@@ -195,7 +218,6 @@ def build_pipeline_graph() -> StateGraph:
         },
     )
 
-    # Agent 7 runs after Agent 5 in parallel with Agent 6
     graph.add_edge("agent5", "agent7")
 
     # ── Terminal edges ────────────────────────────────────────────────────
@@ -214,21 +236,14 @@ def _handle_pipeline_failure(state: PipelineState) -> PipelineState:
         f"[Pipeline] Pipeline failed for property {property_id}. "
         f"Errors: {errors}"
     )
-    # AM alert would be triggered here in production
-    # (webhook to Slack or PagerDuty — defined in infrastructure layer)
     return {**state, "pipeline_complete": False}
 
 
-# ── Pipeline execution entry point ────────────────────────────────────────
+# ── Pipeline execution entry point ────────────────────────────────────────────
 
 def run_intake_pipeline(property_id: str, client_id: str) -> dict:
     """
     Execute the full 7-agent pipeline for a new property intake.
-    Called by the LangGraph service endpoint when the intake portal
-    submits a new property.
-
-    This is a long-running operation (5-30 minutes).
-    Must run in a persistent service — NOT in a Vercel serverless function.
 
     Args:
         property_id: UUID of the new property (from intake submission)
