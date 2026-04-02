@@ -15,14 +15,14 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-import redis
+from upstash_redis import Redis                  # ← replaces standard redis
 from supabase import create_client, Client
 
 logger = logging.getLogger(__name__)
 
 # ── Clients ───────────────────────────────────────────────────────────────
 _supabase: Optional[Client] = None
-_redis: Optional[redis.Redis] = None
+_redis: Optional[Redis] = None                  # ← type updated
 
 
 def _get_supabase() -> Client:
@@ -35,12 +35,14 @@ def _get_supabase() -> Client:
     return _supabase
 
 
-def _get_redis() -> redis.Redis:
+def _get_redis() -> Redis:                       # ← return type updated
     global _redis
     if _redis is None:
-        _redis = redis.Redis.from_url(
-            os.environ["REDIS_URL"],
-            decode_responses=True,
+        # upstash-redis authenticates via URL + token, not the standard Redis
+        # wire protocol. REDIS_URL and REDIS_TOKEN are both set in .env.
+        _redis = Redis(
+            url=os.environ["REDIS_URL"],
+            token=os.environ["REDIS_TOKEN"],
         )
     return _redis
 
@@ -184,3 +186,4 @@ def get_pipeline_status(property_id: str) -> Optional[dict]:
     except Exception as exc:
         logger.error(f"Failed to fetch pipeline status for {property_id}: {exc}")
         return None
+
