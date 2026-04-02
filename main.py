@@ -37,11 +37,11 @@ app.add_middleware(
     allow_origins=[
         "https://staylio.ai",
         "https://intake.staylio.ai",
-        "null",           # allows file:// (opening HTML locally)
+        "null",
         "http://localhost:8080",
         "http://localhost:3000",
     ],
-    allow_credentials=False,  # must be False when using wildcard-style origins
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
