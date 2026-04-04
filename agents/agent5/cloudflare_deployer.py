@@ -26,6 +26,12 @@ FIX NOTES (v6 → v7):
   Cloudflare Pages Direct Upload API requires a ZIP file, not tar.gz.
   Changed _build_deployment_bundle to produce a zip using zipfile module.
   Form field name must be 'file' with filename ending in .zip.
+
+FIX NOTES (v7 → v8):
+  Cloudflare Pages Direct Upload API requires two steps:
+  Step 1 — POST to /deployments to create a deployment slot (no body).
+  Step 2 — POST to /deployments/{id}/upload with the ZIP file.
+  Previous version tried to do both in one request, causing 400 errors.
 """
 
 import hashlib
@@ -84,7 +90,7 @@ def deploy_property_page(
         # Create deployment bundle (zip archive with index.html)
         bundle = _build_deployment_bundle(slug, html_content)
 
-        # Upload to Cloudflare Pages Direct Upload API
+        # Upload to Cloudflare Pages via two-step Direct Upload API
         deployment_id = _upload_to_pages(slug, bundle)
 
         if not deployment_id:
@@ -152,18 +158,34 @@ def _build_deployment_bundle(slug: str, html_content: str) -> bytes:
 def _upload_to_pages(slug: str, bundle: bytes) -> Optional[str]:
     """
     Upload a deployment bundle to Cloudflare Pages via Direct Upload API.
-    Sends a ZIP file as multipart/form-data.
+    Two-step process:
+      Step 1 — POST to /deployments (no body) to create a deployment slot.
+      Step 2 — POST to /deployments/{id}/upload with the ZIP file.
     Returns the deployment ID or None on failure.
     """
     try:
+        headers = {"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"}
         with httpx.Client(timeout=60) as client:
+            # Step 1: Create deployment slot
             resp = client.post(
                 f"{CLOUDFLARE_PAGES_BASE}/{PAGES_PROJECT_NAME}/deployments",
-                headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"},
-                files={"file": (f"{slug}.zip", bundle, "application/zip")},
+                headers=headers,
             )
             resp.raise_for_status()
-            return resp.json().get("result", {}).get("id")
+            deployment_id = resp.json().get("result", {}).get("id")
+            if not deployment_id:
+                logger.error("[TS-12] No deployment ID returned from Cloudflare")
+                return None
+
+            # Step 2: Upload the zip to the deployment
+            upload_resp = client.post(
+                f"{CLOUDFLARE_PAGES_BASE}/{PAGES_PROJECT_NAME}/deployments/{deployment_id}/upload",
+                headers=headers,
+                files={"file": (f"{slug}.zip", bundle, "application/zip")},
+            )
+            upload_resp.raise_for_status()
+            return deployment_id
+
     except Exception as exc:
         logger.error(f"[TS-12] Cloudflare Pages upload failed: {exc}")
         return None
