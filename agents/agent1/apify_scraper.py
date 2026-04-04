@@ -34,8 +34,8 @@ APIFY_API_BASE   = "https://api.apify.com/v2"
 APIFY_API_TOKEN  = os.environ["APIFY_API_TOKEN"]
 
 # Actor IDs for each platform
-AIRBNB_ACTOR_ID  = "tri_angle~airbnb-scraper"
-VRBO_ACTOR_ID    = "ecomscrape~vrbo-property-search-scraper"
+AIRBNB_ACTOR_ID  = os.environ.get("APIFY_AIRBNB_ACTOR_ID", "pIyP4eyT6kBUZ2fHe")
+VRBO_ACTOR_ID    = os.environ.get("APIFY_VRBO_ACTOR_ID", "kRRC9n6Rv5lEcE3b3")
 
 # Polling config for sync-style run
 POLL_INTERVAL_SEC = 5
