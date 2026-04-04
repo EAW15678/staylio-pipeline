@@ -1,61 +1,34 @@
 """
-TS-12 — Cloudflare Pages Deployer
-Tool: Cloudflare Pages API
+TS-12 — Cloudflare R2 Deployer
+Tool: Cloudflare R2 (via boto3 S3-compatible API)
 
-Deploys built HTML landing pages to Cloudflare Pages.
+Deploys built HTML landing pages to Cloudflare R2.
+A Cloudflare Worker (staylio-router) intercepts *.staylio.ai traffic,
+reads the subdomain, fetches {slug}/index.html from R2, and serves it.
 
-Two deployment modes:
-  MODE 1 — Staylio subdomain (default):
-    {slug}.staylio.ai
-    Wildcard SSL covers all properties automatically.
-    No PMC DNS involvement required.
-
-  MODE 2 — CNAME custom domain (Portfolio tier):
-    {custom_subdomain}.pmcdomain.com
-    PMC points their subdomain to Cloudflare Pages via CNAME.
-    Cloudflare auto-provisions SSL for the custom domain.
-    Five-minute PMC DNS change, no ongoing coordination.
-
-Both modes use identical Cloudflare Pages infrastructure.
-CNAME mode is a vanity layer over the same hosting.
-
-Cloudflare Pages free tier: unlimited sites, unlimited bandwidth,
-500 builds/month. Zero per-property hosting cost at any scale.
-
-FIX NOTES (v6 → v7):
-  Cloudflare Pages Direct Upload API requires a ZIP file, not tar.gz.
-  Changed _build_deployment_bundle to produce a zip using zipfile module.
-  Form field name must be 'file' with filename ending in .zip.
-
-FIX NOTES (v7 → v8):
-  Cloudflare Pages Direct Upload API requires multipart form data
-  with a 'manifest' field (JSON) and the file content.
-  manifest format: {"/index.html": ""}
-  File sent as text/html alongside the manifest.
+FIX NOTES (v8 → v9):
+  Replaced Cloudflare Pages Direct Upload API with R2 upload via boto3.
+  Pages does not support wildcard custom domains (documented CF limitation).
+  agent.py call signature is unchanged.
 """
 
 import hashlib
-import json
 import logging
 import os
-import zipfile
-import io
 from typing import Optional
 
-import httpx
+import boto3
+from botocore.exceptions import ClientError
 
 from agents.agent5.models import DeployMode
 
 logger = logging.getLogger(__name__)
 
-CLOUDFLARE_API_KEY    = os.environ.get("CLOUDFLARE_API_KEY", "")
-CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
-CLOUDFLARE_PAGES_BASE = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/pages/projects"
+CLOUDFLARE_ACCOUNT_ID  = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "")
+R2_ACCESS_KEY_ID       = os.environ.get("R2_ACCESS_KEY_ID", "")
+R2_SECRET_ACCESS_KEY   = os.environ.get("R2_SECRET_ACCESS_KEY", "")
+R2_BUCKET_NAME         = os.environ.get("R2_BUCKET_NAME", "staylio-pages")
 
-# Staylio Pages project name (one project, many deployments)
-PAGES_PROJECT_NAME = "staylio-properties"
-
-# Public base URL
 BOOKED_BASE_DOMAIN = "staylio.ai"
 
 
@@ -66,41 +39,25 @@ def deploy_property_page(
     deploy_mode: DeployMode = DeployMode.STAYLIO_SUBDOMAIN,
     custom_domain: Optional[str] = None,
 ) -> tuple[bool, str, Optional[str]]:
-    """
-    Deploy a property landing page to Cloudflare Pages.
-
-    Args:
-        property_id:   Property UUID
-        slug:          URL-safe property slug
-        html_content:  Complete HTML string for the landing page
-        deploy_mode:   STAYLIO_SUBDOMAIN or CNAME_CUSTOM
-        custom_domain: Required for CNAME_CUSTOM mode
-
-    Returns:
-        (success: bool, page_url: str, deployment_id: Optional[str])
-    """
-    if not CLOUDFLARE_API_KEY or not CLOUDFLARE_ACCOUNT_ID:
-        logger.warning("[TS-12] Cloudflare credentials not set — simulating deployment")
-        page_url = _build_page_url(slug, deploy_mode, custom_domain)
-        return True, page_url, f"sim-{hashlib.md5(property_id.encode()).hexdigest()[:8]}"
-
     page_url = _build_page_url(slug, deploy_mode, custom_domain)
 
+    if not all([CLOUDFLARE_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY]):
+        logger.warning("[TS-12] R2 credentials not set — simulating deployment")
+        sim_id = f"sim-{hashlib.md5(property_id.encode()).hexdigest()[:8]}"
+        return True, page_url, sim_id
+
+    r2_key = f"{slug}/index.html"
+
     try:
-        bundle = _build_deployment_bundle(slug, html_content)
-        deployment_id = _upload_to_pages(slug, bundle)
-
-        if not deployment_id:
-            return False, page_url, None
-
-        if deploy_mode == DeployMode.CNAME_CUSTOM and custom_domain:
-            _configure_custom_domain(custom_domain)
-
-        logger.info(f"[TS-12] Deployed property {property_id} → {page_url} (id={deployment_id})")
-        return True, page_url, deployment_id
+        _upload_to_r2(r2_key, html_content)
+        logger.info(
+            f"[TS-12] Deployed property {property_id} → {page_url} "
+            f"(r2_key={r2_key}, bucket={R2_BUCKET_NAME})"
+        )
+        return True, page_url, r2_key
 
     except Exception as exc:
-        logger.error(f"[TS-12] Deployment failed for property {property_id}: {exc}")
+        logger.error(f"[TS-12] R2 deployment failed for property {property_id}: {exc}")
         return False, page_url, None
 
 
@@ -111,9 +68,6 @@ def rebuild_page(
     deploy_mode: DeployMode,
     custom_domain: Optional[str] = None,
 ) -> tuple[bool, str, Optional[str]]:
-    """
-    Rebuild and redeploy an existing property page.
-    """
     logger.info(f"[TS-12] Rebuilding page for property {property_id}")
     return deploy_property_page(
         property_id=property_id,
@@ -123,8 +77,6 @@ def rebuild_page(
         custom_domain=custom_domain,
     )
 
-
-# ── Internal helpers ──────────────────────────────────────────────────────
 
 def _build_page_url(
     slug: str,
@@ -136,64 +88,28 @@ def _build_page_url(
     return f"https://{slug}.{BOOKED_BASE_DOMAIN}"
 
 
-def _build_deployment_bundle(slug: str, html_content: str) -> bytes:
-    """
-    Create a zip archive containing index.html.
-    Used to pass the HTML through to _upload_to_pages.
-    """
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("index.html", html_content.encode("utf-8"))
-    return buf.getvalue()
+def _get_r2_client():
+    endpoint_url = f"https://{CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com"
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        region_name="auto",
+    )
 
 
-def _upload_to_pages(slug: str, bundle: bytes) -> Optional[str]:
-    """
-    Upload to Cloudflare Pages Direct Upload API.
-    Requires multipart form with 'manifest' field and the HTML file.
-    manifest format: {"/index.html": ""}
-    """
+def _upload_to_r2(r2_key: str, html_content: str) -> None:
+    client = _get_r2_client()
     try:
-        # Extract HTML from zip bundle
-        buf = io.BytesIO(bundle)
-        with zipfile.ZipFile(buf, "r") as zf:
-            html_content = zf.read("index.html")
-
-        manifest = json.dumps({"/index.html": ""})
-        headers = {"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"}
-
-        with httpx.Client(timeout=60) as client:
-            resp = client.post(
-                f"{CLOUDFLARE_PAGES_BASE}/{PAGES_PROJECT_NAME}/deployments",
-                headers=headers,
-                files={
-                    "manifest": (None, manifest, "application/json"),
-                    "/index.html": ("index.html", html_content, "text/html"),
-                },
-            )
-            resp.raise_for_status()
-            return resp.json().get("result", {}).get("id")
-
-    except Exception as exc:
-        logger.error(f"[TS-12] Cloudflare Pages upload failed: {exc}")
-        return None
-
-
-def _configure_custom_domain(custom_domain: str) -> None:
-    """
-    Register a custom domain with the Cloudflare Pages project.
-    """
-    try:
-        with httpx.Client(timeout=30) as client:
-            resp = client.post(
-                f"{CLOUDFLARE_PAGES_BASE}/{PAGES_PROJECT_NAME}/domains",
-                headers={
-                    "Authorization": f"Bearer {CLOUDFLARE_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={"name": custom_domain},
-            )
-            resp.raise_for_status()
-            logger.info(f"[TS-12] Custom domain registered: {custom_domain}")
-    except Exception as exc:
-        logger.warning(f"[TS-12] Custom domain registration failed for {custom_domain}: {exc}")
+        client.put_object(
+            Bucket=R2_BUCKET_NAME,
+            Key=r2_key,
+            Body=html_content.encode("utf-8"),
+            ContentType="text/html; charset=utf-8",
+            CacheControl="public, max-age=300, s-maxage=3600",
+        )
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "unknown")
+        logger.error(f"[TS-12] R2 ClientError uploading {r2_key}: code={error_code} {exc}")
+        raise
