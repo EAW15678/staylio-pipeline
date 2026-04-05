@@ -315,12 +315,17 @@ def _parse_json_response(raw: str) -> Optional[dict | list]:
     if cleaned.endswith("```"):
         cleaned = re.sub(r"\n?```\s*$", "", cleaned)
     cleaned = cleaned.strip()
+    # Sanitize invalid control characters
+    cleaned = cleaned.replace('\x00', '').encode('utf-8', 'ignore').decode('utf-8')
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        logger.error(f"[Agent 2] JSON parse failed: {exc}\nRaw: {raw[:200]}")
-        logger.warning(f"[Agent 2] JSON parse failed. Raw (first 500 chars): {raw[:500]!r}")
-        return None
+    except json.JSONDecodeError:
+        try:
+            return json.loads(cleaned, strict=False)
+        except json.JSONDecodeError as exc:
+            logger.error(f"[Agent 2] JSON parse failed: {exc}\nRaw: {raw[:200]}")
+            logger.warning(f"[Agent 2] JSON parse failed. Raw (first 500 chars): {raw[:500]!r}")
+            return None
 
 
 # ── Apply Sonnet Result to Package ────────────────────────────────────────
