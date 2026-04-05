@@ -44,7 +44,7 @@ FALLBACK_THRESHOLD = 2
 
 # Token budgets (controls cost)
 SONNET_MAX_TOKENS = 4000   # Full content package
-HAIKU_MAX_TOKENS  = 1500   # Social captions batch
+HAIKU_MAX_TOKENS  = 4000   # Social captions batch
 GPT4O_MAX_TOKENS  = 4000
 
 
@@ -319,6 +319,7 @@ def _parse_json_response(raw: str) -> Optional[dict | list]:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
         logger.error(f"[Agent 2] JSON parse failed: {exc}\nRaw: {raw[:200]}")
+        logger.warning(f"[Agent 2] JSON parse failed. Raw (first 500 chars): {raw[:500]!r}")
         return None
 
 
