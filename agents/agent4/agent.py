@@ -217,7 +217,7 @@ def _save_local_guide(guide: LocalGuide) -> None:
     try:
         from core.supabase_store import get_supabase
         from datetime import datetime, timezone
-        get_supabase().table("local_guides").upsert(
+        get_supabase().table("property_local_guides").upsert(
             {
                 "property_id": guide.property_id,
                 "data": guide.to_dict(),
