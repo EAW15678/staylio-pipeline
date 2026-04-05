@@ -210,10 +210,13 @@ def _scrape_airbnb(
 
     # ── Photos ────────────────────────────────────────────────────────────
     existing_urls = {p.url for p in knowledge_base.photos}
-    photos_raw = listing.get("photos") or listing.get("images") or []
+    photos_raw = listing.get("images") or listing.get("photos") or []
+    # Fallback: thumbnail field if no image array present
+    if not photos_raw and listing.get("thumbnail"):
+        photos_raw = [{"imageUrl": listing["thumbnail"]}]
     for photo in photos_raw:
         url_val = photo if isinstance(photo, str) else (
-            photo.get("url") or photo.get("picture") or photo.get("baseUrl")
+            photo.get("imageUrl") or photo.get("url") or photo.get("picture") or photo.get("baseUrl")
         )
         if url_val and url_val not in existing_urls:
             # Prefer the largest available Airbnb image variant
