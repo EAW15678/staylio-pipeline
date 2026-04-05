@@ -97,12 +97,20 @@ def build_landing_page_html(
     guest_book_reviews = [r for r in all_reviews if r.get("is_guest_book")]
     ota_reviews        = [r for r in all_reviews if not r.get("is_guest_book")]
 
-    # Photos
-    all_photos     = kb.get("photos") or []
-    gallery_photos = [
-        p for p in all_photos
-        if p.get("url") and p.get("url") != hero_photo
-    ][:24]   # Cap gallery at 24 photos
+    # Photos — prefer enhanced R2 URLs from Agent 3, fall back to KB photos
+    media_assets = visual_media.get("media_assets", [])
+    if media_assets:
+        gallery_photos = [
+            a.get("asset_url_enhanced") or a.get("asset_url_original")
+            for a in media_assets
+            if (a.get("asset_url_enhanced") or a.get("asset_url_original"))
+            and (a.get("asset_url_enhanced") or a.get("asset_url_original")) != hero_photo
+        ][:24]
+    else:
+        gallery_photos = [
+            p.get("url") for p in (kb.get("photos") or [])
+            if p.get("url") and p.get("url") != hero_photo
+        ][:24]
 
     # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
     hero_video_url = _get_hero_video_url(visual_media)
