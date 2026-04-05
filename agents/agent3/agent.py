@@ -24,11 +24,13 @@ Pipeline:
 
 import asyncio
 import hashlib
+import io
 import logging
 import os
 from typing import Optional
 
 import httpx
+from PIL import Image
 
 from agents.agent3.claid_enhancer import enhance_photo_batch_sync
 from agents.agent3.crop_orchestrator import generate_social_crops
@@ -110,6 +112,9 @@ def agent3_node(state: dict) -> dict:
 
         filename = _stable_filename(url, i)
         source_label = _detect_source(url)
+
+        # Resize if over 9MB to stay within Claid.ai input limits
+        photo_bytes = _resize_if_oversized(photo_bytes, max_bytes=9 * 1024 * 1024)
 
         # Upload original to R2
         try:
@@ -259,6 +264,34 @@ def agent3_node(state: dict) -> dict:
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
+
+def _resize_if_oversized(photo_bytes: bytes, max_bytes: int) -> bytes:
+    """Reduce JPEG quality iteratively until the image is under max_bytes."""
+    if len(photo_bytes) <= max_bytes:
+        return photo_bytes
+    try:
+        img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
+        quality = 85
+        while quality >= 20:
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=quality)
+            resized = buf.getvalue()
+            if len(resized) <= max_bytes:
+                logger.info(
+                    f"[Agent 3] Resized photo from {len(photo_bytes) / 1024 / 1024:.1f}MB "
+                    f"to {len(resized) / 1024 / 1024:.1f}MB at quality={quality}"
+                )
+                return resized
+            quality -= 10
+        logger.warning(
+            f"[Agent 3] Could not reduce photo below {max_bytes / 1024 / 1024:.0f}MB "
+            f"(final size {len(resized) / 1024 / 1024:.1f}MB at quality={quality + 10})"
+        )
+        return resized
+    except Exception as exc:
+        logger.warning(f"[Agent 3] Photo resize failed, using original: {exc}")
+        return photo_bytes
+
 
 async def _download_photos(urls: list[str]) -> list[tuple[str, Optional[bytes]]]:
     """Download all photos concurrently with bounded concurrency."""
