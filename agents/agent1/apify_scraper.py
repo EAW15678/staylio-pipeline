@@ -34,7 +34,7 @@ APIFY_API_BASE   = "https://api.apify.com/v2"
 APIFY_API_TOKEN  = os.environ["APIFY_API_TOKEN"]
 
 # Actor IDs for each platform
-AIRBNB_ACTOR_ID  = os.environ.get("APIFY_AIRBNB_ACTOR_ID", "pIyP4eyT6kBUZ2fHe")
+AIRBNB_ACTOR_ID  = os.environ.get("APIFY_AIRBNB_ACTOR_ID", "tri_angle~airbnb-rooms-urls-scraper")
 VRBO_ACTOR_ID    = os.environ.get("APIFY_VRBO_ACTOR_ID", "kRRC9n6Rv5lEcE3b3")
 
 # Polling config for sync-style run
@@ -116,11 +116,6 @@ def _scrape_airbnb(
 
     actor_input = {
         "startUrls": [{"url": url}],
-        "maxListings": 1,
-        "includeReviews": scrape_reviews,
-        "maxReviews": 50,               # Cap at 50 — enough for social proof
-        "currency": "USD",
-        "addMoreHostInfo": True,
     }
 
     raw = _run_apify_actor(AIRBNB_ACTOR_ID, actor_input)
