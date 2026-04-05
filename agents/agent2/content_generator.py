@@ -83,9 +83,10 @@ def generate_content_package(
     # ── Tier 1: Claude Sonnet — landing page content ──────────────────────
     logger.info(f"[Agent 2] Generating landing page content (Sonnet) for property {property_id}")
 
-    sonnet_result = _generate_sonnet(
+    sonnet_result, llm_errors = _generate_sonnet(
         kb, seo_keywords, anthropic_client, openai_client
     )
+    pkg.generation_errors.extend(llm_errors)
 
     if sonnet_result:
         pkg = _apply_sonnet_result(pkg, sonnet_result)
@@ -125,14 +126,15 @@ def _generate_sonnet(
     keywords: list[str],
     anthropic_client: anthropic.Anthropic,
     openai_client: Optional[openai.OpenAI],
-) -> Optional[dict]:
+) -> tuple[Optional[dict], list[str]]:
     """
     Try Claude Sonnet first, fall back to GPT-4o on failure.
-    Returns the parsed JSON dict or None if all attempts fail.
+    Returns (parsed JSON dict or None, list of error detail strings).
     """
     vibe = kb.get("vibe_profile", "")
     system = get_system_prompt(vibe)
     user   = get_user_prompt(vibe, kb, keywords)
+    errors: list[str] = []
 
     # Attempt 1: Claude Sonnet
     for attempt in range(FALLBACK_THRESHOLD):
@@ -144,33 +146,44 @@ def _generate_sonnet(
                 messages=[{"role": "user", "content": user}],
             )
             raw = resp.content[0].text
-            return _parse_json_response(raw)
-        except anthropic.RateLimitError:
-            logger.warning(f"[Agent 2] Claude rate limit on attempt {attempt + 1}")
+            return _parse_json_response(raw), errors
+        except anthropic.RateLimitError as exc:
+            msg = f"Claude RateLimitError on attempt {attempt + 1}: {exc}"
+            logger.warning(f"[Agent 2] {msg}")
+            errors.append(msg)
             time.sleep(2 ** attempt)   # exponential back-off
         except anthropic.APIStatusError as exc:
-            logger.warning(f"[Agent 2] Claude API error on attempt {attempt + 1}: {exc}")
+            msg = f"Claude APIStatusError on attempt {attempt + 1}: status={exc.status_code} body={exc.message}"
+            logger.warning(f"[Agent 2] {msg}")
+            errors.append(msg)
             if exc.status_code < 500:
                 break   # 4xx — bad request, don't retry
             time.sleep(2 ** attempt)
         except Exception as exc:
-            logger.error(f"[Agent 2] Unexpected Claude error: {exc}")
+            msg = f"Claude unexpected error on attempt {attempt + 1}: {type(exc).__name__}: {exc}"
+            logger.error(f"[Agent 2] {msg}")
+            errors.append(msg)
             break
 
     # Attempt 2: GPT-4o fallback (TS-06)
     if openai_client:
         logger.warning("[Agent 2] Claude failed — falling back to GPT-4o (TS-06)")
-        return _generate_gpt4o(system, user, openai_client)
+        result, gpt_error = _generate_gpt4o(system, user, openai_client)
+        if gpt_error:
+            errors.append(gpt_error)
+        return result, errors
 
-    return None
+    return None, errors
 
 
 def _generate_gpt4o(
     system: str,
     user: str,
     openai_client: openai.OpenAI,
-) -> Optional[dict]:
-    """GPT-4o fallback for landing page content generation (TS-06)."""
+) -> tuple[Optional[dict], Optional[str]]:
+    """GPT-4o fallback for landing page content generation (TS-06).
+    Returns (parsed JSON dict or None, error string or None).
+    """
     try:
         resp = openai_client.chat.completions.create(
             model=GPT4O_MODEL,
@@ -182,10 +195,11 @@ def _generate_gpt4o(
             response_format={"type": "json_object"},
         )
         raw = resp.choices[0].message.content
-        return _parse_json_response(raw)
+        return _parse_json_response(raw), None
     except Exception as exc:
-        logger.error(f"[Agent 2] GPT-4o fallback failed: {exc}")
-        return None
+        msg = f"GPT-4o fallback failed: {type(exc).__name__}: {exc}"
+        logger.error(f"[Agent 2] {msg}")
+        return None, msg
 
 
 # ── Haiku Social Caption Generation ──────────────────────────────────────
