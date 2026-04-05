@@ -128,6 +128,7 @@ async def enhance_photo_async(
         "output": STANDARD_ENHANCEMENT_PRESET["output"],
     }
 
+    logger.info(f"[TS-07] Claid input URL: {original_url}")
     try:
         resp = await session.post(
             f"{CLAID_API_BASE}/image/edit",
