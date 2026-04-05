@@ -304,9 +304,14 @@ def _parse_json_response(raw: str) -> Optional[dict | list]:
     """Strip markdown fences and parse JSON. Returns None on failure."""
     if not raw:
         return None
-    # Strip markdown code fences
-    cleaned = re.sub(r"^```(?:json)?\s*", "", raw.strip())
-    cleaned = re.sub(r"\s*```$", "", cleaned)
+    # Strip leading/trailing whitespace, then remove ```json / ``` fences
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        # Remove opening fence — handles ```json, ```JSON, ``` with or without newline
+        cleaned = re.sub(r"^```[a-zA-Z]*\s*\n?", "", cleaned)
+    if cleaned.endswith("```"):
+        cleaned = re.sub(r"\n?```\s*$", "", cleaned)
+    cleaned = cleaned.strip()
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
