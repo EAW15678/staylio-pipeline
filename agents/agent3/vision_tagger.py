@@ -17,12 +17,14 @@ the photo is flagged — this is the automated enforcement layer
 for the Claid.ai operation whitelist.
 """
 
+import json
 import os
 import logging
 from typing import Optional
 
 from google.cloud import vision
 from google.cloud.vision_v1 import types
+from google.oauth2 import service_account
 
 from agents.agent3.models import (
     MediaAsset,
@@ -31,6 +33,25 @@ from agents.agent3.models import (
 from models.property import VibeProfile
 
 logger = logging.getLogger(__name__)
+
+GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+
+
+def _get_vision_client() -> vision.ImageAnnotatorClient:
+    """
+    Return a Vision API client.
+    If GOOGLE_CREDENTIALS_JSON is set, use it as inline service account JSON.
+    Otherwise fall back to Application Default Credentials.
+    """
+    if GOOGLE_CREDENTIALS_JSON:
+        info = json.loads(GOOGLE_CREDENTIALS_JSON)
+        creds = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"],
+        )
+        return vision.ImageAnnotatorClient(credentials=creds)
+    return vision.ImageAnnotatorClient()
+
 
 # Label divergence threshold for provenance flag
 # If the Jaccard similarity between original and enhanced label sets
@@ -199,7 +220,7 @@ def tag_and_score_photos(
     Returns:
       (updated_assets_list, hero_photo_url)
     """
-    client = vision.ImageAnnotatorClient()
+    client = _get_vision_client()
 
     for asset in assets:
         url_to_tag = asset.asset_url_enhanced or asset.asset_url_original
@@ -247,7 +268,7 @@ def tag_original_for_provenance(
     """
     if not asset.asset_url_original:
         return asset
-    client = vision.ImageAnnotatorClient()
+    client = _get_vision_client()
     labels = _get_labels(client, asset.asset_url_original)
     asset.labels_original = labels
     return asset
