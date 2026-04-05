@@ -149,6 +149,10 @@ def agent2_node(state: PipelineState) -> PipelineState:
     # ── Step 7: Save content package to Supabase ─────────────────────────
     _save_content_package(pkg)
 
+    # ── Step 7b: Cache content package in Redis ───────────────────────────
+    from core.pipeline_status import cache_knowledge_base
+    cache_knowledge_base(f"{property_id}:agent2", pkg.to_dict() if hasattr(pkg, "to_dict") else vars(pkg))
+
     # ── Step 8: Update pipeline status ───────────────────────────────────
     update_pipeline_status(
         property_id, AGENT_NUMBER,
