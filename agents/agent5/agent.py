@@ -55,8 +55,8 @@ def agent5_node(state: dict) -> dict:
     # ── Step 1: Load all agent outputs ────────────────────────────────────
     kb = get_cached_knowledge_base(property_id) or state.get("knowledge_base") or {}
     content_package  = _load_from_cache_or_state(state, property_id, "content_package", "agent2")
-    visual_media     = _load_from_cache_or_state(state, property_id, "visual_media_package", "agent3")
-    local_guide      = _load_from_cache_or_state(state, property_id, "local_guide", "agent4")
+    visual_media     = _load_from_cache_or_state(state, property_id, "visual_media_package", "visual_media")
+    local_guide      = _load_from_cache_or_state(state, property_id, "local_guide", "local_guide")
 
     if not kb:
         error = f"Agent 5: Knowledge base not found for property {property_id}"
