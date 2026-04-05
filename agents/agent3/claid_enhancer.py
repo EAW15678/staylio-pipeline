@@ -73,7 +73,7 @@ STANDARD_ENHANCEMENT_PRESET = {
 # Maximum photos per property (cost ceiling)
 PHOTO_CEILING = 100
 # Claid.ai batch concurrency per property
-BATCH_CONCURRENCY = 10
+BATCH_CONCURRENCY = 3
 
 
 def validate_operations(operations: dict) -> None:
@@ -129,38 +129,43 @@ async def enhance_photo_async(
     }
 
     logger.info(f"[TS-07] Claid input URL: {original_url}")
-    try:
-        resp = await session.post(
-            f"{CLAID_API_BASE}/image/edit",
-            headers={
-                "Authorization": f"Bearer {CLAID_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json=payload,
-            timeout=60.0,
-        )
-        resp.raise_for_status()
+    for attempt in range(1, 4):
+        try:
+            resp = await session.post(
+                f"{CLAID_API_BASE}/image/edit",
+                headers={
+                    "Authorization": f"Bearer {CLAID_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60.0,
+            )
+            resp.raise_for_status()
 
-        data = resp.json()
-        output_url = (
-            data.get("output", {}).get("tmp_url")
-            or data.get("data", {}).get("output", {}).get("tmp_url")
-        )
-        if not output_url:
-            logger.warning(f"Claid.ai returned no output URL for photo {photo_index}")
+            data = resp.json()
+            output_url = (
+                data.get("output", {}).get("tmp_url")
+                or data.get("data", {}).get("output", {}).get("tmp_url")
+            )
+            if not output_url:
+                logger.warning(f"Claid.ai returned no output URL for photo {photo_index}")
+                return None
+
+            # Download the enhanced image bytes
+            dl_resp = await session.get(output_url, timeout=30.0)
+            dl_resp.raise_for_status()
+            return dl_resp.content
+
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429 and attempt < 3:
+                logger.warning(f"[TS-07] Claid 429 rate limit — retry {attempt}/3 for {original_url}")
+                await asyncio.sleep(5)
+                continue
+            logger.error(f"[TS-07] Claid.ai HTTP error: status={exc.response.status_code} body={exc.response.text}")
             return None
-
-        # Download the enhanced image bytes
-        dl_resp = await session.get(output_url, timeout=30.0)
-        dl_resp.raise_for_status()
-        return dl_resp.content
-
-    except httpx.HTTPStatusError as exc:
-        logger.error(f"[TS-07] Claid.ai HTTP error: status={exc.response.status_code} body={exc.response.text}")
-        return None
-    except Exception as exc:
-        logger.error(f"Claid.ai enhancement failed for photo {photo_index}: {exc}")
-        return None
+        except Exception as exc:
+            logger.error(f"Claid.ai enhancement failed for photo {photo_index}: {exc}")
+            return None
 
 
 async def enhance_photo_batch(
