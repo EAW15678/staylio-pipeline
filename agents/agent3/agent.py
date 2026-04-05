@@ -105,10 +105,17 @@ def agent3_node(state: dict) -> dict:
     downloaded = asyncio.run(_download_photos(photo_urls))
 
     assets: list[MediaAsset] = []
+    seen_hashes: set[str] = set()
     for i, (url, photo_bytes) in enumerate(downloaded):
         if not photo_bytes:
             pkg.processing_errors.append(f"Photo download failed: {url}")
             continue
+
+        photo_hash = hashlib.sha256(photo_bytes).hexdigest()
+        if photo_hash in seen_hashes:
+            logger.warning(f"[Agent 3] Duplicate photo skipped (hash={photo_hash[:12]}): {url}")
+            continue
+        seen_hashes.add(photo_hash)
 
         filename = _stable_filename(url, i)
         source_label = _detect_source(url)
