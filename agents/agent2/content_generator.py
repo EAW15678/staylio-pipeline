@@ -279,6 +279,9 @@ All captions must reference this specific property and feel distinct from each o
         )
         raw = resp.content[0].text
         items = _parse_json_response(raw)
+        if items is None:
+            logger.warning("[Agent 2] Haiku caption JSON parse returned None — returning empty captions")
+            return []
         if not isinstance(items, list):
             items = items.get("captions") or items.get("items") or []
 
