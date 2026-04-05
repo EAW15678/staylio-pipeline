@@ -38,7 +38,7 @@ BUCKET_CROPS     = "staylio-crops"
 BUCKET_VIDEO     = "staylio-video"
 
 # Public CDN base URL for R2 assets (configured in Cloudflare dashboard)
-R2_PUBLIC_BASE = os.environ.get("R2_PUBLIC_BASE_URL", "https://assets.staylio.ai")
+R2_PUBLIC_BASE = os.environ.get("R2_PUBLIC_BASE", "https://assets.staylio.ai")
 
 
 def _get_r2_client():
