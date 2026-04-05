@@ -44,7 +44,7 @@ FALLBACK_THRESHOLD = 2
 
 # Token budgets (controls cost)
 SONNET_MAX_TOKENS = 4000   # Full content package
-HAIKU_MAX_TOKENS  = 4000   # Social captions batch
+HAIKU_MAX_TOKENS  = 8000   # Social captions batch
 GPT4O_MAX_TOKENS  = 4000
 
 
