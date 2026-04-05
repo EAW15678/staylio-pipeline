@@ -59,17 +59,14 @@ PROHIBITED_OPERATIONS = frozenset({
 })
 
 # Standard enhancement preset applied to all property photos
+# Operations use Claid v1-beta1 dict format: category → {op_name: value}
 STANDARD_ENHANCEMENT_PRESET = {
-    "operations": [
-        {"type": "upscale", "scale": 2},
-        {"type": "light_correction"},
-        {"type": "noise_reduction", "strength": "auto"},
-        {"type": "color_grading", "preset": "real_estate"},
-        {"type": "sharpness", "amount": 0.3},
-    ],
+    "operations": {
+        "restorations": {"upscale": "photo"},
+        "adjustments": {"hdr": 60, "sharpness": 30},
+    },
     "output": {
-        "format": "jpeg",
-        "quality": 92,
+        "format": {"type": "jpeg", "quality": 92},
     }
 }
 
@@ -79,28 +76,34 @@ PHOTO_CEILING = 100
 BATCH_CONCURRENCY = 10
 
 
-def validate_operations(operations: list[dict]) -> None:
+def validate_operations(operations: dict) -> None:
     """
     Hard governance check — raises ValueError if any prohibited
     operation is in the request. Called before EVERY Claid.ai API call.
 
     This is the engineering enforcement layer for the TS-07 whitelist.
     It must not be bypassed under any circumstances.
+
+    operations is a dict of category → {op_name: value} as required by
+    Claid v1-beta1: e.g. {"restorations": {"upscale": "photo"}, ...}
     """
-    for op in operations:
-        op_type = op.get("type", "").lower()
-        if op_type in PROHIBITED_OPERATIONS:
-            raise ValueError(
-                f"GOVERNANCE VIOLATION: Operation '{op_type}' is prohibited. "
-                f"Agent 3 may only invoke permitted operations: {sorted(PERMITTED_OPERATIONS)}. "
-                f"Prohibited operations alter the physical reality of the property and violate "
-                f"California AB 723, FTC deceptive advertising standards, and NAR guidelines."
-            )
-        if op_type not in PERMITTED_OPERATIONS:
-            raise ValueError(
-                f"GOVERNANCE VIOLATION: Operation '{op_type}' is not on the permitted "
-                f"whitelist. Only these operations are allowed: {sorted(PERMITTED_OPERATIONS)}"
-            )
+    for category, ops in operations.items():
+        if not isinstance(ops, dict):
+            continue
+        for op_name in ops:
+            op_type = op_name.lower()
+            if op_type in PROHIBITED_OPERATIONS:
+                raise ValueError(
+                    f"GOVERNANCE VIOLATION: Operation '{op_type}' is prohibited. "
+                    f"Agent 3 may only invoke permitted operations: {sorted(PERMITTED_OPERATIONS)}. "
+                    f"Prohibited operations alter the physical reality of the property and violate "
+                    f"California AB 723, FTC deceptive advertising standards, and NAR guidelines."
+                )
+            if op_type not in PERMITTED_OPERATIONS:
+                raise ValueError(
+                    f"GOVERNANCE VIOLATION: Operation '{op_type}' is not on the permitted "
+                    f"whitelist. Only these operations are allowed: {sorted(PERMITTED_OPERATIONS)}"
+                )
 
 
 async def enhance_photo_async(
