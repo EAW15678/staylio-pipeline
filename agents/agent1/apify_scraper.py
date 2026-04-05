@@ -389,7 +389,7 @@ def _run_apify_actor(actor_id: str, actor_input: dict) -> Optional[list]:
         run_resp = client.post(
             f"{APIFY_API_BASE}/acts/{actor_id}/runs",
             headers=headers,
-            json={"input": actor_input},
+            json=actor_input,
         )
         run_resp.raise_for_status()
         run_data = run_resp.json()
