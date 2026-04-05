@@ -112,6 +112,10 @@ async def enhance_photo_async(
     Enhance a single photo via Claid.ai async API.
     Returns enhanced image bytes or None on failure.
     """
+    if not CLAID_API_KEY:
+        logger.warning("[TS-07] CLAID_API_KEY not set — skipping enhancement")
+        return None
+
     # Governance check — always runs before API call
     validate_operations(STANDARD_ENHANCEMENT_PRESET["operations"])
 
@@ -147,6 +151,9 @@ async def enhance_photo_async(
         dl_resp.raise_for_status()
         return dl_resp.content
 
+    except httpx.HTTPStatusError as exc:
+        logger.error(f"[TS-07] Claid.ai HTTP error: status={exc.response.status_code} body={exc.response.text}")
+        return None
     except Exception as exc:
         logger.error(f"Claid.ai enhancement failed for photo {photo_index}: {exc}")
         return None
