@@ -76,6 +76,7 @@ def _firecrawl_scrape(url: str) -> Optional[str]:
         "url": url,
         "formats": ["markdown"],
         "onlyMainContent": True,
+        "waitFor": 3000,
     }
 
     with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
