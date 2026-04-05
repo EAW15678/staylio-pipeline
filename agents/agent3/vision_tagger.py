@@ -34,17 +34,17 @@ from models.property import VibeProfile
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
 
 
 def _get_vision_client() -> vision.ImageAnnotatorClient:
     """
     Return a Vision API client.
-    If GOOGLE_CREDENTIALS_JSON is set, use it as inline service account JSON.
+    If GOOGLE_SERVICE_ACCOUNT_JSON is set, use it as inline service account JSON.
     Otherwise fall back to Application Default Credentials.
     """
-    if GOOGLE_CREDENTIALS_JSON:
-        info = json.loads(GOOGLE_CREDENTIALS_JSON)
+    if GOOGLE_SERVICE_ACCOUNT_JSON:
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
         creds = service_account.Credentials.from_service_account_info(
             info,
             scopes=["https://www.googleapis.com/auth/cloud-platform"],
