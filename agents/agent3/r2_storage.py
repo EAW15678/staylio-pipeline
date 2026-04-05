@@ -127,13 +127,7 @@ def download_bytes(bucket: str, key: str) -> Optional[bytes]:
 
 def public_url(bucket: str, key: str) -> str:
     """Construct the public CDN URL for an R2 asset."""
-    bucket_path = {
-        BUCKET_ORIGINALS: "originals",
-        BUCKET_ENHANCED:  "enhanced",
-        BUCKET_CROPS:     "crops",
-        BUCKET_VIDEO:     "video",
-    }.get(bucket, bucket)
-    return f"{R2_PUBLIC_BASE}/{bucket_path}/{key}"
+    return f"{R2_PUBLIC_BASE}/{key}"
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
