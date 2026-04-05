@@ -72,7 +72,7 @@ CATEGORY_SEARCH_TYPES: dict[PlaceCategory, list[str]] = {
     PlaceCategory.EAT_AND_DRINK:      ["restaurant"],
     PlaceCategory.COFFEE_CAFES:       ["cafe", "bakery"],
     PlaceCategory.NIGHTLIFE:          ["bar", "night_club"],
-    PlaceCategory.ATTRACTIONS:        ["tourist_attraction", "natural_feature"],
+    PlaceCategory.ATTRACTIONS:        ["tourist_attraction"],
     PlaceCategory.ARTS_CULTURE:       ["museum", "art_gallery", "movie_theater"],
     PlaceCategory.FAMILY_KIDS:        ["amusement_park", "zoo", "aquarium"],
     PlaceCategory.ADVENTURE_OUTDOORS: ["park", "campground"],
