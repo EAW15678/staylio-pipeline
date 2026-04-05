@@ -128,7 +128,9 @@ Respond ONLY with a JSON object containing these fields (null if you cannot dete
         # Strip markdown code fences if present
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        result = json.loads(raw)
+        # Use raw_decode to take only the first valid JSON object,
+        # ignoring any trailing text or extra objects in the response
+        result, _ = json.JSONDecoder().raw_decode(raw.strip())
     except Exception as exc:
         logger.warning(f"[TS-04c] Normalisation pass failed: {exc}")
         return knowledge_base
