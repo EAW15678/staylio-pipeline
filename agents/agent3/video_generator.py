@@ -49,7 +49,7 @@ RUNWAY_MODEL        = "gen4_turbo"
 RUNWAY_CREDITS_PER_SECOND = 5   # Gen-4 Turbo: 5 credits/second
 
 CREATOMATE_API_KEY  = os.environ.get("CREATOMATE_API_KEY", "")
-CREATOMATE_API_BASE = "https://api.creatomate.com/v1"
+CREATOMATE_API_BASE = "https://api.creatomate.com/v2"
 
 # ── Voice Configuration ───────────────────────────────────────────────────
 # These voice IDs must be configured in the Staylio ElevenLabs account.
@@ -484,7 +484,11 @@ async def _generate_runway_clips(
                     clip_urls.append(r2_url)
 
             except Exception as exc:
-                logger.error(f"[TS-09] Runway clip generation failed for photo {i}: {exc}")
+                try:
+                    body = exc.response.text
+                except Exception:
+                    body = ""
+                logger.error(f"[TS-09] Runway clip generation failed for photo {i}: {exc} body={body}")
 
     return clip_urls
 
@@ -592,8 +596,12 @@ async def _assemble_with_creatomate(
                 ))
 
             except Exception as exc:
+                try:
+                    body = exc.response.text
+                except Exception:
+                    body = ""
                 logger.error(
-                    f"[TS-09] Creatomate assembly failed for {video_type.value}/{fmt.value}: {exc}"
+                    f"[TS-09] Creatomate assembly failed for {video_type.value}/{fmt.value}: {exc} body={body}"
                 )
 
     return video_assets
@@ -632,15 +640,15 @@ def _build_creatomate_modifications(
     audio_url: Optional[str],
     text_overlay: Optional[str],
     fmt: VideoFormat,
-) -> list[dict]:
-    """Build Creatomate template modification list."""
-    mods = []
+) -> dict:
+    """Build Creatomate v2 modifications dict using flat dot-notation keys."""
+    mods: dict = {}
     for i, url in enumerate(clip_urls[:6]):   # Templates support up to 6 clips
-        mods.append({"name": f"clip_{i+1}", "source": url})
+        mods[f"clip_{i+1}.source"] = url
     if audio_url:
-        mods.append({"name": "audio", "source": audio_url})
+        mods["Audio.source"] = audio_url   # Capital A — Creatomate auto-capitalises
     if text_overlay:
-        mods.append({"name": "text_overlay", "text": text_overlay})
+        mods["text_overlay.text"] = text_overlay
     return mods
 
 
