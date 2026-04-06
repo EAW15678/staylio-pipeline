@@ -202,6 +202,7 @@ def agent3_node(state: dict) -> dict:
         category_winners=category_winners,
         apply_overlays=True,
         bannerbear_template_id=os.environ.get("BANNERBEAR_TEMPLATE_ID"),
+        enhanced_bytes_map=enhanced_bytes_map,
     )
     pkg.social_crops = social_crops
 

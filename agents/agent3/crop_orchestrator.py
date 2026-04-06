@@ -1,33 +1,36 @@
 """
 TS-08 — Social Format Crop Orchestrator
-Python wrapper around crop_worker.js (Sharp + Bannerbear)
+Pure Python/Pillow implementation — no Node.js, no subprocess.
 
 Called after Vision API tagging identifies category winners.
 Only category winners receive social crops — approximately
 8-12 images per property rather than all 100.
 
-Invokes the Node.js worker via subprocess, passes JSON payload,
-collects cropped temp files, uploads to Cloudflare R2.
+Crops are generated in-process using Pillow ImageOps.fit,
+then uploaded directly to Cloudflare R2 via upload_social_crop().
 """
 
-import json
+import io
 import logging
-import os
-import subprocess
-import tempfile
-from pathlib import Path
 from typing import Optional
+
+import httpx
+from PIL import Image, ImageOps
 
 from agents.agent3.models import SocialCrop, SubjectCategory
 from agents.agent3.r2_storage import upload_social_crop
 
 logger = logging.getLogger(__name__)
 
-# Path to the Node.js crop worker
-CROP_WORKER_PATH = Path(__file__).parent / "crop_worker.js"
+# Output pixel dimensions per format label
+CROP_DIMENSIONS: dict[str, tuple[int, int]] = {
+    "1_1":  (1080, 1080),
+    "9_16": (1080, 1920),
+    "16_9": (1920, 1080),
+}
 
-# Default formats per category when no specific override
-DEFAULT_FORMATS_BY_CATEGORY = {
+# Default formats per category — preserved exactly from original
+DEFAULT_FORMATS_BY_CATEGORY: dict[SubjectCategory, list[str]] = {
     SubjectCategory.VIEW:                 ["9_16", "1_1", "16_9"],
     SubjectCategory.POOL_HOT_TUB:         ["9_16", "1_1"],
     SubjectCategory.EXTERIOR:             ["16_9", "1_1"],
@@ -49,18 +52,20 @@ def generate_social_crops(
     category_winners: dict[str, str],   # {category_str: enhanced_url}
     apply_overlays: bool = True,
     bannerbear_template_id: Optional[str] = None,
+    enhanced_bytes_map: Optional[dict[str, bytes]] = None,
 ) -> list[SocialCrop]:
     """
     Generate social format crops for all category winner photos.
-    Calls the Node.js Sharp worker, uploads results to R2.
+    Crops with Pillow ImageOps.fit, uploads results directly to R2.
 
     Args:
         property_id:           Property UUID
-        vibe_profile:          Vibe string for overlay badge
-        property_name:         Used in Bannerbear overlay text
+        vibe_profile:          Vibe string (reserved for future overlay use)
+        property_name:         Property name (reserved for future overlay use)
         category_winners:      Dict of category → enhanced photo URL
-        apply_overlays:        Whether to apply Bannerbear overlays
-        bannerbear_template_id: Bannerbear template UID for overlays
+        apply_overlays:        Reserved — overlays not yet implemented in Python path
+        bannerbear_template_id: Reserved — no longer used
+        enhanced_bytes_map:    {asset_url_original: enhanced_bytes} to skip re-downloading
 
     Returns:
         List of SocialCrop records for Supabase storage
@@ -69,8 +74,9 @@ def generate_social_crops(
         logger.info(f"[TS-08] No category winners to crop for property {property_id}")
         return []
 
-    # Build the crop payload for the Node.js worker
-    crop_requests = []
+    bmap = enhanced_bytes_map or {}
+    social_crops: list[SocialCrop] = []
+
     for category_str, photo_url in category_winners.items():
         try:
             category = SubjectCategory(category_str)
@@ -78,69 +84,44 @@ def generate_social_crops(
             category = SubjectCategory.UNCATEGORISED
 
         formats = DEFAULT_FORMATS_BY_CATEGORY.get(category, ["1_1", "9_16"])
-        crop_requests.append({
-            "source_url": photo_url,
-            "formats": formats,
-            "category": category_str,
-            "apply_overlay": apply_overlays and bool(bannerbear_template_id),
-            "overlay_template_id": bannerbear_template_id,
-        })
 
-    payload = {
-        "property_id": property_id,
-        "vibe_profile": vibe_profile,
-        "property_name": property_name or "",
-        "crops": crop_requests,
-    }
-
-    # Call Node.js worker
-    result = _call_crop_worker(payload)
-    if not result or not result.get("success"):
-        logger.error(
-            f"[TS-08] Crop worker failed for property {property_id}: "
-            f"{result.get('error') if result else 'no response'}"
-        )
-        return []
-
-    # Upload crops to R2 and build SocialCrop records
-    social_crops = []
-    for item in result.get("results", []):
-        if item.get("error"):
-            logger.warning(f"[TS-08] Crop failed for {item['source_url']}: {item['error']}")
+        image_bytes = _get_image_bytes(photo_url, bmap)
+        if not image_bytes:
+            logger.warning(f"[TS-08] Could not obtain bytes for {photo_url} — skipping")
             continue
 
-        for crop_info in item.get("crops", []):
-            tmp_file = crop_info.get("tmp_file")
-            if not tmp_file or not os.path.exists(tmp_file):
+        for fmt in formats:
+            dims = CROP_DIMENSIONS.get(fmt)
+            if not dims:
                 continue
 
             try:
-                with open(tmp_file, "rb") as f:
-                    crop_bytes = f.read()
-                os.unlink(tmp_file)   # Clean up temp file
+                crop_bytes = _crop_image(image_bytes, dims)
+            except Exception as exc:
+                logger.error(f"[TS-08] Crop failed for {photo_url} fmt={fmt}: {exc}")
+                continue
 
-                filename = f"{crop_info['category']}_{crop_info['format']}.jpg"
+            try:
+                filename = f"{category_str}_{fmt}.jpg"
                 r2_url = upload_social_crop(
                     property_id=property_id,
                     crop_bytes=crop_bytes,
                     filename=filename,
-                    format_label=crop_info["format"],
+                    format_label=fmt,
                 )
-
-                social_crops.append(SocialCrop(
-                    property_id=property_id,
-                    source_asset_url=item["source_url"],
-                    crop_url=r2_url,
-                    format=crop_info["format"],
-                    subject_category=crop_info["category"],
-                    has_overlay=crop_info.get("has_overlay", False),
-                    overlay_template_id=bannerbear_template_id,
-                ))
-
             except Exception as exc:
-                logger.error(f"[TS-08] R2 upload failed for crop: {exc}")
-                if tmp_file and os.path.exists(tmp_file):
-                    os.unlink(tmp_file)
+                logger.error(f"[TS-08] R2 upload failed for crop {category_str}/{fmt}: {exc}")
+                continue
+
+            social_crops.append(SocialCrop(
+                property_id=property_id,
+                source_asset_url=photo_url,
+                crop_url=r2_url,
+                format=fmt,
+                subject_category=category_str,
+                has_overlay=False,
+                overlay_template_id=None,
+            ))
 
     logger.info(
         f"[TS-08] Social crops complete for property {property_id}: "
@@ -149,29 +130,37 @@ def generate_social_crops(
     return social_crops
 
 
-def _call_crop_worker(payload: dict) -> Optional[dict]:
+# ── Internal helpers ──────────────────────────────────────────────────────
+
+def _get_image_bytes(url: str, enhanced_bytes_map: dict[str, bytes]) -> Optional[bytes]:
     """
-    Invoke the Node.js crop worker via subprocess.
-    Passes JSON payload on stdin, reads JSON result from stdout.
+    Return image bytes for a URL.
+    Checks enhanced_bytes_map first (keyed by asset_url_original) to avoid
+    a redundant HTTP download; falls back to fetching the URL directly.
     """
+    # The map is keyed by asset_url_original; the url here is asset_url_enhanced.
+    # Try a direct key hit first (handles cases where original == enhanced URL).
+    if url in enhanced_bytes_map:
+        return enhanced_bytes_map[url]
+
+    # Fall back to an HTTP fetch (enhanced URL is publicly accessible via CDN)
     try:
-        result = subprocess.run(
-            ["node", str(CROP_WORKER_PATH)],
-            input=json.dumps(payload),
-            capture_output=True,
-            text=True,
-            timeout=300,   # 5 min timeout for a full batch
-        )
-        if result.returncode != 0:
-            logger.error(f"Crop worker non-zero exit: {result.stderr[:500]}")
-            return None
-        if not result.stdout.strip():
-            logger.error("Crop worker produced no output")
-            return None
-        return json.loads(result.stdout)
-    except subprocess.TimeoutExpired:
-        logger.error("Crop worker timed out after 5 minutes")
-        return None
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(url, follow_redirects=True)
+            resp.raise_for_status()
+            return resp.content
     except Exception as exc:
-        logger.error(f"Crop worker subprocess error: {exc}")
+        logger.error(f"[TS-08] Failed to download {url}: {exc}")
         return None
+
+
+def _crop_image(image_bytes: bytes, dims: tuple[int, int]) -> bytes:
+    """
+    Centre-crop image to the target dimensions using Pillow ImageOps.fit.
+    Returns JPEG bytes at quality 90.
+    """
+    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    cropped = ImageOps.fit(img, dims, method=Image.LANCZOS, centering=(0.5, 0.5))
+    buf = io.BytesIO()
+    cropped.save(buf, format="JPEG", quality=90, optimize=True)
+    return buf.getvalue()
