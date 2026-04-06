@@ -11,8 +11,9 @@ Pipeline:
   2. Download all photos from their source URLs
   3. Run provenance baseline on originals (Vision API)
   4. Upload originals to R2 (staylio-originals)
-  5. Enhance all photos via Claid.ai (TS-07) — governance enforced
-  6. Upload enhanced photos to R2 (staylio-enhanced)
+  5. Query Supabase for cached enhanced URLs — skip Claid for those
+  6. Enhance uncached photos via Claid.ai (TS-07) — governance enforced
+  7. Upload enhanced photos to R2 (staylio-enhanced)
   7. Run Vision API tagging + scoring on enhanced photos (TS-07b)
   8. Select category winners and hero image
   9. Generate social format crops for category winners (TS-08)
@@ -141,24 +142,55 @@ def agent3_node(state: dict) -> dict:
         assets.append(asset)
 
     # ── Step 4: Claid.ai enhancement (TS-07) ─────────────────────────────
-    logger.info(f"[Agent 3] Enhancing {len(assets)} photos via Claid.ai")
-    original_r2_urls = [a.asset_url_original for a in assets]
-    enhancement_results = enhance_photo_batch_sync(original_r2_urls, property_id)
+    # Check Supabase for previously enhanced photos — skip Claid for those
+    cached_enhancements = _fetch_cached_enhancements(property_id)
+    logger.info(
+        f"[Agent 3] Enhancement cache: {len(cached_enhancements)} previously enhanced "
+        f"out of {len(assets)} assets"
+    )
+
+    uncached_assets = [a for a in assets if a.asset_url_original not in cached_enhancements]
+    uncached_urls   = [a.asset_url_original for a in uncached_assets]
+
+    if uncached_urls:
+        logger.info(f"[Agent 3] Sending {len(uncached_urls)} photos to Claid.ai")
+        claid_results = enhance_photo_batch_sync(uncached_urls, property_id)
+        claid_result_map = dict(zip(uncached_urls, claid_results))
+    else:
+        claid_result_map = {}
 
     # {asset_url_original: enhanced_bytes} — passed to Vision API to avoid R2 URL fetch
     enhanced_bytes_map: dict[str, bytes] = {}
 
-    for asset, (original_url, enhanced_bytes) in zip(assets, enhancement_results):
+    for asset in assets:
+        original_url = asset.asset_url_original
+
+        # Reuse cached enhanced URL — no Claid call, no R2 re-upload
+        if original_url in cached_enhancements:
+            asset.asset_url_enhanced = cached_enhancements[original_url]
+            logger.info(
+                f"[Agent 3] Reusing cached enhanced URL — skipping Claid: {original_url}"
+            )
+            continue
+
+        # Process Claid result for this asset
+        claid_pair = claid_result_map.get(original_url)
+        if claid_pair is None:
+            pkg.processing_errors.append(f"Enhancement failed (no result) for {original_url}")
+            asset.asset_url_enhanced = None
+            continue
+
+        _orig_url, enhanced_bytes = claid_pair
         if not enhanced_bytes:
             pkg.processing_errors.append(f"Enhancement failed for {original_url}")
             asset.asset_url_enhanced = None
             continue
 
-        filename = os.path.basename(asset.asset_url_original.split("?")[0])
+        filename = os.path.basename(original_url.split("?")[0])
         try:
             enhanced_r2_url = upload_photo_enhanced(property_id, enhanced_bytes, filename)
             asset.asset_url_enhanced = enhanced_r2_url
-            enhanced_bytes_map[asset.asset_url_original] = enhanced_bytes
+            enhanced_bytes_map[original_url] = enhanced_bytes
         except Exception as exc:
             pkg.processing_errors.append(f"Enhanced R2 upload failed: {exc}")
             asset.asset_url_enhanced = None
@@ -340,6 +372,32 @@ def _detect_source(url: str) -> str:
     if "getbooked" in url or "r2.cloudflarestorage" in url:
         return "intake_upload"
     return "unknown"
+
+
+def _fetch_cached_enhancements(property_id: str) -> dict[str, str]:
+    """
+    Query Supabase for previously enhanced photos for this property.
+    Returns {asset_url_original: asset_url_enhanced} for records where
+    asset_url_enhanced is not null — used to skip redundant Claid.ai calls.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("media_assets")
+            .select("asset_url_original,asset_url_enhanced")
+            .eq("property_id", property_id)
+            .not_.is_("asset_url_enhanced", "null")
+            .execute()
+        )
+        return {
+            row["asset_url_original"]: row["asset_url_enhanced"]
+            for row in (result.data or [])
+            if row.get("asset_url_original") and row.get("asset_url_enhanced")
+        }
+    except Exception as exc:
+        logger.warning(f"[Agent 3] Could not fetch cached enhancements: {exc} — proceeding without cache")
+        return {}
 
 
 def _save_media_assets(assets: list[MediaAsset]) -> None:
