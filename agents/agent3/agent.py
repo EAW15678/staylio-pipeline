@@ -136,14 +136,17 @@ def agent3_node(state: dict) -> dict:
             source=source_label,
         )
 
-        # Baseline Vision API labels for provenance check
-        asset = tag_original_for_provenance(asset)
+        # Baseline Vision API labels for provenance check (send bytes directly)
+        asset = tag_original_for_provenance(asset, image_bytes=photo_bytes)
         assets.append(asset)
 
     # ── Step 4: Claid.ai enhancement (TS-07) ─────────────────────────────
     logger.info(f"[Agent 3] Enhancing {len(assets)} photos via Claid.ai")
     original_r2_urls = [a.asset_url_original for a in assets]
     enhancement_results = enhance_photo_batch_sync(original_r2_urls, property_id)
+
+    # {asset_url_original: enhanced_bytes} — passed to Vision API to avoid R2 URL fetch
+    enhanced_bytes_map: dict[str, bytes] = {}
 
     for asset, (original_url, enhanced_bytes) in zip(assets, enhancement_results):
         if not enhanced_bytes:
@@ -155,13 +158,16 @@ def agent3_node(state: dict) -> dict:
         try:
             enhanced_r2_url = upload_photo_enhanced(property_id, enhanced_bytes, filename)
             asset.asset_url_enhanced = enhanced_r2_url
+            enhanced_bytes_map[asset.asset_url_original] = enhanced_bytes
         except Exception as exc:
             pkg.processing_errors.append(f"Enhanced R2 upload failed: {exc}")
             asset.asset_url_enhanced = None
 
     # ── Step 5: Vision API tagging, scoring, hero selection (TS-07b) ─────
     logger.info(f"[Agent 3] Running Vision API tagging for {len(assets)} photos")
-    assets, hero_url = tag_and_score_photos(assets, vibe_profile, property_id)
+    assets, hero_url = tag_and_score_photos(
+        assets, vibe_profile, property_id, bytes_map=enhanced_bytes_map
+    )
 
     # Identify category winners
     category_winners = {

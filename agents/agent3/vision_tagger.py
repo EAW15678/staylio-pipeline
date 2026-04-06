@@ -202,6 +202,7 @@ def tag_and_score_photos(
     assets: list[MediaAsset],
     vibe_profile: str,
     property_id: str,
+    bytes_map: Optional[dict[str, bytes]] = None,
 ) -> tuple[list[MediaAsset], Optional[str]]:
     """
     Main Vision API tagging pass.
@@ -217,16 +218,20 @@ def tag_and_score_photos(
       6. Select hero from category winners using vibe priority
       7. Queue category winners for social crops
 
+    bytes_map: {asset_url_original: enhanced_bytes} — pass image bytes directly
+    to Vision API instead of fetching from R2 URLs (which may be private).
+
     Returns:
       (updated_assets_list, hero_photo_url)
     """
     client = _get_vision_client()
+    bmap = bytes_map or {}
 
     for asset in assets:
-        url_to_tag = asset.asset_url_enhanced or asset.asset_url_original
-        if not url_to_tag:
+        image_bytes = bmap.get(asset.asset_url_original)
+        if not image_bytes and not (asset.asset_url_enhanced or asset.asset_url_original):
             continue
-        _tag_single_asset(client, asset, url_to_tag)
+        _tag_single_asset(client, asset, image_bytes)
 
     # Run provenance check for assets that have both original and enhanced tagged
     _run_provenance_checks(assets)
@@ -260,16 +265,20 @@ def tag_and_score_photos(
 
 def tag_original_for_provenance(
     asset: MediaAsset,
+    image_bytes: Optional[bytes] = None,
 ) -> MediaAsset:
     """
     Tag the ORIGINAL (pre-enhancement) version of a photo to
     establish the baseline for provenance consistency checking.
     Called on originals before Claid.ai enhancement begins.
+
+    Pass image_bytes to send content directly to Vision API
+    instead of fetching from R2 (which may be private).
     """
-    if not asset.asset_url_original:
+    if not image_bytes and not asset.asset_url_original:
         return asset
     client = _get_vision_client()
-    labels = _get_labels(client, asset.asset_url_original)
+    labels = _get_labels(client, image_bytes=image_bytes, url=asset.asset_url_original)
     asset.labels_original = labels
     return asset
 
@@ -279,12 +288,22 @@ def tag_original_for_provenance(
 def _tag_single_asset(
     client: vision.ImageAnnotatorClient,
     asset: MediaAsset,
-    url: str,
+    image_bytes: Optional[bytes],
 ) -> None:
-    """Run Vision API on a single photo and populate asset fields."""
+    """Run Vision API on a single photo and populate asset fields.
+
+    Sends image bytes directly (image.content) when available.
+    Falls back to fetching via URL only if bytes are not provided.
+    """
+    url_fallback = asset.asset_url_enhanced or asset.asset_url_original
+    if not image_bytes and not url_fallback:
+        return
     try:
         image = types.Image()
-        image.source.image_uri = url
+        if image_bytes:
+            image.content = image_bytes
+        else:
+            image.source.image_uri = url_fallback
 
         features = [
             types.Feature(type_=vision.Feature.Type.LABEL_DETECTION, max_results=20),
@@ -343,21 +362,30 @@ def _tag_single_asset(
             )
 
     except Exception as exc:
-        logger.error(f"Vision API tagging failed for {url}: {exc}")
+        logger.error(f"Vision API tagging failed: {exc}")
 
 
 def _get_labels(
     client: vision.ImageAnnotatorClient,
-    url: str,
+    image_bytes: Optional[bytes] = None,
+    url: Optional[str] = None,
 ) -> list[str]:
-    """Get label list for a URL — used for provenance baseline."""
+    """Get label list — used for provenance baseline.
+
+    Prefers image_bytes (direct content); falls back to URL fetch.
+    """
     try:
         image = types.Image()
-        image.source.image_uri = url
+        if image_bytes:
+            image.content = image_bytes
+        elif url:
+            image.source.image_uri = url
+        else:
+            return []
         resp = client.label_detection(image=image, max_results=20)
         return [l.description.lower() for l in resp.label_annotations]
     except Exception as exc:
-        logger.warning(f"Vision labels failed for {url}: {exc}")
+        logger.warning(f"Vision labels failed: {exc}")
         return []
 
 
