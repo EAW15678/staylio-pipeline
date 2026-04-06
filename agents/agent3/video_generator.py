@@ -483,6 +483,7 @@ async def _generate_runway_clips(
                         format_label="mp4",
                     )
                     clip_urls.append(r2_url)
+                    await asyncio.sleep(3)
 
             except Exception as exc:
                 try:
