@@ -40,6 +40,7 @@ BUCKET_VIDEO     = "staylio-video"
 # Public CDN base URL for R2 assets (configured in Cloudflare dashboard)
 R2_PUBLIC_BASE = os.environ.get("R2_PUBLIC_BASE", "https://assets.staylio.ai")
 R2_ENHANCED_PUBLIC_URL = os.environ.get("R2_ENHANCED_PUBLIC_URL", R2_PUBLIC_BASE)
+R2_VIDEO_PUBLIC_URL = os.environ.get("R2_VIDEO_PUBLIC_URL", R2_PUBLIC_BASE)
 
 
 def _get_r2_client():
@@ -130,6 +131,8 @@ def public_url(bucket: str, key: str) -> str:
     """Construct the public CDN URL for an R2 asset."""
     if bucket == BUCKET_ENHANCED:
         return f"{R2_ENHANCED_PUBLIC_URL}/{key}"
+    if bucket == BUCKET_VIDEO:
+        return f"{R2_VIDEO_PUBLIC_URL}/{key}"
     return f"{R2_PUBLIC_BASE}/{key}"
 
 
