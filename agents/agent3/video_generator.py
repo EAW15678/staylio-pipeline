@@ -78,16 +78,13 @@ REVIEW_VOICE_POOL: list[str] = [
 # Creatomate template IDs (built in Creatomate dashboard before Agent 3 build)
 CREATOMATE_TEMPLATES: dict[str, dict[VideoFormat, str]] = {
     "vibe": {
-        VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_VIBE_9_16", ""),
-        VideoFormat.SQUARE:    os.environ.get("CREATOMATE_VIBE_1_1", ""),
-        VideoFormat.LANDSCAPE: os.environ.get("CREATOMATE_VIBE_16_9", ""),
+        VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_TEMPLATE_VIBE_MATCH", ""),
     },
     "review": {
-        VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_REVIEW_9_16", ""),
-        VideoFormat.SQUARE:    os.environ.get("CREATOMATE_REVIEW_1_1", ""),
+        VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_TEMPLATE_GUEST_REVIEW", ""),
     },
     "walkthrough": {
-        VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_WALK_9_16", ""),
+        VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_TEMPLATE_WALKTHROUGH", ""),
     },
     "local": {
         VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_LOCAL_9_16", ""),
@@ -545,7 +542,7 @@ async def _assemble_with_creatomate(
     video_assets = []
     async with httpx.AsyncClient(timeout=300) as client:
         for fmt, template_id in template_map.items():
-            if not template_id:
+            if not template_id or "FILL_IN_AFTER_BUILDING_TEMPLATE" in template_id:
                 continue
             try:
                 render_resp = await client.post(
