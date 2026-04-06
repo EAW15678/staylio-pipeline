@@ -79,6 +79,7 @@ REVIEW_VOICE_POOL: list[str] = [
 CREATOMATE_TEMPLATES: dict[str, dict[VideoFormat, str]] = {
     "vibe": {
         VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_TEMPLATE_VIBE_MATCH", ""),
+        VideoFormat.LANDSCAPE: os.environ.get("CREATOMATE_TEMPLATE_VIBE_MATCH_16X9", ""),
     },
     "review": {
         VideoFormat.VERTICAL:  os.environ.get("CREATOMATE_TEMPLATE_GUEST_REVIEW", ""),
