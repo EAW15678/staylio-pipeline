@@ -27,6 +27,7 @@ import asyncio
 from typing import Optional
 
 import httpx
+import runwayml
 
 from agents.agent3.models import (
     VideoAsset,
@@ -43,8 +44,7 @@ logger = logging.getLogger(__name__)
 ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
 ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
 
-RUNWAY_API_KEY      = os.environ.get("RUNWAY_API_KEY", "")
-RUNWAY_API_BASE     = "https://api.dev.runwayml.com/v1"
+RUNWAYML_API_SECRET = os.environ.get("RUNWAYML_API_SECRET", "")
 RUNWAY_MODEL        = "gen4_turbo"
 RUNWAY_CREDITS_PER_SECOND = 5   # Gen-4 Turbo: 5 credits/second
 
@@ -440,50 +440,58 @@ async def _generate_runway_clips(
 ) -> list[str]:
     """
     Generate cinematic motion clips from still photos via Runway ML Gen-4.
+    Uses the official runwayml SDK; wait_for_task_output() handles polling.
+    Caches generated clips in Supabase video_assets — skips Runway on re-run.
     Returns list of R2 URLs for the generated video clips.
     """
-    if not RUNWAY_API_KEY:
-        logger.warning(f"[TS-09] Runway ML not configured for property {property_id}")
+    if not RUNWAYML_API_SECRET:
+        logger.warning(f"[TS-09] Runway ML not configured (RUNWAYML_API_SECRET missing) for property {property_id}")
         return []
 
     clip_urls = []
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with runwayml.AsyncRunwayML(api_key=RUNWAYML_API_SECRET) as runway_client:
         for i, photo_url in enumerate(photo_urls):
+            clip_video_type = f"clip_{video_label}_{i:02d}"
+
+            # Check Supabase cache — skip Runway if this clip was already generated
+            cached_url = _fetch_cached_clip(property_id, clip_video_type)
+            if cached_url:
+                logger.info(f"[TS-09] Reusing cached clip — skipping Runway: {clip_video_type}")
+                clip_urls.append(cached_url)
+                continue
+
             try:
-                # Submit generation task
-                resp = await client.post(
-                    f"{RUNWAY_API_BASE}/image_to_video",
-                    headers={
-                        "Authorization": f"Bearer {RUNWAY_API_KEY}",
-                        "X-Runway-Version": "2024-11-06",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": RUNWAY_MODEL,
-                        "promptImage": photo_url,
-                        "promptText": "Slow cinematic pan, professional real estate video style, smooth motion",
-                        "duration": 5,    # 5-second clips, assembled by Creatomate
-                        "ratio": "1280:720",
-                    },
+                task = await runway_client.image_to_video.create(
+                    model=RUNWAY_MODEL,
+                    prompt_image=photo_url,
+                    prompt_text="Slow cinematic pan, professional real estate video style, smooth motion",
+                    duration=5,    # 5-second clips, assembled by Creatomate
+                    ratio="1280:720",
                 )
-                resp.raise_for_status()
-                task_id = resp.json().get("id")
-                if not task_id:
+
+                # SDK blocks until SUCCEEDED, raises TaskFailedError on failure
+                result = await task.wait_for_task_output(timeout=600)
+
+                output_urls = getattr(result, "output", None) or []
+                if not output_urls:
+                    logger.warning(f"[TS-09] Runway returned no output for clip {i} of {property_id}")
                     continue
 
-                # Poll for completion
-                clip_url = await _poll_runway_task(client, task_id)
-                if clip_url:
-                    # Download and upload to R2
-                    dl = await client.get(clip_url, timeout=60)
-                    r2_url = upload_video(
-                        property_id=property_id,
-                        video_bytes=dl.content,
-                        video_type=f"clip_{video_label}_{i:02d}",
-                        format_label="mp4",
-                    )
-                    clip_urls.append(r2_url)
-                    await asyncio.sleep(3)
+                # Download and upload to R2
+                async with httpx.AsyncClient(timeout=120) as dl_client:
+                    dl = await dl_client.get(output_urls[0])
+                    dl.raise_for_status()
+
+                r2_url = upload_video(
+                    property_id=property_id,
+                    video_bytes=dl.content,
+                    video_type=clip_video_type,
+                    format_label="mp4",
+                )
+
+                # Cache the clip so reruns skip this Runway call
+                _save_clip_to_cache(property_id, clip_video_type, r2_url, i)
+                clip_urls.append(r2_url)
 
             except Exception as exc:
                 try:
@@ -495,34 +503,54 @@ async def _generate_runway_clips(
     return clip_urls
 
 
-async def _poll_runway_task(
-    client: httpx.AsyncClient,
-    task_id: str,
-) -> Optional[str]:
-    """Poll a Runway task until complete. Returns output URL or None."""
-    for _ in range(RUNWAY_MAX_POLLS):
-        await asyncio.sleep(RUNWAY_POLL_INTERVAL)
-        try:
-            resp = await client.get(
-                f"{RUNWAY_API_BASE}/tasks/{task_id}",
-                headers={
-                    "Authorization": f"Bearer {RUNWAY_API_KEY}",
-                    "X-Runway-Version": "2024-11-06",
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            status = data.get("status")
-            if status == "SUCCEEDED":
-                outputs = data.get("output") or []
-                return outputs[0] if outputs else None
-            elif status in ("FAILED", "CANCELLED"):
-                logger.error(f"Runway task {task_id} failed with status: {status}")
-                return None
-        except Exception as exc:
-            logger.warning(f"Runway poll error for task {task_id}: {exc}")
-    logger.error(f"Runway task {task_id} timed out")
-    return None
+def _fetch_cached_clip(property_id: str, clip_video_type: str) -> Optional[str]:
+    """
+    Check Supabase video_assets for a previously generated clip.
+    Returns the R2 URL if found, None otherwise.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("video_assets")
+            .select("r2_url")
+            .eq("property_id", property_id)
+            .eq("video_type", clip_video_type)
+            .not_.is_("r2_url", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return rows[0]["r2_url"] if rows else None
+    except Exception as exc:
+        logger.warning(f"[TS-09] Could not check clip cache for {clip_video_type}: {exc}")
+        return None
+
+
+def _save_clip_to_cache(
+    property_id: str,
+    clip_video_type: str,
+    r2_url: str,
+    clip_index: int,
+) -> None:
+    """Save a generated clip to Supabase video_assets for future cache hits."""
+    try:
+        from core.supabase_store import get_supabase
+        get_supabase().table("video_assets").upsert(
+            {
+                "property_id": property_id,
+                "video_type": clip_video_type,
+                "format": "mp4",
+                "r2_url": r2_url,
+                "duration_seconds": 5.0,
+                "has_narration": False,
+                "queued_for_social": False,
+                "script_text": f"clip_{clip_index}",
+            },
+            on_conflict="property_id,video_type,format",
+        ).execute()
+    except Exception as exc:
+        logger.warning(f"[TS-09] Could not cache clip {clip_video_type}: {exc}")
 
 
 # ── Creatomate Assembly ────────────────────────────────────────────────────

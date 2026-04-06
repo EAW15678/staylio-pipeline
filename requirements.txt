@@ -34,7 +34,7 @@ google-cloud-vision>=3.7.0
 google-auth>=2.29.0
 
 # ── Video Generation (Agent 3) ───────────────────────────
-runwayml>=0.1.0
+runwayml>=4.10.0
 
 # ── Analytics (Agent 7) ──────────────────────────────────
 google-analytics-data>=0.18.0
