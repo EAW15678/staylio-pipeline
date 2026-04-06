@@ -201,6 +201,7 @@ class VisualMediaPackage:
             "property_id": self.property_id,
             "hero_photo_url": self.hero_photo_url,
             "hero_category": self.hero_category,
+            "media_assets": [a.to_db_record() for a in self.media_assets],
             "videos_queued": self.videos_queued,
             "review_videos_pending": self.review_videos_pending,
             "category_winners": self.category_winners,
