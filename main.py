@@ -14,7 +14,8 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, EmailStr
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -95,6 +96,18 @@ class PublicCtaClickRequest(BaseModel):
     cta_location: str | None = None
     destination_url: str | None = None
     clicked_at: datetime | None = None
+
+
+class PublicLeadRequest(BaseModel):
+    visitor_session_id: str
+    primary_email: EmailStr
+    cta_click_id: str | None = None
+    full_name: str | None = None
+    phone: str | None = None
+    requested_dates: dict | None = None
+    party_size: int | None = None
+    trip_intent: str | None = None
+    consent_status: str | None = None
 
 
 class IntakeSubmissionRequest(BaseModel):
@@ -527,6 +540,127 @@ async def public_cta_click(request: PublicCtaClickRequest):
             request.cta_type,
         )
         return {"status": "accepted", "cta_click_id": None}
+
+
+ALLOWED_CONSENT_STATUSES = {
+    "unknown", "marketing_opt_in", "transactional_only", "opted_out"
+}
+
+@app.post("/public/leads")
+async def public_lead_capture(request: PublicLeadRequest):
+    """
+    Capture a first-party lead from a property page.
+
+    Derives property_id and account_id from the session record.
+    Never trusts caller-supplied context.
+    Verifies cta_click_id belongs to the same session/property before linking.
+    Creates attribution_links row on successful CTA linkage.
+    Returns 201 on success, 202 on fail-open.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        import uuid
+
+        if request.consent_status and request.consent_status not in ALLOWED_CONSENT_STATUSES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"consent_status '{request.consent_status}' is not allowed.",
+            )
+
+        supabase = get_supabase()
+
+        session = (
+            supabase
+            .table("visitor_sessions")
+            .select("id, property_id, account_id")
+            .eq("id", request.visitor_session_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not session.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"visitor_session_id '{request.visitor_session_id}' not found.",
+            )
+
+        row = session.data[0]
+        lead_id = str(uuid.uuid4())
+
+        supabase.table("leads").insert({
+            "id": lead_id,
+            "account_id": row["account_id"],
+            "property_id": row["property_id"],
+            "visitor_session_id": row["id"],
+            "primary_email": str(request.primary_email),
+            "full_name": request.full_name,
+            "phone": request.phone,
+            "lead_source": "property_page",
+            "consent_status": request.consent_status or "unknown",
+            "requested_dates": request.requested_dates,
+            "party_size": request.party_size,
+            "trip_intent": request.trip_intent,
+        }).execute()
+
+        if request.cta_click_id:
+            click_check = (
+                supabase
+                .table("cta_clicks")
+                .select("id")
+                .eq("id", request.cta_click_id)
+                .eq("visitor_session_id", row["id"])
+                .eq("property_id", row["property_id"])
+                .limit(1)
+                .execute()
+            )
+            if click_check.data:
+                supabase.table("cta_clicks").update(
+                    {"lead_id": lead_id}
+                ).eq("id", request.cta_click_id).execute()
+
+                supabase.table("attribution_links").insert({
+                    "property_id": row["property_id"],
+                    "account_id": row["account_id"],
+                    "visitor_session_id": row["id"],
+                    "lead_id": lead_id,
+                    "cta_click_id": request.cta_click_id,
+                    "evidence_type": "cta_match",
+                    "confidence_level": "medium",
+                }).execute()
+            else:
+                logger.warning(
+                    "[leads] cta_click_id=%s does not belong to session=%s — skipping linkage",
+                    request.cta_click_id,
+                    request.visitor_session_id,
+                )
+
+        supabase.table("visitor_sessions").update(
+            {"lead_id": lead_id}
+        ).eq("id", row["id"]).execute()
+
+        logger.info(
+            "[leads] captured — session=%s property=%s lead_id=%s",
+            request.visitor_session_id,
+            row["property_id"],
+            lead_id,
+        )
+        return JSONResponse(
+            status_code=201,
+            content={"status": "captured", "lead_id": lead_id},
+        )
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "[leads] capture failed — session=%s email=%s",
+            request.visitor_session_id,
+            str(request.primary_email),
+        )
+        return JSONResponse(
+            status_code=202,
+            content={"status": "accepted", "lead_id": None},
+        )
 
 
 @app.get("/status/{property_id}")
