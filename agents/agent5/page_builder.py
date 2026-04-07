@@ -48,6 +48,7 @@ def build_landing_page_html(
     page_url: str,
     slug: str,
     calendar_cache_endpoint: Optional[str] = None,
+    api_base_url: str = "",
 ) -> str:
     """
     Assemble the complete landing page HTML string.
@@ -162,6 +163,15 @@ def build_landing_page_html(
     gtag('set', {{'property_id': '{_esc(kb.get("property_id",""))}'}});
   </script>
 
+  <!-- Staylio Tracking Config -->
+  <script>
+    window.STAYLIO_CONFIG = {{
+      apiBaseUrl: "{_esc(api_base_url)}",
+      subdomain: "{_esc(slug)}",
+      propertyId: "{_esc(kb.get('property_id', ''))}"
+    }};
+  </script>
+
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
@@ -255,6 +265,112 @@ def build_landing_page_html(
       <p class="powered-by">Marketing by <a href="https://staylio.ai">Staylio</a></p>
     </div>
   </footer>
+
+  <script>
+    (function() {{
+      var cfg = window.STAYLIO_CONFIG || {{}};
+      var apiBase = cfg.apiBaseUrl || "";
+      var subdomain = cfg.subdomain || "";
+
+      if (!apiBase || !subdomain) return;
+
+      var SESSION_KEY = "staylio_sk_" + subdomain;
+      var sessionKey = sessionStorage.getItem(SESSION_KEY);
+      if (!sessionKey) {{
+        sessionKey = "sk_" + Math.random().toString(36).slice(2) + Date.now();
+        sessionStorage.setItem(SESSION_KEY, sessionKey);
+      }}
+
+      var visitorKey = localStorage.getItem("staylio_vk");
+      if (!visitorKey) {{
+        visitorKey = "vk_" + Math.random().toString(36).slice(2) + Date.now();
+        localStorage.setItem("staylio_vk", visitorKey);
+      }}
+
+      var sessionId = null;
+      var params = new URLSearchParams(window.location.search);
+
+      fetch(apiBase + "/public/sessions/start", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{
+          subdomain: subdomain,
+          session_key: sessionKey,
+          visitor_key: visitorKey,
+          landing_url: window.location.href,
+          referrer_url: document.referrer || null,
+          device_type: /Mobi|Android/i.test(navigator.userAgent) ? "mobile" : "desktop",
+          utm_source: params.get("utm_source"),
+          utm_medium: params.get("utm_medium"),
+          utm_campaign: params.get("utm_campaign"),
+          utm_term: params.get("utm_term"),
+          utm_content: params.get("utm_content")
+        }})
+      }})
+      .then(function(r) {{
+        if (!r.ok) return null;
+        return r.json().catch(function() {{ return null; }});
+      }})
+      .then(function(data) {{
+        if (!data || !data.visitor_session_id) return;
+
+        sessionId = data.visitor_session_id;
+
+        fetch(apiBase + "/public/events", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{
+            visitor_session_id: sessionId,
+            event_name: "page_viewed",
+            event_payload: {{
+              url: window.location.href,
+              referrer: document.referrer || null
+            }},
+            occurred_at: new Date().toISOString()
+          }})
+        }}).catch(function() {{}});
+      }})
+      .catch(function() {{}});
+
+      document.addEventListener("click", function(e) {{
+        var link = e.target.closest("a[data-cta-type]");
+        if (!link || !sessionId) return;
+
+        var ctaType = link.dataset.ctaType;
+        var destination = link.href;
+        if (!ctaType || !destination) return;
+
+        e.preventDefault();
+
+        var redirected = false;
+        function go() {{
+          if (redirected) return;
+          redirected = true;
+          window.location.assign(destination);
+        }}
+
+        var timeout = setTimeout(go, 400);
+
+        fetch(apiBase + "/public/cta-clicks", {{
+          method: "POST",
+          headers: {{"Content-Type": "application/json"}},
+          body: JSON.stringify({{
+            visitor_session_id: sessionId,
+            cta_type: ctaType,
+            cta_location: link.dataset.ctaLocation || null,
+            destination_url: destination,
+            clicked_at: new Date().toISOString()
+          }})
+        }})
+        .catch(function() {{}})
+        .finally(function() {{
+          clearTimeout(timeout);
+          go();
+        }});
+      }});
+
+    }})();
+  </script>
 
   <!-- Calendar widget JS -->
   <script>

@@ -102,6 +102,7 @@ def agent5_node(state: dict) -> dict:
         page_url=page_url,
         slug=slug,
         calendar_cache_endpoint=calendar_config.cache_endpoint,
+        api_base_url=os.environ.get("PIPELINE_API_URL", "https://staylio-pipeline-production.up.railway.app"),
     )
 
     if not html or len(html) < 1000:
