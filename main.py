@@ -42,7 +42,8 @@ app.add_middleware(
     allow_origins=[
         "https://staylio.ai",
         "https://intake.staylio.ai",
-        "null",                    # covers file:// origin during local testing
+        "https://vista-azule.staylio.ai",
+        "null",
         "http://localhost:8080",
         "http://localhost:3000",
     ],
