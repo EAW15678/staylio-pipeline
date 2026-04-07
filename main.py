@@ -82,6 +82,13 @@ class SessionStartResponse(BaseModel):
     session_status: str  # "created" | "resumed"
 
 
+class PublicEventRequest(BaseModel):
+    visitor_session_id: str
+    event_name: str
+    event_payload: dict | None = None
+    occurred_at: datetime | None = None
+
+
 class IntakeSubmissionRequest(BaseModel):
     """
     Full intake portal submission — received from the browser portal.
@@ -348,6 +355,90 @@ async def session_start(request: SessionStartRequest):
     except Exception as exc:
         logger.error(f"Session start failed: {exc}")
         raise HTTPException(status_code=500, detail="Session start failed.")
+
+
+ALLOWED_EVENT_NAMES = {
+    "page_viewed",
+    "scroll_depth_reached",
+    "gallery_opened",
+    "video_played",
+    "video_completed",
+    "faq_expanded",
+    "map_interacted",
+    "owner_story_expanded",
+}
+
+@app.post("/public/events", status_code=202)
+async def public_event(request: PublicEventRequest):
+    """
+    Record a page engagement event for a visitor session.
+
+    Derives property_id and account_id from the session record.
+    Never trusts caller-supplied context.
+    Event name must be in the allowlist.
+    Fails open on non-critical errors — tracking must never block the guest.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        from datetime import timezone
+
+        if request.event_name not in ALLOWED_EVENT_NAMES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"event_name '{request.event_name}' is not allowed.",
+            )
+
+        supabase = get_supabase()
+
+        session = (
+            supabase
+            .table("visitor_sessions")
+            .select("id, property_id, account_id")
+            .eq("id", request.visitor_session_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not session.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"visitor_session_id '{request.visitor_session_id}' not found.",
+            )
+
+        row = session.data[0]
+        occurred_at = (
+            request.occurred_at.astimezone(timezone.utc).isoformat()
+            if request.occurred_at
+            else datetime.now(timezone.utc).isoformat()
+        )
+
+        supabase.table("page_events").insert({
+            "property_id": row["property_id"],
+            "account_id": row["account_id"],
+            "visitor_session_id": row["id"],
+            "event_name": request.event_name,
+            "event_payload": request.event_payload,
+            "occurred_at": occurred_at,
+        }).execute()
+
+        logger.info(
+            f"[events] {request.event_name} recorded — "
+            f"session={request.visitor_session_id} "
+            f"property={row['property_id']}"
+        )
+        return {"status": "accepted"}
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            f"[events] write failed — "
+            f"session={request.visitor_session_id} "
+            f"event={request.event_name} "
+            f"error={exc}",
+            exc_info=True,
+        )
+        return {"status": "accepted"}
 
 
 @app.get("/status/{property_id}")
