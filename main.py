@@ -89,6 +89,14 @@ class PublicEventRequest(BaseModel):
     occurred_at: datetime | None = None
 
 
+class PublicCtaClickRequest(BaseModel):
+    visitor_session_id: str
+    cta_type: str
+    cta_location: str | None = None
+    destination_url: str | None = None
+    clicked_at: datetime | None = None
+
+
 class IntakeSubmissionRequest(BaseModel):
     """
     Full intake portal submission — received from the browser portal.
@@ -439,6 +447,86 @@ async def public_event(request: PublicEventRequest):
             exc_info=True,
         )
         return {"status": "accepted"}
+
+
+ALLOWED_CTA_TYPES = {"book_now", "check_availability", "save_property", "get_alerts"}
+
+@app.post("/public/cta-clicks", status_code=202)
+async def public_cta_click(request: PublicCtaClickRequest):
+    """
+    Record a CTA click before redirecting the guest.
+
+    Derives property_id and account_id from the session record.
+    Never trusts caller-supplied context.
+    Returns cta_click_id so lead capture can link back to this click.
+    Fails open — must never delay or block the booking redirect.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        from datetime import timezone
+        import uuid
+
+        if request.cta_type not in ALLOWED_CTA_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"cta_type '{request.cta_type}' is not allowed.",
+            )
+
+        supabase = get_supabase()
+
+        session = (
+            supabase
+            .table("visitor_sessions")
+            .select("id, property_id, account_id")
+            .eq("id", request.visitor_session_id)
+            .limit(1)
+            .execute()
+        )
+
+        if not session.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"visitor_session_id '{request.visitor_session_id}' not found.",
+            )
+
+        row = session.data[0]
+        clicked_at = (
+            request.clicked_at.astimezone(timezone.utc).isoformat()
+            if request.clicked_at
+            else datetime.now(timezone.utc).isoformat()
+        )
+        click_id = str(uuid.uuid4())
+
+        supabase.table("cta_clicks").insert({
+            "id": click_id,
+            "property_id": row["property_id"],
+            "account_id": row["account_id"],
+            "visitor_session_id": row["id"],
+            "cta_type": request.cta_type,
+            "cta_location": request.cta_location,
+            "destination_url": request.destination_url,
+            "clicked_at": clicked_at,
+            "redirected": True,
+        }).execute()
+
+        logger.info(
+            "[cta-clicks] %s recorded — session=%s property=%s click_id=%s",
+            request.cta_type,
+            request.visitor_session_id,
+            row["property_id"],
+            click_id,
+        )
+        return {"status": "accepted", "cta_click_id": click_id}
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "[cta-clicks] write failed — session=%s cta_type=%s",
+            request.visitor_session_id,
+            request.cta_type,
+        )
+        return {"status": "accepted", "cta_click_id": None}
 
 
 @app.get("/status/{property_id}")
