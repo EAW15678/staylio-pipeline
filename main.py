@@ -263,7 +263,7 @@ async def run_pipeline(request: PipelineRunRequest, background_tasks: Background
             .table("properties") \
             .select("id, account_id, name") \
             .eq("id", request.property_id) \
-            .single() \
+            .limit(1) \
             .execute()
 
         if not result.data:
@@ -272,7 +272,7 @@ async def run_pipeline(request: PipelineRunRequest, background_tasks: Background
                 detail=f"property_id '{request.property_id}' not found."
             )
 
-        account_id = result.data["account_id"]
+        account_id = result.data[0]["account_id"]
 
         background_tasks.add_task(
             execute_pipeline,
