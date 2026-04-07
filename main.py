@@ -257,22 +257,9 @@ async def run_pipeline(request: PipelineRunRequest, background_tasks: Background
     """
     try:
         from pipeline.graph import run_intake_pipeline as execute_pipeline
-        from core.supabase_store import get_supabase
-
-        result = get_supabase() \
-            .table("properties") \
-            .select("id, account_id, name") \
-            .eq("id", request.property_id) \
-            .limit(1) \
-            .execute()
-
-        if not result.data:
-            raise HTTPException(
-                status_code=404,
-                detail=f"property_id '{request.property_id}' not found."
-            )
-
-        account_id = result.data[0]["account_id"]
+        from core.property_context import resolve_property_context
+        ctx = resolve_property_context(property_id=request.property_id)
+        account_id = ctx.account_id
 
         background_tasks.add_task(
             execute_pipeline,
