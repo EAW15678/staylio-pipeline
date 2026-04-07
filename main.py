@@ -54,7 +54,7 @@ app.add_middleware(
 # ── Request models ─────────────────────────────────────────────────────────
 class PipelineRunRequest(BaseModel):
     property_id: str
-    client_id: str
+    client_id: str | None = None
     listing_urls: list[str] = []
     intake_data: dict = {}
 
@@ -257,11 +257,27 @@ async def run_pipeline(request: PipelineRunRequest, background_tasks: Background
     """
     try:
         from pipeline.graph import run_intake_pipeline as execute_pipeline
+        from core.supabase_store import get_supabase
+
+        result = get_supabase() \
+            .table("properties") \
+            .select("id, account_id, name") \
+            .eq("id", request.property_id) \
+            .single() \
+            .execute()
+
+        if not result.data:
+            raise HTTPException(
+                status_code=404,
+                detail=f"property_id '{request.property_id}' not found."
+            )
+
+        account_id = result.data["account_id"]
 
         background_tasks.add_task(
             execute_pipeline,
             property_id=request.property_id,
-            client_id=request.client_id,
+            client_id=account_id,
         )
 
         logger.info(f"Pipeline triggered for property {request.property_id}")
