@@ -59,6 +59,29 @@ class PipelineRunRequest(BaseModel):
     intake_data: dict = {}
 
 
+class SessionStartRequest(BaseModel):
+    subdomain: str | None = None
+    property_id: str | None = None
+    session_key: str
+    visitor_key: str | None = None
+    landing_url: str | None = None
+    referrer_url: str | None = None
+    device_type: str | None = None
+    utm_source: str | None = None
+    utm_medium: str | None = None
+    utm_campaign: str | None = None
+    utm_term: str | None = None
+    utm_content: str | None = None
+
+
+class SessionStartResponse(BaseModel):
+    visitor_session_id: str
+    property_id: str
+    account_id: str
+    started_at: str
+    session_status: str  # "created" | "resumed"
+
+
 class IntakeSubmissionRequest(BaseModel):
     """
     Full intake portal submission — received from the browser portal.
@@ -277,6 +300,54 @@ async def run_pipeline(request: PipelineRunRequest, background_tasks: Background
     except Exception as exc:
         logger.error(f"Pipeline trigger failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/public/sessions/start", response_model=SessionStartResponse)
+async def session_start(request: SessionStartRequest):
+    """
+    Start or resume a visitor session on a property page.
+
+    Resolves property context from subdomain (primary) or property_id (fallback).
+    Never trusts caller-supplied account_id — always derives from DB.
+    Returns visitor_session_id and session_status (created | resumed).
+    """
+    try:
+        from core.property_context import resolve_property_context
+        from core.session_store import create_or_resume_session
+
+        ctx = resolve_property_context(
+            property_id=request.property_id,
+            subdomain=request.subdomain,
+        )
+
+        result = create_or_resume_session(
+            property_id=ctx.property_id,
+            account_id=ctx.account_id,
+            session_key=request.session_key,
+            visitor_key=request.visitor_key,
+            landing_url=request.landing_url,
+            referrer_url=request.referrer_url,
+            device_type=request.device_type,
+            utm_source=request.utm_source,
+            utm_medium=request.utm_medium,
+            utm_campaign=request.utm_campaign,
+            utm_term=request.utm_term,
+            utm_content=request.utm_content,
+        )
+
+        return SessionStartResponse(
+            visitor_session_id=result.visitor_session_id,
+            property_id=result.property_id,
+            account_id=result.account_id,
+            started_at=result.started_at,
+            session_status=result.session_status,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Session start failed: {exc}")
+        raise HTTPException(status_code=500, detail="Session start failed.")
 
 
 @app.get("/status/{property_id}")
