@@ -197,7 +197,7 @@ def build_landing_page_html(
         {"<span>" + str(bathrooms) + " Baths</span>" if bathrooms else ""}
         {"<span>Sleeps " + str(max_occupancy) + "</span>" if max_occupancy else ""}
       </div>
-      <a href="{_esc(book_url_utm)}" class="staylio-cta-btn cta-primary" target="_blank" rel="noopener">
+      <a href="{_esc(book_url_utm)}" class="staylio-cta-btn cta-primary" target="_blank" rel="noopener" data-cta-type="check_availability" data-cta-location="hero">
         Check Availability
       </a>
     </div>
@@ -224,7 +224,7 @@ def build_landing_page_html(
       <h2>Check Availability</h2>
       <div id="calendar-widget" data-cache-url="{_esc(calendar_cache_endpoint or '')}"></div>
       <div class="calendar-cta">
-        <a href="{_esc(book_url_utm)}" class="staylio-cta-btn" target="_blank" rel="noopener">
+        <a href="{_esc(book_url_utm)}" class="staylio-cta-btn" target="_blank" rel="noopener" data-cta-type="book_now" data-cta-location="calendar">
           Book Direct — No OTA Fees
         </a>
       </div>
@@ -254,7 +254,7 @@ def build_landing_page_html(
     <div class="container">
       <h2>Ready to Book?</h2>
       <p>Book direct and skip the OTA fees.</p>
-      <a href="{_esc(book_url_utm)}" class="staylio-cta-btn cta-large" target="_blank" rel="noopener">
+      <a href="{_esc(book_url_utm)}" class="staylio-cta-btn cta-large" target="_blank" rel="noopener" data-cta-type="book_now" data-cta-location="footer">
         Book Direct Now
       </a>
     </div>
