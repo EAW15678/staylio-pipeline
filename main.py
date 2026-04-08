@@ -8,17 +8,19 @@ import logging
 import os
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+PORTAL_API_SECRET = os.environ.get("PORTAL_API_SECRET", "")
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────
@@ -109,6 +111,18 @@ class PublicLeadRequest(BaseModel):
     party_size: int | None = None
     trip_intent: str | None = None
     consent_status: str | None = None
+
+
+class BookingReportRequest(BaseModel):
+    property_id: str
+    booking_value: float
+    check_in_date: date
+    check_out_date: date
+    currency: str | None = None
+    booking_date: date | None = None
+    notes: str | None = None
+    visitor_session_id: str | None = None
+    lead_id: str | None = None
 
 
 class IntakeSubmissionRequest(BaseModel):
@@ -662,6 +676,117 @@ async def public_lead_capture(request: PublicLeadRequest):
             status_code=202,
             content={"status": "accepted", "lead_id": None},
         )
+
+
+@app.post("/portal/bookings/report", status_code=201)
+async def report_booking(
+    request: BookingReportRequest,
+    x_portal_secret: str | None = Header(default=None),
+):
+    """
+    Manually report a direct booking for a property.
+
+    Writes to booking_reports (human input layer) and syncs a
+    normalized row into bookings (system layer).
+    Optionally creates an attribution_links row if session or lead provided.
+
+    account_id is always derived from the property record — never trusted from caller.
+    Property must belong to an account the caller has access to.
+    """
+    try:
+        if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized.")
+
+        from core.supabase_store import get_supabase
+        from core.property_context import resolve_property_context
+        import uuid
+
+        if request.booking_value <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="booking_value must be greater than 0.",
+            )
+
+        if request.check_out_date <= request.check_in_date:
+            raise HTTPException(
+                status_code=400,
+                detail="check_out_date must be after check_in_date.",
+            )
+
+        # Resolve and validate property — derives account_id from DB
+        ctx = resolve_property_context(property_id=request.property_id)
+
+        supabase = get_supabase()
+
+        # Step 1 — Write to booking_reports (human input layer)
+        report_id = str(uuid.uuid4())
+        supabase.table("booking_reports").insert({
+            "id": report_id,
+            "account_id": ctx.account_id,
+            "property_id": ctx.property_id,
+            "report_source": "operator_entry",
+            "booking_date": str(request.booking_date) if request.booking_date else None,
+            "check_in_date": request.check_in_date.isoformat(),
+            "check_out_date": request.check_out_date.isoformat(),
+            "booking_value": request.booking_value,
+            "currency": request.currency or "USD",
+            "notes": request.notes,
+            "reported_at": datetime.now(timezone.utc).isoformat(),
+        }).execute()
+
+        # Step 2 — Sync normalized row into bookings (system layer)
+        booking_id = str(uuid.uuid4())
+        supabase.table("bookings").insert({
+            "id": booking_id,
+            "account_id": ctx.account_id,
+            "property_id": ctx.property_id,
+            "source_type": "reported",
+            "source_system": "pmc_manual",
+            "booking_status": "confirmed",
+            "booking_value": request.booking_value,
+            "currency": request.currency or "USD",
+            "check_in_date": request.check_in_date.isoformat(),
+            "check_out_date": request.check_out_date.isoformat(),
+            "booking_created_at": str(request.booking_date) if request.booking_date else None,
+            "attribution_state": "reported",
+            "source_confidence": "low",
+        }).execute()
+
+        # Step 3 — Optional attribution linkage
+        if request.visitor_session_id or request.lead_id:
+            supabase.table("attribution_links").insert({
+                "property_id": ctx.property_id,
+                "account_id": ctx.account_id,
+                "visitor_session_id": request.visitor_session_id,
+                "lead_id": request.lead_id,
+                "booking_id": booking_id,
+                "evidence_type": "reported_match",
+                "confidence_level": "low",
+            }).execute()
+
+        logger.info(
+            "[bookings] reported — property=%s booking_id=%s value=%s",
+            ctx.property_id,
+            booking_id,
+            request.booking_value,
+        )
+        return {
+            "status": "reported",
+            "booking_id": booking_id,
+            "booking_report_id": report_id,
+            "account_id": ctx.account_id,
+            "property_id": ctx.property_id,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "[bookings] report failed — property=%s value=%s",
+            request.property_id,
+            request.booking_value,
+        )
+        raise HTTPException(status_code=500, detail="Booking report failed.")
 
 
 @app.get("/status/{property_id}")
