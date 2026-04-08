@@ -837,21 +837,21 @@ async def dashboard_summary(
             .select("id", count="exact") \
             .eq("account_id", account_id) \
             .gte("first_seen_at", period_start.isoformat()) \
-            .lte("first_seen_at", period_end.isoformat()) \
+            .lte("first_seen_at", f"{period_end.isoformat()}T23:59:59") \
             .execute()
 
         clicks = supabase.table("cta_clicks") \
             .select("id", count="exact") \
             .eq("account_id", account_id) \
             .gte("clicked_at", period_start.isoformat()) \
-            .lte("clicked_at", period_end.isoformat()) \
+            .lte("clicked_at", f"{period_end.isoformat()}T23:59:59") \
             .execute()
 
         leads = supabase.table("leads") \
             .select("id", count="exact") \
             .eq("account_id", account_id) \
             .gte("created_at", period_start.isoformat()) \
-            .lte("created_at", period_end.isoformat()) \
+            .lte("created_at", f"{period_end.isoformat()}T23:59:59") \
             .execute()
 
         bookings_result = supabase.table("bookings") \
@@ -859,7 +859,7 @@ async def dashboard_summary(
             .eq("account_id", account_id) \
             .eq("source_type", "reported") \
             .gte("created_at", period_start.isoformat()) \
-            .lte("created_at", period_end.isoformat()) \
+            .lte("created_at", f"{period_end.isoformat()}T23:59:59") \
             .execute()
 
         sessions_count = sessions.count or 0
@@ -965,21 +965,21 @@ async def dashboard_properties(
                 .select("id", count="exact") \
                 .eq("property_id", pid) \
                 .gte("first_seen_at", period_start.isoformat()) \
-                .lte("first_seen_at", period_end.isoformat()) \
+                .lte("first_seen_at", f"{period_end.isoformat()}T23:59:59") \
                 .execute()
 
             c = supabase.table("cta_clicks") \
                 .select("id", count="exact") \
                 .eq("property_id", pid) \
                 .gte("clicked_at", period_start.isoformat()) \
-                .lte("clicked_at", period_end.isoformat()) \
+                .lte("clicked_at", f"{period_end.isoformat()}T23:59:59") \
                 .execute()
 
             l = supabase.table("leads") \
                 .select("id", count="exact") \
                 .eq("property_id", pid) \
                 .gte("created_at", period_start.isoformat()) \
-                .lte("created_at", period_end.isoformat()) \
+                .lte("created_at", f"{period_end.isoformat()}T23:59:59") \
                 .execute()
 
             b = supabase.table("bookings") \
@@ -987,7 +987,7 @@ async def dashboard_properties(
                 .eq("property_id", pid) \
                 .eq("source_type", "reported") \
                 .gte("created_at", period_start.isoformat()) \
-                .lte("created_at", period_end.isoformat()) \
+                .lte("created_at", f"{period_end.isoformat()}T23:59:59") \
                 .execute()
 
             bookings_data = b.data or []
