@@ -21,6 +21,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 PORTAL_API_SECRET = os.environ.get("PORTAL_API_SECRET", "")
+DEFAULT_PERIOD_DAYS = 30
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────
@@ -787,6 +788,241 @@ async def report_booking(
             request.booking_value,
         )
         raise HTTPException(status_code=500, detail="Booking report failed.")
+
+
+@app.get("/portal/dashboard/summary")
+async def dashboard_summary(
+    account_id: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    x_portal_secret: str | None = Header(default=None),
+):
+    """
+    Account-level summary metrics for the dashboard.
+    Returns sessions, clicks, leads, bookings, revenue,
+    estimated savings, funnel, and conversion rates.
+    Defaults to last 30 days if no date range provided.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        from datetime import date, timedelta
+
+        if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized.")
+
+        if end_date:
+            period_end = date.fromisoformat(end_date)
+        else:
+            period_end = date.today()
+
+        if start_date:
+            period_start = date.fromisoformat(start_date)
+        else:
+            period_start = period_end - timedelta(days=DEFAULT_PERIOD_DAYS)
+
+        supabase = get_supabase()
+
+        # Validate account exists
+        account_check = (
+            supabase.table("accounts")
+            .select("id")
+            .eq("id", account_id)
+            .limit(1)
+            .execute()
+        )
+        if not account_check.data:
+            raise HTTPException(status_code=404, detail=f"Account not found: '{account_id}'.")
+
+        sessions = supabase.table("visitor_sessions") \
+            .select("id", count="exact") \
+            .eq("account_id", account_id) \
+            .gte("first_seen_at", period_start.isoformat()) \
+            .lte("first_seen_at", period_end.isoformat()) \
+            .execute()
+
+        clicks = supabase.table("cta_clicks") \
+            .select("id", count="exact") \
+            .eq("account_id", account_id) \
+            .gte("clicked_at", period_start.isoformat()) \
+            .lte("clicked_at", period_end.isoformat()) \
+            .execute()
+
+        leads = supabase.table("leads") \
+            .select("id", count="exact") \
+            .eq("account_id", account_id) \
+            .gte("created_at", period_start.isoformat()) \
+            .lte("created_at", period_end.isoformat()) \
+            .execute()
+
+        bookings_result = supabase.table("bookings") \
+            .select("id, booking_value") \
+            .eq("account_id", account_id) \
+            .eq("source_type", "reported") \
+            .gte("created_at", period_start.isoformat()) \
+            .lte("created_at", period_end.isoformat()) \
+            .execute()
+
+        sessions_count = sessions.count or 0
+        clicks_count = clicks.count or 0
+        leads_count = leads.count or 0
+        bookings_data = bookings_result.data or []
+        bookings_count = len(bookings_data)
+        revenue = sum(float(b["booking_value"] or 0) for b in bookings_data)
+        estimated_savings = round(revenue * 0.155, 2)
+        has_sufficient_data = sessions_count >= 10
+
+        logger.info(
+            "[dashboard] summary — account=%s period=%s to %s",
+            account_id, period_start, period_end,
+        )
+        return {
+            "account_id": account_id,
+            "period": {
+                "start_date": period_start.isoformat(),
+                "end_date": period_end.isoformat(),
+            },
+            "totals": {
+                "sessions": sessions_count,
+                "cta_clicks": clicks_count,
+                "leads": leads_count,
+                "bookings": bookings_count,
+                "revenue": revenue,
+                "estimated_savings": estimated_savings,
+            },
+            "funnel": {
+                "sessions": sessions_count,
+                "cta_clicks": clicks_count,
+                "leads": leads_count,
+                "bookings": bookings_count,
+            },
+            "conversion_rates": {
+                "session_to_click": round(clicks_count / sessions_count, 3) if sessions_count >= 10 else None,
+                "click_to_booking": round(bookings_count / clicks_count, 3) if clicks_count >= 10 else None,
+                "has_sufficient_data": has_sufficient_data,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("[dashboard] summary failed — account=%s", account_id)
+        raise HTTPException(status_code=500, detail="Dashboard summary failed.")
+
+
+@app.get("/portal/dashboard/properties")
+async def dashboard_properties(
+    account_id: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    x_portal_secret: str | None = Header(default=None),
+):
+    """
+    Per-property breakdown of sessions, clicks, leads,
+    bookings, and revenue for a given account.
+    Defaults to last 30 days if no date range provided.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        from datetime import date, timedelta
+
+        if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+            raise HTTPException(status_code=401, detail="Unauthorized.")
+
+        if end_date:
+            period_end = date.fromisoformat(end_date)
+        else:
+            period_end = date.today()
+
+        if start_date:
+            period_start = date.fromisoformat(start_date)
+        else:
+            period_start = period_end - timedelta(days=DEFAULT_PERIOD_DAYS)
+
+        supabase = get_supabase()
+
+        # Validate account exists
+        account_check = (
+            supabase.table("accounts")
+            .select("id")
+            .eq("id", account_id)
+            .limit(1)
+            .execute()
+        )
+        if not account_check.data:
+            raise HTTPException(status_code=404, detail=f"Account not found: '{account_id}'.")
+
+        properties = supabase.table("properties") \
+            .select("id, name, subdomain") \
+            .eq("account_id", account_id) \
+            .in_("status", ["draft", "onboarding", "active"]) \
+            .execute()
+
+        results = []
+        for prop in (properties.data or []):
+            pid = prop["id"]
+
+            s = supabase.table("visitor_sessions") \
+                .select("id", count="exact") \
+                .eq("property_id", pid) \
+                .gte("first_seen_at", period_start.isoformat()) \
+                .lte("first_seen_at", period_end.isoformat()) \
+                .execute()
+
+            c = supabase.table("cta_clicks") \
+                .select("id", count="exact") \
+                .eq("property_id", pid) \
+                .gte("clicked_at", period_start.isoformat()) \
+                .lte("clicked_at", period_end.isoformat()) \
+                .execute()
+
+            l = supabase.table("leads") \
+                .select("id", count="exact") \
+                .eq("property_id", pid) \
+                .gte("created_at", period_start.isoformat()) \
+                .lte("created_at", period_end.isoformat()) \
+                .execute()
+
+            b = supabase.table("bookings") \
+                .select("id, booking_value") \
+                .eq("property_id", pid) \
+                .eq("source_type", "reported") \
+                .gte("created_at", period_start.isoformat()) \
+                .lte("created_at", period_end.isoformat()) \
+                .execute()
+
+            bookings_data = b.data or []
+            revenue = sum(float(x["booking_value"] or 0) for x in bookings_data)
+
+            results.append({
+                "property_id": pid,
+                "name": prop.get("name"),
+                "subdomain": prop.get("subdomain"),
+                "sessions": s.count or 0,
+                "cta_clicks": c.count or 0,
+                "leads": l.count or 0,
+                "bookings": len(bookings_data),
+                "revenue": revenue,
+                "estimated_savings": round(revenue * 0.155, 2),
+            })
+
+        logger.info(
+            "[dashboard] properties — account=%s period=%s to %s properties=%d",
+            account_id, period_start, period_end, len(results),
+        )
+        return {
+            "account_id": account_id,
+            "period": {
+                "start_date": period_start.isoformat(),
+                "end_date": period_end.isoformat(),
+            },
+            "properties": results,
+        }
+
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("[dashboard] properties failed — account=%s", account_id)
+        raise HTTPException(status_code=500, detail="Dashboard properties failed.")
 
 
 @app.get("/status/{property_id}")
