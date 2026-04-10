@@ -123,6 +123,10 @@ def agent1_node(state: PipelineState) -> PipelineState:
 
     # ── Step 8: Cache in Redis for parallel downstream agents ─────────────
     kb_dict = kb.to_dict()
+
+    # ── Step 7.5: Merge enrichment from property_knowledge_bases ──────────
+    kb_dict = _merge_enrichment_from_supabase(property_id, kb_dict)
+
     cache_knowledge_base(property_id, kb_dict)
 
     # ── Step 9: Update pipeline status ───────────────────────────────────
@@ -227,6 +231,53 @@ def _generate_slug(name: str) -> str:
     slug = re.sub(r"-+", "-", slug)             # collapse multiple hyphens
     slug = slug.strip("-")                       # trim leading/trailing hyphens
     return slug[:60]                             # max 60 chars for subdomain safety
+
+
+def _merge_enrichment_from_supabase(property_id: str, kb_dict: dict) -> dict:
+    """
+    Step 7.5 — Read owner-supplied enrichment fields from property_knowledge_bases
+    and merge them into kb_dict before Redis write.
+
+    Owner-supplied values take precedence over scraped values.
+    Only non-empty Supabase values are applied.
+    """
+    _ENRICHMENT_FIELDS = [
+        "owner_story",
+        "wow_factor",
+        "hidden_gems",
+        "guest_reviews",
+        "dont_miss_picks",
+        "seasonal_notes",
+        "area_vibe",
+        "surround_areas",
+        "vibe_profile",
+    ]
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("property_knowledge_bases")
+            .select(", ".join(_ENRICHMENT_FIELDS))
+            .eq("property_id", property_id)
+            .single()
+            .execute()
+        )
+        row = result.data or {}
+        merged_fields = []
+        for field in _ENRICHMENT_FIELDS:
+            value = row.get(field)
+            if value:  # non-empty, non-None
+                kb_dict[field] = value
+                merged_fields.append(field)
+        if merged_fields:
+            logger.info(
+                f"[Agent 1] Merged enrichment fields from property_knowledge_bases: {merged_fields}"
+            )
+    except Exception as exc:
+        logger.warning(
+            f"[Agent 1] Could not merge enrichment from property_knowledge_bases for {property_id}: {exc}"
+        )
+    return kb_dict
 
 
 # ── LangGraph Graph Definition ────────────────────────────────────────────
