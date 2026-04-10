@@ -116,6 +116,9 @@ def build_landing_page_html(
     # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
     hero_video_url = _get_hero_video_url(kb.get("property_id", ""))
 
+    # Review audio URLs from Agent 3 (mp3s per guest review)
+    review_audio_urls = _get_review_audio_urls(kb.get("property_id", ""))
+
     # Local guide
     dont_miss_picks       = local_guide.get("dont_miss_picks") or []
     primary_recs          = local_guide.get("primary_recommendations") or []
@@ -232,7 +235,7 @@ def build_landing_page_html(
   </section>
 
   <!-- ── GUEST BOOK REVIEWS ───────────────────────────────────────── -->
-  {_build_guest_book_section(guest_book_reviews) if guest_book_reviews else ""}
+  {_build_guest_book_section(guest_book_reviews, review_audio_urls) if guest_book_reviews else ""}
 
   <!-- ── OTA REVIEWS ──────────────────────────────────────────────── -->
   {_build_ota_reviews_section(ota_reviews) if ota_reviews else ""}
@@ -380,6 +383,55 @@ def build_landing_page_html(
   <!-- GrowthBook A/B Testing (TS-24) -->
   {growthbook_script}
 
+  <!-- Staylio Audio Player -->
+  <script>
+  var StaylioAudio = (function() {{
+    var current = null;
+    return {{
+      current: null,
+      play: function(src, btnEl) {{
+        if (current && current.audio) {{
+          current.audio.pause();
+          current.audio.currentTime = 0;
+          if (current.btn) current.btn.textContent = '\u25b6 Play';
+        }}
+        var audio = new Audio(src);
+        current = {{ audio: audio, btn: btnEl }};
+        StaylioAudio.current = current;
+        if (btnEl) btnEl.textContent = '\u23f9 Stop';
+        audio.play();
+        audio.onended = function() {{
+          if (btnEl) btnEl.textContent = '\u25b6 Play';
+          current = null;
+          StaylioAudio.current = null;
+        }};
+      }},
+      stop: function() {{
+        if (current && current.audio) {{
+          current.audio.pause();
+          current.audio.currentTime = 0;
+          if (current.btn) current.btn.textContent = '\u25b6 Play';
+          current = null;
+          StaylioAudio.current = null;
+        }}
+      }}
+    }};
+  }})();
+
+  document.addEventListener('DOMContentLoaded', function() {{
+    document.querySelectorAll('.audio-play-btn').forEach(function(btn) {{
+      btn.addEventListener('click', function() {{
+        var src = btn.getAttribute('data-audio-src');
+        if (StaylioAudio.current && StaylioAudio.current.btn === btn) {{
+          StaylioAudio.stop();
+        }} else {{
+          StaylioAudio.play(src, btn);
+        }}
+      }});
+    }});
+  }});
+  </script>
+
 </body>
 </html>"""
 
@@ -422,23 +474,33 @@ def _build_gallery_section(photos: list, property_name: str) -> str:
   </section>"""
 
 
-def _build_guest_book_section(reviews: list) -> str:
+def _build_guest_book_section(reviews: list, audio_urls: dict = None) -> str:
+    if audio_urls is None:
+        audio_urls = {}
+    _AUDIO_KEYS = ["audio_guest_review_1", "audio_guest_review_2", "audio_guest_review_3"]
     cards = ""
-    for r in reviews[:6]:
+    for i, r in enumerate(reviews[:6]):
         if not isinstance(r, dict):
             continue
         name_str = r.get("reviewer_name") or "Guest"
         date_str = r.get("stay_date") or ""
+        audio_url = audio_urls.get(_AUDIO_KEYS[i]) if i < len(_AUDIO_KEYS) else None
+        audio_btn = (
+            f'<button class="audio-play-btn" data-audio-src="{_esc(audio_url)}" aria-label="Play review audio">&#9654; Play</button>'
+            if audio_url else ""
+        )
         cards += f"""
       <div class="review-card guest-book-card">
         <span class="badge">Guest Book</span>
         <blockquote>{_esc(r.get("text", ""))}</blockquote>
         <cite>— {_esc(name_str)}{f", {_esc(date_str)}" if date_str else ""}</cite>
+        {audio_btn}
       </div>"""
     return f"""
   <section class="reviews guest-book" id="reviews">
     <div class="container">
       <h2>From the Guest Book</h2>
+      <p class="guest-book-helper">Click the audio play button to hear what guests are saying.</p>
       <div class="reviews-grid">{cards}
       </div>
     </div>
@@ -622,6 +684,27 @@ def _get_hero_video_url(property_id: str) -> Optional[str]:
     except Exception as exc:
         logger.warning(f"[Agent 5] Could not fetch hero video URL for {property_id}: {exc}")
         return None
+
+
+def _get_review_audio_urls(property_id: str) -> dict:
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("video_assets")
+            .select("video_type,r2_url")
+            .eq("property_id", property_id)
+            .eq("format", "mp3")
+            .like("video_type", "audio_guest_review%")
+            .not_.is_("r2_url", "null")
+            .order("video_type")
+            .execute()
+        )
+        rows = result.data or []
+        return {row["video_type"]: row["r2_url"] for row in rows}
+    except Exception as exc:
+        logger.warning(f"[TS-12] Could not fetch review audio URLs: {exc}")
+        return {}
 
 
 def _get_headline_variants(content_package: dict) -> list[str]:
