@@ -262,13 +262,10 @@ async def _generate_review_video(
     if not voice_id or not review_text:
         return []
 
-    # Trim review to reasonable TTS length (~300 chars)
-    script = review_text[:300].strip()
-    if len(review_text) > 300:
-        # Find last complete sentence within limit
-        last_period = script.rfind(".")
-        if last_period > 100:
-            script = script[:last_period + 1]
+    # MP3 guest book narration uses full review text — no truncation.
+    # Note: if this function is extended to support video-constrained assembly,
+    # apply duration-based trimming only in that path, not here.
+    script = review_text.strip()
 
     audio_url = await _generate_elevenlabs_audio(
         script, voice_id, property_id, video_type.value
