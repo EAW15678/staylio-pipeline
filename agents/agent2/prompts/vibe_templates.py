@@ -92,6 +92,8 @@ Standout amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities')
 Unique features (owner-highlighted): {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
 Neighborhood notes: {(kb.get('neighborhood_description', {}) or {}).get('value', '')}
 Owner story: {kb.get('owner_story') or 'Not provided'}
+Wow factor: {kb.get('wow_factor') or 'Not provided'}
+Hidden gems: {kb.get('hidden_gems') or 'Not provided'}
 Seasonal notes: {kb.get('seasonal_notes') or 'Not provided'}
 SEO target keywords to naturally incorporate: {', '.join(keywords[:10]) if keywords else 'Not available'}
 
@@ -121,6 +123,8 @@ Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
 Neighborhood notes: {(kb.get('neighborhood_description', {}) or {}).get('value', '')}
 Owner story: {kb.get('owner_story') or 'Not provided'}
+Wow factor: {kb.get('wow_factor') or 'Not provided'}
+Hidden gems: {kb.get('hidden_gems') or 'Not provided'}
 Seasonal notes: {kb.get('seasonal_notes') or 'Not provided'}
 SEO target keywords: {', '.join(keywords[:10]) if keywords else 'Not available'}
 
@@ -150,6 +154,8 @@ Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
 Neighborhood notes: {(kb.get('neighborhood_description', {}) or {}).get('value', '')}
 Owner story: {kb.get('owner_story') or 'Not provided'}
+Wow factor: {kb.get('wow_factor') or 'Not provided'}
+Hidden gems: {kb.get('hidden_gems') or 'Not provided'}
 Seasonal notes: {kb.get('seasonal_notes') or 'Not provided'}
 SEO target keywords: {', '.join(keywords[:10]) if keywords else 'Not available'}
 
@@ -179,6 +185,8 @@ Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
 Neighborhood notes: {(kb.get('neighborhood_description', {}) or {}).get('value', '')}
 Owner story: {kb.get('owner_story') or 'Not provided'}
+Wow factor: {kb.get('wow_factor') or 'Not provided'}
+Hidden gems: {kb.get('hidden_gems') or 'Not provided'}
 Seasonal notes: {kb.get('seasonal_notes') or 'Not provided'}
 SEO target keywords: {', '.join(keywords[:10]) if keywords else 'Not available'}
 
@@ -208,6 +216,8 @@ Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
 Neighborhood notes: {(kb.get('neighborhood_description', {}) or {}).get('value', '')}
 Owner story: {kb.get('owner_story') or 'Not provided'}
+Wow factor: {kb.get('wow_factor') or 'Not provided'}
+Hidden gems: {kb.get('hidden_gems') or 'Not provided'}
 Seasonal notes: {kb.get('seasonal_notes') or 'Not provided'}
 SEO target keywords: {', '.join(keywords[:10]) if keywords else 'Not available'}
 
@@ -237,6 +247,8 @@ Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
 Neighborhood notes: {(kb.get('neighborhood_description', {}) or {}).get('value', '')}
 Owner story: {kb.get('owner_story') or 'Not provided'}
+Wow factor: {kb.get('wow_factor') or 'Not provided'}
+Hidden gems: {kb.get('hidden_gems') or 'Not provided'}
 Seasonal notes: {kb.get('seasonal_notes') or 'Not provided'}
 SEO target keywords: {', '.join(keywords[:10]) if keywords else 'Not available'}
 
