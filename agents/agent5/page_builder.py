@@ -701,7 +701,9 @@ def _get_review_audio_urls(property_id: str) -> dict:
             .execute()
         )
         rows = result.data or []
-        return {row["video_type"]: row["r2_url"] for row in rows}
+        import time
+        bust = int(time.time())
+        return {row["video_type"]: f"{row['r2_url']}?v={bust}" for row in rows}
     except Exception as exc:
         logger.warning(f"[TS-12] Could not fetch review audio URLs: {exc}")
         return {}
