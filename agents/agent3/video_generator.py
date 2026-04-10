@@ -120,6 +120,7 @@ async def generate_all_videos(
     Returns list of VideoAsset records (with R2 URLs) for storage.
     """
     videos: list[VideoAsset] = []
+    logger.info(f"[DIAG-REVIEWS] property_id={property_id} total_reviews={len(guest_reviews)} preview={[{'keys': list(r.keys()), 'is_guest_book': r.get('is_guest_book'), 'text_present': bool(r.get('text'))} for r in guest_reviews[:3]]}")
     review_count = len([r for r in guest_reviews if r.get("is_guest_book")])
     has_enough_reviews = review_count >= 3
 
