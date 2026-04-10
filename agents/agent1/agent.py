@@ -115,21 +115,26 @@ def agent1_node(state: PipelineState) -> PipelineState:
     kb.ingested_at = datetime.now(timezone.utc)
     kb.ingestion_complete = True
 
-    # ── Step 7: Save to Supabase ──────────────────────────────────────────
+    # ── Step 7: Read enrichment before save (save overwrites the row) ────────
+    enrichment = _read_enrichment_from_supabase(property_id)
+
+    # ── Step 8: Save to Supabase ──────────────────────────────────────────
     saved = save_knowledge_base(kb)
     if not saved:
         # Save failure — still proceed but flag it
         kb.ingestion_errors.append("Supabase save failed — downstream agents will use Redis cache only")
 
-    # ── Step 8: Cache in Redis for parallel downstream agents ─────────────
+    # ── Step 9: Cache in Redis for parallel downstream agents ─────────────
     kb_dict = kb.to_dict()
-
-    # ── Step 7.5: Merge enrichment from property_knowledge_bases ──────────
-    kb_dict = _merge_enrichment_from_supabase(property_id, kb_dict)
+    for field, value in enrichment.items():
+        if value:
+            kb_dict[field] = value
+    if enrichment:
+        logger.info(f"[Agent 1] Merged enrichment fields: {list(enrichment.keys())}")
 
     cache_knowledge_base(property_id, kb_dict)
 
-    # ── Step 9: Update pipeline status ───────────────────────────────────
+    # ── Step 10: Update pipeline status ──────────────────────────────────
     update_pipeline_status(
         property_id,
         AGENT_NUMBER,
@@ -233,13 +238,10 @@ def _generate_slug(name: str) -> str:
     return slug[:60]                             # max 60 chars for subdomain safety
 
 
-def _merge_enrichment_from_supabase(property_id: str, kb_dict: dict) -> dict:
+def _read_enrichment_from_supabase(property_id: str) -> dict:
     """
-    Step 7.5 — Read owner-supplied enrichment fields from property_knowledge_bases
-    and merge them into kb_dict before Redis write.
-
-    Owner-supplied values take precedence over scraped values.
-    Only non-empty Supabase values are applied.
+    Read owner-supplied enrichment fields from property_knowledge_bases BEFORE
+    save_knowledge_base() overwrites the row. Returns a dict of non-empty fields.
     """
     _ENRICHMENT_FIELDS = [
         "owner_story",
@@ -263,21 +265,12 @@ def _merge_enrichment_from_supabase(property_id: str, kb_dict: dict) -> dict:
             .execute()
         )
         row = result.data or {}
-        merged_fields = []
-        for field in _ENRICHMENT_FIELDS:
-            value = row.get(field)
-            if value:  # non-empty, non-None
-                kb_dict[field] = value
-                merged_fields.append(field)
-        if merged_fields:
-            logger.info(
-                f"[Agent 1] Merged enrichment fields from property_knowledge_bases: {merged_fields}"
-            )
+        return {field: row[field] for field in _ENRICHMENT_FIELDS if row.get(field)}
     except Exception as exc:
         logger.warning(
-            f"[Agent 1] Could not merge enrichment from property_knowledge_bases for {property_id}: {exc}"
+            f"[Agent 1] Could not read enrichment from property_knowledge_bases for {property_id}: {exc}"
         )
-    return kb_dict
+        return {}
 
 
 # ── LangGraph Graph Definition ────────────────────────────────────────────
