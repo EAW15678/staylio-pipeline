@@ -276,6 +276,24 @@ async def _generate_review_video(
     if not audio_url:
         return []
 
+    # Persist MP3 immediately — independent of Creatomate
+    try:
+        from core.supabase_store import get_supabase
+        get_supabase().table("video_assets").upsert(
+            {
+                "property_id": property_id,
+                "video_type": f"audio_{video_type.value}",
+                "format": "mp3",
+                "r2_url": audio_url,
+                "has_narration": True,
+                "voice_id": voice_id,
+            },
+            on_conflict="property_id,video_type,format",
+        ).execute()
+        logger.info(f"[TS-09] Persisted MP3 audio row: audio_{video_type.value}")
+    except Exception as exc:
+        logger.warning(f"[TS-09] Could not persist audio row for {video_type.value}: {exc}")
+
     # Use hero photo or a random category winner as background
     background_url = hero_photo_url or (list(category_winners.values())[0] if category_winners else None)
     if not background_url:
