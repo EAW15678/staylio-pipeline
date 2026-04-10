@@ -114,7 +114,7 @@ def build_landing_page_html(
         ][:24]
 
     # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
-    hero_video_url = _get_hero_video_url(visual_media)
+    hero_video_url = _get_hero_video_url(kb.get("property_id", ""))
 
     # Local guide
     dont_miss_picks       = local_guide.get("dont_miss_picks") or []
@@ -185,7 +185,7 @@ def build_landing_page_html(
   <!-- ── HERO ─────────────────────────────────────────────────────── -->
   <section class="hero" id="hero">
     <div class="hero-media">
-      {"<video autoplay muted loop playsinline poster='" + _esc(hero_photo) + "'><source src='" + _esc(hero_video_url) + "' type='video/mp4'></video>" if hero_video_url else f'<img src="{_esc(hero_photo)}" alt="{_esc(name)}" loading="eager">'}
+      {(f"<video id=\"hero-video\" autoplay loop playsinline poster=\"{_esc(hero_photo)}\" oncanplay=\"this.play()\"><source src=\"{_esc(hero_video_url)}\" type=\"video/mp4\"></video><button id=\"hero-audio-fallback\" onclick=\"document.getElementById('hero-video').play()\" style=\"display:none\">&#9654; Play narration</button><script>var hv=document.getElementById('hero-video');hv.play().catch(function(){{document.getElementById('hero-audio-fallback').style.display='inline-block';}});</script>") if hero_video_url else f'<img src="{_esc(hero_photo)}" alt="{_esc(name)}" loading="eager">'}
     </div>
     <div class="hero-overlay"></div>
     <div class="hero-content">
@@ -600,14 +600,28 @@ def _format_description(description: str) -> str:
     return "\n".join(f"<p>{_esc(p)}</p>" for p in paragraphs[:5])
 
 
-def _get_hero_video_url(visual_media: dict) -> Optional[str]:
-    """Find the 16:9 Video 1 URL for the hero section."""
-    for video in (visual_media.get("video_assets") or []):
-        if not isinstance(video, dict):
-            continue
-        if video.get("video_type") == "vibe_match" and video.get("format") == "16_9":
-            return video.get("r2_url")
-    return None
+def _get_hero_video_url(property_id: str) -> Optional[str]:
+    """Query Supabase for the 16:9 vibe_match video URL for this property."""
+    if not property_id:
+        return None
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("video_assets")
+            .select("r2_url")
+            .eq("property_id", property_id)
+            .eq("video_type", "vibe_match")
+            .eq("format", "16_9")
+            .not_.is_("r2_url", "null")
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        return rows[0]["r2_url"] if rows else None
+    except Exception as exc:
+        logger.warning(f"[Agent 5] Could not fetch hero video URL for {property_id}: {exc}")
+        return None
 
 
 def _get_headline_variants(content_package: dict) -> list[str]:
