@@ -443,21 +443,26 @@ def build_landing_page_html(
     var heroCtaBtn = document.getElementById('hero-cta-btn');
     var heroReplay = document.getElementById('hero-replay-btn');
 
-    if (heroVideo) {{
+    function initHeroPreview() {{
+      if (!heroVideo) return;
+      heroVideo.muted = true;
+      heroVideo.loop = true;
       heroVideo.play().catch(function() {{}});
     }}
 
     function startHero() {{
       if (!heroVideo) return;
+      heroVideo.loop = false;
       heroVideo.muted = false;
       heroVideo.currentTime = 0;
-      heroVideo.loop = false;
       if (heroCta) heroCta.style.display = 'none';
       if (heroReplay) heroReplay.style.display = 'none';
       StaylioAudio.play(heroVideo, function() {{
-        heroVideo.muted = true;
         heroVideo.pause();
         heroVideo.currentTime = 0;
+        heroVideo.muted = true;
+        heroVideo.loop = true;
+        heroVideo.play().catch(function() {{}});
         if (heroCta) heroCta.style.display = 'flex';
         if (heroReplay) heroReplay.style.display = 'none';
       }});
@@ -467,6 +472,7 @@ def build_landing_page_html(
       }};
     }}
 
+    initHeroPreview();
     if (heroCtaBtn) heroCtaBtn.addEventListener('click', startHero);
     if (heroReplay) heroReplay.addEventListener('click', startHero);
 
@@ -872,6 +878,58 @@ def _page_css() -> str:
     .hero-media img, .hero-media video { width: 100%; height: 100%; object-fit: cover; }
     .hero-overlay { position: absolute; inset: 0;
                     background: linear-gradient(to top, rgba(0,0,0,.7) 0%, rgba(0,0,0,.1) 60%); }
+    #hero-cta-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+    }
+    #hero-cta-btn {
+      pointer-events: all;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      background: rgba(255,255,255,0.12);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50px;
+      color: #fff;
+      padding: 18px 36px;
+      font-size: 1rem;
+      font-family: inherit;
+      cursor: pointer;
+      letter-spacing: 0.02em;
+      transition: background 0.2s;
+    }
+    #hero-cta-btn:hover {
+      background: rgba(255,255,255,0.22);
+    }
+    .hero-cta-icon {
+      font-size: 1.1rem;
+      line-height: 1;
+    }
+    .hero-cta-text {
+      line-height: 1;
+    }
+    #hero-replay-btn {
+      position: absolute;
+      bottom: 24px;
+      right: 24px;
+      z-index: 3;
+      background: rgba(0,0,0,0.45);
+      border: 1px solid rgba(255,255,255,0.3);
+      border-radius: 20px;
+      color: #fff;
+      padding: 8px 18px;
+      font-size: 0.85rem;
+      font-family: inherit;
+      cursor: pointer;
+      letter-spacing: 0.02em;
+    }
     .hero-content { position: relative; z-index: 1; padding: 2rem 1.5rem 3rem;
                     max-width: var(--max-width); margin: 0 auto; width: 100%; color: #fff; }
     .location-tag { font-size: .85rem; letter-spacing: .15em; text-transform: uppercase;
