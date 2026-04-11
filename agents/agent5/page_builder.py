@@ -188,7 +188,18 @@ def build_landing_page_html(
   <!-- ── HERO ─────────────────────────────────────────────────────── -->
   <section class="hero" id="hero">
     <div class="hero-media">
-      {(f"<video id=\"hero-video\" autoplay loop playsinline poster=\"{_esc(hero_photo)}\" oncanplay=\"this.play()\"><source src=\"{_esc(hero_video_url)}\" type=\"video/mp4\"></video><button id=\"hero-audio-fallback\" onclick=\"document.getElementById('hero-video').play()\" style=\"display:none\">&#9654; Play narration</button><script>var hv=document.getElementById('hero-video');hv.play().catch(function(){{document.getElementById('hero-audio-fallback').style.display='inline-block';}});</script>") if hero_video_url else f'<img src="{_esc(hero_photo)}" alt="{_esc(name)}" loading="eager">'}
+      {(f"""
+    <video id="hero-video" muted playsinline poster="{_esc(hero_photo)}" preload="auto">
+      <source src="{_esc(hero_video_url)}" type="video/mp4">
+    </video>
+    <div id="hero-cta-overlay">
+      <button id="hero-cta-btn" aria-label="Play hero story">
+        <span class="hero-cta-icon">&#9654;</span>
+        <span class="hero-cta-text">Hear the story behind this home</span>
+      </button>
+    </div>
+    <button id="hero-replay-btn" style="display:none" aria-label="Replay hero story">&#8635; Replay</button>
+    """) if hero_video_url else f'<img src="{_esc(hero_photo)}" alt="{_esc(name)}" loading="eager">'}
     </div>
     <div class="hero-overlay"></div>
     <div class="hero-content">
@@ -387,48 +398,102 @@ def build_landing_page_html(
   <script>
   var StaylioAudio = (function() {{
     var current = null;
+
+    function stopCurrent() {{
+      if (!current) return;
+      if (current.media) {{
+        current.media.pause();
+        current.media.currentTime = 0;
+      }}
+      if (current.onStop) current.onStop();
+      current = null;
+      StaylioAudio.current = null;
+    }}
+
     return {{
       current: null,
-      play: function(src, btnEl) {{
-        if (current && current.audio) {{
-          current.audio.pause();
-          current.audio.currentTime = 0;
-          if (current.btn) current.btn.textContent = '\u25b6 Play';
-        }}
-        var audio = new Audio(src);
-        current = {{ audio: audio, btn: btnEl }};
-        StaylioAudio.current = current;
-        if (btnEl) btnEl.textContent = '\u23f9 Stop';
-        audio.play();
-        audio.onended = function() {{
-          if (btnEl) btnEl.textContent = '\u25b6 Play';
-          current = null;
-          StaylioAudio.current = null;
-        }};
+
+      _clearCurrent: function() {{
+        current = null;
+        StaylioAudio.current = null;
       }},
-      stop: function() {{
-        if (current && current.audio) {{
-          current.audio.pause();
-          current.audio.currentTime = 0;
-          if (current.btn) current.btn.textContent = '\u25b6 Play';
-          current = null;
-          StaylioAudio.current = null;
+
+      play: function(media, onStop) {{
+        stopCurrent();
+        current = {{ media: media, onStop: onStop || null }};
+        StaylioAudio.current = current;
+        if (!media) return;
+        var playPromise = media.play();
+        if (playPromise !== undefined) {{
+          playPromise.catch(function() {{}});
         }}
+      }},
+
+      stop: function() {{
+        stopCurrent();
       }}
     }};
   }})();
 
   document.addEventListener('DOMContentLoaded', function() {{
+
+    // HERO
+    var heroVideo  = document.getElementById('hero-video');
+    var heroCta    = document.getElementById('hero-cta-overlay');
+    var heroCtaBtn = document.getElementById('hero-cta-btn');
+    var heroReplay = document.getElementById('hero-replay-btn');
+
+    if (heroVideo) {{
+      heroVideo.play().catch(function() {{}});
+    }}
+
+    function startHero() {{
+      if (!heroVideo) return;
+      heroVideo.muted = false;
+      heroVideo.currentTime = 0;
+      heroVideo.loop = false;
+      if (heroCta) heroCta.style.display = 'none';
+      if (heroReplay) heroReplay.style.display = 'none';
+      StaylioAudio.play(heroVideo, function() {{
+        heroVideo.muted = true;
+        heroVideo.pause();
+        heroVideo.currentTime = 0;
+        if (heroCta) heroCta.style.display = 'flex';
+        if (heroReplay) heroReplay.style.display = 'none';
+      }});
+      heroVideo.onended = function() {{
+        StaylioAudio._clearCurrent();
+        if (heroReplay) heroReplay.style.display = 'inline-block';
+      }};
+    }}
+
+    if (heroCtaBtn) heroCtaBtn.addEventListener('click', startHero);
+    if (heroReplay) heroReplay.addEventListener('click', startHero);
+
+    // GUEST REVIEWS
     document.querySelectorAll('.audio-play-btn').forEach(function(btn) {{
       btn.addEventListener('click', function() {{
         var src = btn.getAttribute('data-audio-src');
-        if (StaylioAudio.current && StaylioAudio.current.btn === btn) {{
+        if (StaylioAudio.current && StaylioAudio.current.media === btn._audio) {{
           StaylioAudio.stop();
+          btn.textContent = '\u25b6 Play';
         }} else {{
-          StaylioAudio.play(src, btn);
+          var audio = new Audio(src);
+          btn._audio = audio;
+          btn.textContent = '\u23f9 Stop';
+          StaylioAudio.play(audio, function() {{
+            btn.textContent = '\u25b6 Play';
+          }});
+          audio.onended = function() {{
+            btn.textContent = '\u25b6 Play';
+            if (StaylioAudio.current && StaylioAudio.current.media === audio) {{
+              StaylioAudio._clearCurrent();
+            }}
+          }};
         }}
       }});
     }});
+
   }});
   </script>
 
