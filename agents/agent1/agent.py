@@ -337,9 +337,9 @@ def _seed_asset_slots(property_id: str) -> None:
 def _dedupe_photos(kb) -> object:
     """
     SHA-256 deduplication of photos before expensive Claid processing.
-    Fetches raw bytes for each photo URL, hashes them, and writes to source_assets.
+    On first run: fetches raw bytes, hashes, writes to source_assets.
+    On repeat runs: pre-queries known URLs to skip unnecessary byte fetches.
     Duplicate photos (same bytes, different URLs) are removed from kb.photos.
-    The canonical row is kept; duplicates get is_canonical=False.
     Non-fatal: if anything fails, kb.photos is returned unchanged.
     """
     import httpx
@@ -350,11 +350,35 @@ def _dedupe_photos(kb) -> object:
 
     try:
         supabase = get_supabase()
+
+        # Pre-query all known source URLs for this property — avoids re-fetching
+        # bytes on repeat pipeline runs. One query up front, zero wasted fetches.
+        existing_result = (
+            supabase.table("source_assets")
+            .select("source_url,is_canonical")
+            .eq("property_id", kb.property_id)
+            .execute()
+        )
+        existing_urls: dict[str, bool] = {
+            row["source_url"]: row["is_canonical"]
+            for row in (existing_result.data or [])
+        }
+
         canonical_hashes: dict[str, str] = {}  # content_hash → source_asset_id
         canonical_photos = []
+        skipped_known = 0
 
         with httpx.Client(timeout=30) as client:
             for photo in kb.photos:
+                # Fast path: URL already recorded from a previous run
+                if photo.url in existing_urls:
+                    if existing_urls[photo.url]:
+                        canonical_photos.append(photo)  # known canonical — keep
+                    else:
+                        skipped_known += 1              # known duplicate — drop
+                    continue
+
+                # Slow path: new URL — fetch bytes, hash, insert
                 try:
                     resp = client.get(photo.url, follow_redirects=True)
                     if resp.status_code != 200:
@@ -365,29 +389,29 @@ def _dedupe_photos(kb) -> object:
                     content_hash = hashlib.sha256(resp.content).hexdigest()
 
                     if content_hash in canonical_hashes:
-                        # Duplicate — write non-canonical row, skip photo
+                        # Duplicate of a photo seen this run — record and drop
                         canonical_id = canonical_hashes[content_hash]
                         supabase.table("source_assets").insert({
-                            "source_asset_id":  str(_uuid.uuid4()),
-                            "property_id":      kb.property_id,
-                            "content_hash":     content_hash,
-                            "is_canonical":     False,
+                            "source_asset_id":    str(_uuid.uuid4()),
+                            "property_id":        kb.property_id,
+                            "content_hash":       content_hash,
+                            "is_canonical":       False,
                             "canonical_asset_id": canonical_id,
-                            "source_system":    photo.source if isinstance(photo.source, str) else photo.source.value,
-                            "source_url":       photo.url,
+                            "source_system":      photo.source if isinstance(photo.source, str) else photo.source.value,
+                            "source_url":         photo.url,
                         }).execute()
                         logger.debug(f"[Agent 1] Duplicate photo skipped: {photo.url}")
                     else:
-                        # Canonical — write canonical row, keep photo
+                        # New canonical photo — record and keep
                         asset_id = str(_uuid.uuid4())
                         supabase.table("source_assets").insert({
-                            "source_asset_id":  asset_id,
-                            "property_id":      kb.property_id,
-                            "content_hash":     content_hash,
-                            "is_canonical":     True,
+                            "source_asset_id":    asset_id,
+                            "property_id":        kb.property_id,
+                            "content_hash":       content_hash,
+                            "is_canonical":       True,
                             "canonical_asset_id": None,
-                            "source_system":    photo.source if isinstance(photo.source, str) else photo.source.value,
-                            "source_url":       photo.url,
+                            "source_system":      photo.source if isinstance(photo.source, str) else photo.source.value,
+                            "source_url":         photo.url,
                         }).execute()
                         canonical_hashes[content_hash] = asset_id
                         canonical_photos.append(photo)
@@ -397,12 +421,12 @@ def _dedupe_photos(kb) -> object:
                     logger.warning(f"[Agent 1] Could not dedupe photo {photo.url}: {photo_exc}")
                     canonical_photos.append(photo)
 
-        removed = len(kb.photos) - len(canonical_photos)
-        if removed > 0:
-            logger.info(f"[Agent 1] Photo dedupe: {len(canonical_photos)} canonical, {removed} duplicates removed")
-        else:
-            logger.info(f"[Agent 1] Photo dedupe: {len(canonical_photos)} photos, no duplicates found")
-
+        removed = len(kb.photos) - len(canonical_photos) - skipped_known
+        logger.info(
+            f"[Agent 1] Photo dedupe: {len(canonical_photos)} canonical, "
+            f"{removed} new duplicates, {skipped_known} known duplicates skipped "
+            f"(pre-query cache hit)"
+        )
         kb.photos = canonical_photos
         return kb
 
