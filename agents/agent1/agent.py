@@ -23,7 +23,9 @@ LangGraph integration:
 
 import asyncio
 import concurrent.futures
+import hashlib
 import logging
+import uuid as _uuid
 from datetime import datetime, timezone
 from typing import Any, TypedDict
 
@@ -96,8 +98,14 @@ def agent1_node(state: PipelineState) -> PipelineState:
             "agent1_complete": False,
         }
 
+    # ── Step 2.5: Seed asset slots ────────────────────────────────────────
+    _seed_asset_slots(property_id)
+
     # ── Step 3: Run scrapers based on available URLs ───────────────────────
     kb = _run_scrapers(kb)
+
+    # ── Step 3.5: SHA-256 photo source deduplication ──────────────────────
+    kb = _dedupe_photos(kb)
 
     # ── Step 4: Normalisation pass ────────────────────────────────────────
     try:
@@ -271,6 +279,136 @@ def _read_enrichment_from_supabase(property_id: str) -> dict:
             f"[Agent 1] Could not read enrichment from property_knowledge_bases for {property_id}: {exc}"
         )
         return {}
+
+
+# ── Asset Slot Seeding ────────────────────────────────────────────────────
+
+_ASSET_SLOTS = [
+    ("hero_video",              "video", "16_9"),
+    ("hero_video",              "video", "9_16"),
+    ("hero_narration",          "audio", "mp3"),
+    ("guest_review_audio_1",    "audio", "mp3"),
+    ("guest_review_audio_2",    "audio", "mp3"),
+    ("guest_review_audio_3",    "audio", "mp3"),
+    ("social_clip_vibe",        "video", "9_16"),
+    ("social_clip_vibe",        "video", "16_9"),
+    ("social_clip_walkthrough", "video", "9_16"),
+    ("social_clip_local",       "video", "9_16"),
+    ("social_clip_seasonal",    "video", "9_16"),
+    ("page_html",               "html",  "html"),
+    ("photo_hero",              "image", "jpg"),
+    ("social_crop_square",      "image", "jpg"),
+    ("social_crop_vertical",    "image", "jpg"),
+    ("social_crop_landscape",   "image", "jpg"),
+]
+
+
+def _seed_asset_slots(property_id: str) -> None:
+    """
+    Idempotent insert of all 16 asset slots for a property.
+    Called once at the start of every onboarding run before scrapers fire.
+    Upsert on (property_id, slot_name, format) — existing slots untouched.
+    Non-fatal: failure here does not block the pipeline.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        rows = [
+            {
+                "slot_id":       str(_uuid.uuid4()),
+                "property_id":   property_id,
+                "slot_name":     slot_name,
+                "artifact_kind": kind,
+                "format":        fmt,
+                "status":        "pending",
+            }
+            for slot_name, kind, fmt in _ASSET_SLOTS
+        ]
+        get_supabase().table("asset_slots").upsert(
+            rows,
+            on_conflict="property_id,slot_name,format",
+        ).execute()
+        logger.info(f"[Agent 1] Seeded {len(rows)} asset slots for property {property_id}")
+    except Exception as exc:
+        logger.warning(f"[Agent 1] Slot seeding failed (non-fatal): {exc}")
+
+
+# ── Photo Source Deduplication ────────────────────────────────────────────
+
+def _dedupe_photos(kb) -> object:
+    """
+    SHA-256 deduplication of photos before expensive Claid processing.
+    Fetches raw bytes for each photo URL, hashes them, and writes to source_assets.
+    Duplicate photos (same bytes, different URLs) are removed from kb.photos.
+    The canonical row is kept; duplicates get is_canonical=False.
+    Non-fatal: if anything fails, kb.photos is returned unchanged.
+    """
+    import httpx
+    from core.supabase_store import get_supabase
+
+    if not kb.photos:
+        return kb
+
+    try:
+        supabase = get_supabase()
+        canonical_hashes: dict[str, str] = {}  # content_hash → source_asset_id
+        canonical_photos = []
+
+        with httpx.Client(timeout=30) as client:
+            for photo in kb.photos:
+                try:
+                    resp = client.get(photo.url, follow_redirects=True)
+                    if resp.status_code != 200:
+                        # Can't fetch — keep photo, skip deduplication for it
+                        canonical_photos.append(photo)
+                        continue
+
+                    content_hash = hashlib.sha256(resp.content).hexdigest()
+
+                    if content_hash in canonical_hashes:
+                        # Duplicate — write non-canonical row, skip photo
+                        canonical_id = canonical_hashes[content_hash]
+                        supabase.table("source_assets").insert({
+                            "source_asset_id":  str(_uuid.uuid4()),
+                            "property_id":      kb.property_id,
+                            "content_hash":     content_hash,
+                            "is_canonical":     False,
+                            "canonical_asset_id": canonical_id,
+                            "source_system":    photo.source if isinstance(photo.source, str) else photo.source.value,
+                            "source_url":       photo.url,
+                        }).execute()
+                        logger.debug(f"[Agent 1] Duplicate photo skipped: {photo.url}")
+                    else:
+                        # Canonical — write canonical row, keep photo
+                        asset_id = str(_uuid.uuid4())
+                        supabase.table("source_assets").insert({
+                            "source_asset_id":  asset_id,
+                            "property_id":      kb.property_id,
+                            "content_hash":     content_hash,
+                            "is_canonical":     True,
+                            "canonical_asset_id": None,
+                            "source_system":    photo.source if isinstance(photo.source, str) else photo.source.value,
+                            "source_url":       photo.url,
+                        }).execute()
+                        canonical_hashes[content_hash] = asset_id
+                        canonical_photos.append(photo)
+
+                except Exception as photo_exc:
+                    # Per-photo failure — keep photo, log warning, continue
+                    logger.warning(f"[Agent 1] Could not dedupe photo {photo.url}: {photo_exc}")
+                    canonical_photos.append(photo)
+
+        removed = len(kb.photos) - len(canonical_photos)
+        if removed > 0:
+            logger.info(f"[Agent 1] Photo dedupe: {len(canonical_photos)} canonical, {removed} duplicates removed")
+        else:
+            logger.info(f"[Agent 1] Photo dedupe: {len(canonical_photos)} photos, no duplicates found")
+
+        kb.photos = canonical_photos
+        return kb
+
+    except Exception as exc:
+        logger.warning(f"[Agent 1] Photo deduplication failed (non-fatal): {exc}")
+        return kb
 
 
 # ── LangGraph Graph Definition ────────────────────────────────────────────
