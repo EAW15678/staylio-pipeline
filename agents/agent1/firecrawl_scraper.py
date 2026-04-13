@@ -13,6 +13,8 @@ from typing import Optional
 
 import httpx
 
+from pipeline_emitter import emit_media_cost
+
 from models.property import (
     DataSource,
     PropertyKnowledgeBase,
@@ -44,6 +46,17 @@ def scrape_pmc_website(
             f"Firecrawl returned empty markdown for {pmc_website_url}"
         )
         return knowledge_base
+
+    emit_media_cost(
+        vendor="firecrawl",
+        service="scrape",
+        units=1,
+        unit_name="pages",
+        property_id=str(knowledge_base.property_id),
+        workflow_name="listing_generation",
+        slot_name="pmc_website_scrape",
+        generation_reason="pmc_website_scrape",
+    )
 
     from agents.agent1.claude_parser import _claude_extract, _apply_extraction
 

@@ -154,6 +154,17 @@ GCV_PRICING: dict[str, Decimal] = {
     "default":         Decimal("1.50"),
 }
 
+FIRECRAWL_PRICING: dict[str, Decimal] = {
+    "scrape":  Decimal("0.00083"),  # $0.83/1,000 pages — Standard /scrape endpoint
+    "default": Decimal("0.00083"),
+}
+
+APIFY_PRICING: dict[str, Decimal] = {
+    "airbnb_listing": Decimal("0.005"),   # $5.00/1,000 — confirmed from billing Apr 2026
+    "actor_start":    Decimal("0.0001"),  # per run, negligible
+    "default":        Decimal("0.005"),
+}
+
 R2_CLASS_A_PER_MILLION  = Decimal("4.50")
 R2_CLASS_B_PER_MILLION  = Decimal("0.36")
 R2_STORAGE_PER_GB_MONTH = Decimal("0.015")
@@ -335,6 +346,12 @@ def emit_media_cost(
     elif vendor in ("google_vision", "gcv"):
         price_per_1k = GCV_PRICING.get(service, GCV_PRICING["default"])
         cost = (Decimal(str(units)) / Decimal(1000)) * price_per_1k
+    elif vendor == "firecrawl":
+        price_per_unit = FIRECRAWL_PRICING.get(service, FIRECRAWL_PRICING["default"])
+        cost = Decimal(str(units)) * price_per_unit
+    elif vendor == "apify":
+        price_per_unit = APIFY_PRICING.get(service, APIFY_PRICING["default"])
+        cost = Decimal(str(units)) * price_per_unit
     else:
         cost = Decimal("0")
 

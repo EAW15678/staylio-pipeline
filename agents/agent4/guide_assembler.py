@@ -24,6 +24,8 @@ from typing import Optional
 
 import anthropic
 
+from pipeline_emitter import emit_llm_cost
+
 from agents.agent4.models import (
     DataSource,
     DontMissPick,
@@ -151,7 +153,7 @@ def assemble_local_guide(
     if anthropic_client:
         guide.area_introduction = _generate_area_intro(
             location_name, vibe_profile, primary, dont_miss,
-            neighborhood_description, anthropic_client
+            neighborhood_description, anthropic_client, property_id
         )
     else:
         guide.area_introduction = _fallback_area_intro(location_name, vibe_profile)
@@ -416,6 +418,7 @@ def _generate_area_intro(
     dont_miss: list[DontMissPick],
     owner_neighborhood_desc: Optional[str],
     anthropic_client: anthropic.Anthropic,
+    property_id: str = "",
 ) -> str:
     """
     Generate a 3-5 sentence area introduction using Claude Haiku.
@@ -446,6 +449,16 @@ Respond with only the introduction text, nothing else."""
             model="claude-haiku-4-5-20251001",
             max_tokens=300,
             messages=[{"role": "user", "content": prompt}],
+        )
+        emit_llm_cost(
+            vendor="anthropic",
+            model="claude-haiku-4-5-20251001",
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            property_id=property_id,
+            workflow_name="property_enrichment",
+            slot_name="area_introduction",
+            generation_reason="area_intro_generation",
         )
         return resp.content[0].text.strip()
     except Exception as exc:

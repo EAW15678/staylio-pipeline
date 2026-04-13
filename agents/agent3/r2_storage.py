@@ -29,6 +29,8 @@ from typing import Optional
 import boto3
 from botocore.config import Config
 
+from pipeline_emitter import emit_storage_cost
+
 logger = logging.getLogger(__name__)
 
 # ── R2 Bucket Names ───────────────────────────────────────────────────────
@@ -152,6 +154,15 @@ def _upload(
         Body=data,
         ContentType=content_type,
         CacheControl="public, max-age=31536000, immutable",
+    )
+    emit_storage_cost(
+        vendor="cloudflare_r2",
+        operation="upload",
+        bytes_transferred=len(data),
+        request_count=1,
+        workflow_name="video_generation",
+        slot_name=key.split("/")[1] if "/" in key else "asset",
+        generation_reason="r2_asset_upload",
     )
     url = public_url(bucket, key)
     logger.debug(f"R2 upload: {bucket}/{key} → {url}")

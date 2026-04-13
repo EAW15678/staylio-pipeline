@@ -20,6 +20,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from pipeline_emitter import emit_media_cost
+
 from models.property import (
     DataSource,
     GuestReview,
@@ -255,6 +257,16 @@ def _scrape_airbnb(
         f"Reviews: {len(knowledge_base.guest_reviews)}, "
         f"Amenities: {len(knowledge_base.amenities)}"
     )
+    emit_media_cost(
+        vendor="apify",
+        service="airbnb_listing",
+        units=1,
+        unit_name="listings",
+        property_id=str(knowledge_base.property_id),
+        workflow_name="listing_generation",
+        slot_name="airbnb_scrape",
+        generation_reason="airbnb_listing_scrape",
+    )
     return knowledge_base
 
 
@@ -369,6 +381,16 @@ def _scrape_vrbo(
         f"[TS-03] VRBO scrape complete — "
         f"Photos: {len(knowledge_base.photos)}, "
         f"Amenities: {len(knowledge_base.amenities)}"
+    )
+    emit_media_cost(
+        vendor="apify",
+        service="airbnb_listing",
+        units=1,
+        unit_name="listings",
+        property_id=str(knowledge_base.property_id),
+        workflow_name="listing_generation",
+        slot_name="vrbo_scrape",
+        generation_reason="vrbo_listing_scrape",
     )
     return knowledge_base
 

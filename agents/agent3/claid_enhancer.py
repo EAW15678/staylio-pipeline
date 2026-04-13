@@ -24,6 +24,8 @@ import asyncio
 import httpx
 from typing import Optional
 
+from pipeline_emitter import emit_media_cost
+
 logger = logging.getLogger(__name__)
 
 CLAID_API_BASE  = "https://api.claid.ai/v1-beta1"
@@ -210,6 +212,17 @@ async def enhance_photo_batch(
         f"[TS-07] Claid.ai enhancement complete for property {property_id}: "
         f"{success_count}/{len(capped_urls)} photos enhanced successfully"
     )
+    if success_count > 0:
+        emit_media_cost(
+            vendor="claid",
+            service="enhance",
+            units=success_count,
+            unit_name="images",
+            property_id=property_id,
+            workflow_name="listing_generation",
+            slot_name="photo_enhancement",
+            generation_reason="claid_photo_enhance",
+        )
     return results
 
 

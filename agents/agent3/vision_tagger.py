@@ -22,6 +22,8 @@ import os
 import logging
 from typing import Optional
 
+from pipeline_emitter import emit_media_cost
+
 from google.cloud import vision
 from google.cloud.vision_v1 import types
 from google.oauth2 import service_account
@@ -259,6 +261,16 @@ def tag_and_score_photos(
         f"[TS-07b] Tagging complete for property {property_id}. "
         f"Assets: {len(assets)}, Category winners: {len(category_winners)}, "
         f"Hero: {hero_url or 'none'}"
+    )
+    emit_media_cost(
+        vendor="google_vision",
+        service="label_detection",
+        units=len(assets),
+        unit_name="requests",
+        property_id=str(assets[0].property_id) if assets and hasattr(assets[0], "property_id") else None,
+        workflow_name="listing_generation",
+        slot_name="photo_scoring",
+        generation_reason="gcv_hero_scoring",
     )
     return assets, hero_url
 
