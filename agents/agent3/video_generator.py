@@ -29,6 +29,8 @@ from typing import Optional
 import httpx
 import runwayml
 
+from pipeline_emitter import emit_media_cost
+
 from agents.agent3.models import (
     VideoAsset,
     VideoFormat,
@@ -431,6 +433,17 @@ async def _generate_elevenlabs_audio(
             resp.raise_for_status()
             audio_bytes = resp.content
 
+        emit_media_cost(
+            vendor="elevenlabs",
+            service="tts",
+            units=len(script),
+            unit_name="characters",
+            property_id=property_id,
+            workflow_name="video_generation",
+            generation_reason="narration",
+            discriminator=video_label,
+        )
+
         # Upload to R2
         r2_url = upload_video(
             property_id=property_id,
@@ -506,6 +519,16 @@ async def _generate_runway_clips(
 
                 # Cache the clip so reruns skip this Runway call
                 _save_clip_to_cache(property_id, clip_video_type, r2_url, i)
+                emit_media_cost(
+                    vendor="runway",
+                    service="gen4_turbo_5s",
+                    units=5,
+                    unit_name="seconds",
+                    property_id=property_id,
+                    workflow_name="video_generation",
+                    generation_reason="runway_clip",
+                    discriminator=f"clip_{i:02d}",
+                )
                 clip_urls.append(r2_url)
 
             except Exception as exc:
@@ -618,6 +641,17 @@ async def _assemble_with_creatomate(
                 output_url = await _poll_creatomate_render(client, render_id)
                 if not output_url:
                     continue
+
+                emit_media_cost(
+                    vendor="creatomate",
+                    service="video_render",
+                    units=1,
+                    unit_name="renders",
+                    property_id=property_id,
+                    workflow_name="video_generation",
+                    generation_reason="creatomate_render",
+                    discriminator=f"{video_type.value}_{fmt.value}",
+                )
 
                 # Download rendered video and upload to R2
                 dl = await client.get(output_url, timeout=120)
