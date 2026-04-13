@@ -124,6 +124,7 @@ def _validate_workflow(workflow_name: str | None, caller: str) -> bool:
 LLM_PRICING: dict[str, tuple[Decimal, Decimal]] = {
     "gpt-4o":                       (Decimal("2.50"),  Decimal("10.00")),
     "gpt-4o-mini":                  (Decimal("0.15"),  Decimal("0.60")),
+    "claude-sonnet-4-6":            (Decimal("3.00"),  Decimal("15.00")),
     "claude-sonnet-4-20250514":     (Decimal("3.00"),  Decimal("15.00")),
     "claude-haiku-4-5-20251001":    (Decimal("0.80"),  Decimal("4.00")),
 }

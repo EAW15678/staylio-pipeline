@@ -21,6 +21,8 @@ from typing import Optional
 import anthropic
 import openai
 
+from pipeline_emitter import emit_llm_cost
+
 from agents.agent2.models import (
     FAQ,
     ContentPackage,
@@ -84,7 +86,7 @@ def generate_content_package(
     logger.info(f"[Agent 2] Generating landing page content (Sonnet) for property {property_id}")
 
     sonnet_result, llm_errors = _generate_sonnet(
-        kb, seo_keywords, anthropic_client, openai_client
+        kb, seo_keywords, anthropic_client, openai_client, property_id
     )
     pkg.generation_errors.extend(llm_errors)
 
@@ -126,6 +128,7 @@ def _generate_sonnet(
     keywords: list[str],
     anthropic_client: anthropic.Anthropic,
     openai_client: Optional[openai.OpenAI],
+    property_id: str = "",
 ) -> tuple[Optional[dict], list[str]]:
     """
     Try Claude Sonnet first, fall back to GPT-4o on failure.
@@ -144,6 +147,15 @@ def _generate_sonnet(
                 max_tokens=SONNET_MAX_TOKENS,
                 system=system,
                 messages=[{"role": "user", "content": user}],
+            )
+            emit_llm_cost(
+                vendor="anthropic",
+                model=SONNET_MODEL,
+                input_tokens=resp.usage.input_tokens,
+                output_tokens=resp.usage.output_tokens,
+                property_id=property_id,
+                workflow_name="listing_generation",
+                generation_reason="landing_page_copy",
             )
             raw = resp.content[0].text
             return _parse_json_response(raw), errors
@@ -168,7 +180,7 @@ def _generate_sonnet(
     # Attempt 2: GPT-4o fallback (TS-06)
     if openai_client:
         logger.warning("[Agent 2] Claude failed — falling back to GPT-4o (TS-06)")
-        result, gpt_error = _generate_gpt4o(system, user, openai_client)
+        result, gpt_error = _generate_gpt4o(system, user, openai_client, property_id)
         if gpt_error:
             errors.append(gpt_error)
         return result, errors
@@ -180,6 +192,7 @@ def _generate_gpt4o(
     system: str,
     user: str,
     openai_client: openai.OpenAI,
+    property_id: str = "",
 ) -> tuple[Optional[dict], Optional[str]]:
     """GPT-4o fallback for landing page content generation (TS-06).
     Returns (parsed JSON dict or None, error string or None).
@@ -193,6 +206,15 @@ def _generate_gpt4o(
                 {"role": "user", "content": user},
             ],
             response_format={"type": "json_object"},
+        )
+        emit_llm_cost(
+            vendor="openai",
+            model=GPT4O_MODEL,
+            input_tokens=resp.usage.prompt_tokens,
+            output_tokens=resp.usage.completion_tokens,
+            property_id=property_id,
+            workflow_name="listing_generation",
+            generation_reason="landing_page_copy_fallback",
         )
         raw = resp.choices[0].message.content
         return _parse_json_response(raw), None
@@ -276,6 +298,15 @@ All captions must reference this specific property and feel distinct from each o
             max_tokens=HAIKU_MAX_TOKENS,
             system=_SOCIAL_CAPTION_SYSTEM,
             messages=[{"role": "user", "content": prompt}],
+        )
+        emit_llm_cost(
+            vendor="anthropic",
+            model=HAIKU_MODEL,
+            input_tokens=resp.usage.input_tokens,
+            output_tokens=resp.usage.output_tokens,
+            property_id=kb.get("property_id", ""),
+            workflow_name="listing_generation",
+            generation_reason="social_captions",
         )
         raw = resp.content[0].text
         items = _parse_json_response(raw)
