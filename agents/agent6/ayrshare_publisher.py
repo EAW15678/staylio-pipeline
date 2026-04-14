@@ -24,6 +24,7 @@ import httpx
 
 from agents.agent6.models import Platform, PostRecord, PostStatus
 from agents.agent6.utm_generator import validate_utm_link
+from pipeline_emitter import emit_media_cost
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,16 @@ def publish_post(
                 logger.info(
                     f"[TS-15] Published {post.platform}/{post.video_type or 'photo'} "
                     f"for property {post.property_id} → id={post.ayrshare_post_id}"
+                )
+                emit_media_cost(
+                    vendor="late",
+                    service="post",
+                    units=1,
+                    unit_name="posts",
+                    property_id=str(post.property_id) if hasattr(post, "property_id") else None,
+                    workflow_name="social_distribution",
+                    slot_name=post.platform.value if hasattr(post, "platform") else None,
+                    generation_reason="social_post_publish",
                 )
                 return post
 

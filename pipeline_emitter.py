@@ -100,6 +100,7 @@ CANONICAL_WORKFLOWS = frozenset({
     "property_enrichment",
     "page_rendering",
     "video_generation",
+    "social_distribution",
 })
 
 
@@ -163,6 +164,11 @@ APIFY_PRICING: dict[str, Decimal] = {
     "airbnb_listing": Decimal("0.005"),   # $5.00/1,000 — confirmed from billing Apr 2026
     "actor_start":    Decimal("0.0001"),  # per run, negligible
     "default":        Decimal("0.005"),
+}
+
+LATE_PRICING: dict[str, Decimal] = {
+    "post":    Decimal("0.158"),  # $19/mo Build plan ÷ 120 posts (Late/Zernio rebrand)
+    "default": Decimal("0.158"),
 }
 
 R2_CLASS_A_PER_MILLION  = Decimal("4.50")
@@ -351,6 +357,9 @@ def emit_media_cost(
         cost = Decimal(str(units)) * price_per_unit
     elif vendor == "apify":
         price_per_unit = APIFY_PRICING.get(service, APIFY_PRICING["default"])
+        cost = Decimal(str(units)) * price_per_unit
+    elif vendor == "late":
+        price_per_unit = LATE_PRICING.get(service, LATE_PRICING["default"])
         cost = Decimal(str(units)) * price_per_unit
     else:
         cost = Decimal("0")
