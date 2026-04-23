@@ -205,8 +205,7 @@ def _deploy_ical_worker(
     """
     if not CLOUDFLARE_API_KEY or not CLOUDFLARE_ACCOUNT_ID:
         logger.warning("[TS-14] Cloudflare credentials not configured — skipping worker deployment")
-        # Return a predictable fallback URL format for testing
-        return _worker_url(property_id)
+        return _worker_url(worker_name, CLOUDFLARE_ACCOUNT_ID)
 
     worker_name = _worker_name(property_id)
     worker_script = ICAL_WORKER_TEMPLATE.format(
@@ -225,10 +224,32 @@ def _deploy_ical_worker(
                 content=worker_script.encode(),
             )
             resp.raise_for_status()
-        return _worker_url(property_id)
+            subdomain = _get_workers_subdomain(client)
+        return _worker_url(worker_name, subdomain)
     except Exception as exc:
         logger.error(f"[TS-14] Cloudflare Worker deployment failed: {exc}")
         return None
+
+
+def _get_workers_subdomain(client: httpx.Client) -> str:
+    """
+    Retrieve the account's workers.dev subdomain via Cloudflare API.
+    Returns e.g. "erick-542". Falls back to CLOUDFLARE_ACCOUNT_ID on error
+    so existing behaviour is preserved if the API call fails.
+    """
+    try:
+        resp = client.get(
+            f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/workers/subdomain",
+            headers={"Authorization": f"Bearer {CLOUDFLARE_API_KEY}"},
+            timeout=10,
+        )
+        if resp.is_success:
+            subdomain = resp.json().get("result", {}).get("subdomain")
+            if subdomain:
+                return subdomain
+    except Exception as exc:
+        logger.warning(f"[TS-14] Could not fetch workers.dev subdomain: {exc}")
+    return CLOUDFLARE_ACCOUNT_ID  # fallback (preserves old behaviour)
 
 
 def _worker_name(property_id: str) -> str:
@@ -237,7 +258,6 @@ def _worker_name(property_id: str) -> str:
     return f"staylio-cal-{id_hash}"
 
 
-def _worker_url(property_id: str) -> str:
-    """Construct the expected Worker URL for a property."""
-    name = _worker_name(property_id)
-    return f"https://{name}.{CLOUDFLARE_ACCOUNT_ID}.workers.dev/calendar"
+def _worker_url(worker_name: str, subdomain: str) -> str:
+    """Construct the workers.dev URL for a deployed iCal Worker."""
+    return f"https://{worker_name}.{subdomain}.workers.dev/calendar"
