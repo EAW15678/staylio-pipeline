@@ -237,7 +237,13 @@ def build_landing_page_html(
     <div class="container">
       <h2>Check Availability</h2>
       <p class="calendar-subtext">Real-time availability based on the booking system</p>
-      <div id="calendar-widget" data-cache-url="{_esc(calendar_cache_endpoint or '')}"></div>
+      <div id="calendar-widget" data-cache-url="{_esc(calendar_cache_endpoint or '')}">
+        <div class="cal-nav">
+          <button id="cal-next-btn" class="cal-nav-btn" type="button">Next &#8594;</button>
+        </div>
+        <div id="cal-month-grid" class="cal-month-grid"></div>
+        <p class="calendar-legend"><span class="legend-available"></span> Available &nbsp;<span class="legend-blocked"></span> Unavailable</p>
+      </div>
       <p class="calendar-helper">Unavailable dates cannot be booked.</p>
       <div class="calendar-cta">
         <a href="{_esc(book_url_utm)}" class="staylio-cta-btn staylio-cta-full" target="_blank" rel="noopener" data-cta-type="book_now" data-cta-location="calendar">
@@ -803,52 +809,85 @@ def _calendar_widget_js() -> str:
     return;
   }
 
+  const MONTH_NAMES = ['January','February','March','April','May','June',
+                       'July','August','September','October','November','December'];
+  const MAX_ADVANCE = 12; // months forward from today
+
+  const today     = new Date();
+  const originYear  = today.getFullYear();
+  const originMonth = today.getMonth(); // 0-indexed, never goes backward
+
+  // offset = how many months past today's month the LEFT panel shows (0 = current)
+  let offset = 0;
+
+  let blockedRanges = [];
+
+  function isBlocked(date) {
+    return blockedRanges.some(r => date >= r.start && date < r.end);
+  }
+
+  function buildMonthHTML(year, month) {
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const firstDay    = new Date(year, month, 1).getDay();
+    let html = `<div class="calendar-month">`;
+    html += `<h3>${MONTH_NAMES[month]} ${year}</h3>`;
+    html += `<div class="calendar-grid">`;
+    html += ['Su','Mo','Tu','We','Th','Fr','Sa']
+              .map(d => `<div class="cal-header">${d}</div>`).join('');
+    for (let i = 0; i < firstDay; i++) html += '<div class="cal-day empty"></div>';
+    for (let day = 1; day <= daysInMonth; day++) {
+      const date = new Date(year, month, day);
+      const past = date < today;
+      const cls  = past ? 'cal-day past'
+                        : isBlocked(date) ? 'cal-day blocked'
+                                          : 'cal-day available';
+      html += `<div class="${cls}">${day}</div>`;
+    }
+    html += '</div></div>';
+    return html;
+  }
+
+  function render() {
+    // Left panel month
+    const leftDate  = new Date(originYear, originMonth + offset, 1);
+    const rightDate = new Date(originYear, originMonth + offset + 1, 1);
+
+    const atLimit = (offset + 1) >= MAX_ADVANCE;
+    const nextBtn = document.getElementById('cal-next-btn');
+    if (nextBtn) {
+      nextBtn.disabled = atLimit;
+      nextBtn.style.opacity  = atLimit ? '0.35' : '1';
+      nextBtn.style.cursor   = atLimit ? 'not-allowed' : 'pointer';
+    }
+
+    const grid = document.getElementById('cal-month-grid');
+    if (grid) {
+      grid.innerHTML = buildMonthHTML(leftDate.getFullYear(),  leftDate.getMonth())
+                     + buildMonthHTML(rightDate.getFullYear(), rightDate.getMonth());
+    }
+  }
+
   fetch(cacheUrl)
     .then(r => r.json())
     .then(data => {
-      const blocked = (data.blocked_dates || []).map(b => ({
+      blockedRanges = (data.blocked_dates || []).map(b => ({
         start: new Date(b.start),
-        end: new Date(b.end),
+        end:   new Date(b.end),
       }));
 
-      // Render a simple month-view calendar
-      widget.innerHTML = buildCalendarHTML(blocked, new Date());
+      // Wire navigation ONCE after data loads
+      const nextBtn = document.getElementById('cal-next-btn');
+      if (nextBtn) {
+        nextBtn.addEventListener('click', function() {
+          if (offset + 1 < MAX_ADVANCE) { offset += 1; render(); }
+        });
+      }
+
+      render();
     })
     .catch(() => {
       widget.innerHTML = '<p class="calendar-unavailable">Calendar temporarily unavailable.</p>';
     });
-
-  function buildCalendarHTML(blockedRanges, currentDate) {
-    const today = new Date();
-    const year = today.getFullYear();
-    const month = today.getMonth();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const firstDay = new Date(year, month, 1).getDay();
-
-    const monthNames = ['January','February','March','April','May','June',
-                        'July','August','September','October','November','December'];
-
-    let html = `<div class="calendar-month">`;
-    html += `<h3>${monthNames[month]} ${year}</h3>`;
-    html += `<div class="calendar-grid">`;
-    html += ['Su','Mo','Tu','We','Th','Fr','Sa']
-              .map(d => `<div class="cal-header">${d}</div>`).join('');
-
-    for (let i = 0; i < firstDay; i++) html += '<div class="cal-day empty"></div>';
-
-    for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month, day);
-      const isBlocked = blockedRanges.some(r => date >= r.start && date < r.end);
-      const isPast = date < today;
-      const cls = isPast ? 'cal-day past' : isBlocked ? 'cal-day blocked' : 'cal-day available';
-      html += `<div class="${cls}">${day}</div>`;
-    }
-
-    html += '</div></div>';
-    html += '<p class="calendar-legend"><span class="legend-available"></span> Available &nbsp;'
-          + '<span class="legend-blocked"></span> Unavailable</p>';
-    return html;
-  }
 })();
 """
 
@@ -1008,13 +1047,23 @@ def _page_css() -> str:
     .availability { text-align: center; }
     .calendar-subtext { font-size: .95rem; color: var(--color-muted); margin-bottom: 1rem; }
     .calendar-helper { font-size: .85rem; color: var(--color-muted); margin-top: .75rem; }
-    #calendar-widget { margin: 1.5rem auto; max-width: 640px; }
-    .calendar-month h3 { font-family: var(--font-serif); font-size: 1.4rem;
-                         margin-bottom: 1rem; }
+    #calendar-widget { margin: 1.5rem auto; max-width: 100%; }
+    /* Navigation */
+    .cal-nav { display: flex; justify-content: flex-end; margin-bottom: .75rem; }
+    .cal-nav-btn { background: transparent; border: 1px solid #ccc; border-radius: 4px;
+                   padding: .35rem .85rem; font-size: .9rem; cursor: pointer;
+                   color: var(--color-text, #222); }
+    .cal-nav-btn:hover:not(:disabled) { border-color: #888; }
+    /* Two-month grid */
+    .cal-month-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem;
+                      text-align: left; }
+    @media (max-width: 640px) { .cal-month-grid { grid-template-columns: 1fr; gap: 1.5rem; } }
+    .calendar-month h3 { font-family: var(--font-serif); font-size: 1.2rem;
+                         margin-bottom: .75rem; text-align: center; }
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
-    .cal-header { text-align: center; font-size: .8rem; color: var(--color-muted);
-                  padding: .4rem 0; font-weight: 500; }
-    .cal-day { text-align: center; padding: .6rem .2rem; font-size: .9rem; border-radius: 3px; }
+    .cal-header { text-align: center; font-size: .75rem; color: var(--color-muted);
+                  padding: .35rem 0; font-weight: 500; }
+    .cal-day { text-align: center; padding: .5rem .15rem; font-size: .85rem; border-radius: 3px; }
     .cal-day.available { background: #fff; color: #222;
                          border: 1px solid #e0e0e0; cursor: default; }
     .cal-day.available:hover { border-color: #999; }
@@ -1022,7 +1071,8 @@ def _page_css() -> str:
                        border: 1px solid #D9534F; cursor: not-allowed; pointer-events: none; }
     .cal-day.past { background: transparent; color: #ccc;
                     border: 1px solid transparent; }
-    .calendar-legend { font-size: .8rem; color: var(--color-muted); margin-top: .75rem; }
+    .calendar-legend { font-size: .8rem; color: var(--color-muted); margin-top: .75rem;
+                       text-align: center; }
     .legend-available, .legend-blocked { display: inline-block; width: 12px; height: 12px;
                                           margin-right: 4px; vertical-align: middle;
                                           border-radius: 2px; }
