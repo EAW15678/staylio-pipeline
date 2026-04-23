@@ -236,10 +236,12 @@ def build_landing_page_html(
   <section class="availability" id="availability">
     <div class="container">
       <h2>Check Availability</h2>
+      <p class="calendar-subtext">Real-time availability based on the booking system</p>
       <div id="calendar-widget" data-cache-url="{_esc(calendar_cache_endpoint or '')}"></div>
+      <p class="calendar-helper">Unavailable dates cannot be booked.</p>
       <div class="calendar-cta">
-        <a href="{_esc(book_url_utm)}" class="staylio-cta-btn" target="_blank" rel="noopener" data-cta-type="book_now" data-cta-location="calendar">
-          Book Direct — No OTA Fees
+        <a href="{_esc(book_url_utm)}" class="staylio-cta-btn staylio-cta-full" target="_blank" rel="noopener" data-cta-type="book_now" data-cta-location="calendar">
+          Check exact pricing &amp; book
         </a>
       </div>
     </div>
@@ -843,8 +845,8 @@ def _calendar_widget_js() -> str:
     }
 
     html += '</div></div>';
-    html += '<p class="calendar-legend"><span class="legend-available"></span> Available '
-          + '<span class="legend-blocked"></span> Booked</p>';
+    html += '<p class="calendar-legend"><span class="legend-available"></span> Available &nbsp;'
+          + '<span class="legend-blocked"></span> Unavailable</p>';
     return html;
   }
 })();
@@ -1004,22 +1006,30 @@ def _page_css() -> str:
 
     /* Calendar */
     .availability { text-align: center; }
+    .calendar-subtext { font-size: .95rem; color: var(--color-muted); margin-bottom: 1rem; }
+    .calendar-helper { font-size: .85rem; color: var(--color-muted); margin-top: .75rem; }
     #calendar-widget { margin: 1.5rem auto; max-width: 640px; }
     .calendar-month h3 { font-family: var(--font-serif); font-size: 1.4rem;
                          margin-bottom: 1rem; }
     .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
     .cal-header { text-align: center; font-size: .8rem; color: var(--color-muted);
                   padding: .4rem 0; font-weight: 500; }
-    .cal-day { text-align: center; padding: .6rem .2rem; font-size: .9rem; }
-    .cal-day.available { background: #e8f5e9; color: #2e7d32; }
-    .cal-day.blocked { background: #fce4ec; color: #c62828; }
-    .cal-day.past { color: #ccc; }
+    .cal-day { text-align: center; padding: .6rem .2rem; font-size: .9rem; border-radius: 3px; }
+    .cal-day.available { background: #fff; color: #222;
+                         border: 1px solid #e0e0e0; cursor: default; }
+    .cal-day.available:hover { border-color: #999; }
+    .cal-day.blocked { background: #D9534F; color: #fff;
+                       border: 1px solid #D9534F; cursor: not-allowed; pointer-events: none; }
+    .cal-day.past { background: transparent; color: #ccc;
+                    border: 1px solid transparent; }
     .calendar-legend { font-size: .8rem; color: var(--color-muted); margin-top: .75rem; }
     .legend-available, .legend-blocked { display: inline-block; width: 12px; height: 12px;
-                                          margin-right: 4px; vertical-align: middle; }
-    .legend-available { background: #e8f5e9; }
-    .legend-blocked { background: #fce4ec; }
+                                          margin-right: 4px; vertical-align: middle;
+                                          border-radius: 2px; }
+    .legend-available { background: #fff; border: 1px solid #e0e0e0; }
+    .legend-blocked { background: #D9534F; }
     .calendar-cta { margin-top: 2rem; }
+    .staylio-cta-full { display: block; width: 100%; text-align: center; box-sizing: border-box; }
 
     /* Local Guide */
     .area-intro { font-size: 1.05rem; line-height: 1.8; max-width: 680px;
