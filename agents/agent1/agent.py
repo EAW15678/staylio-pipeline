@@ -334,12 +334,105 @@ def _seed_asset_slots(property_id: str) -> None:
 
 # ── Photo Source Deduplication ────────────────────────────────────────────
 
+# Source priority for URL-based dedup: lower number = higher priority.
+# When two photos have the same canonical URL, keep the one from the higher-priority source.
+_SOURCE_PRIORITY: dict = {
+    "intake_portal": 0,
+    "pmc_website":   1,
+    "vrbo":          2,
+    "airbnb":        3,
+    "booking_com":   4,
+    "claude_parsed": 5,
+}
+
+
+def _canonical_photo_url(url: str) -> str:
+    """
+    Strip query params and URL fragments to produce a canonical URL for comparison.
+    Two VRBO URLs for the same image at different resize sizes
+    (e.g. ?rw=480 vs ?rw=1200) will produce the same canonical URL.
+    Returns the input unchanged if parsing fails.
+    """
+    from urllib.parse import urlparse, urlunparse
+    try:
+        p = urlparse(url)
+        # Keep scheme + netloc + path only; drop query and fragment
+        return urlunparse((p.scheme, p.netloc, p.path, "", "", ""))
+    except Exception:
+        return url
+
+
+def _dedupe_by_url(photos: list) -> list:
+    """
+    Phase 0 URL-canonicalization dedup: group photos by canonical URL
+    (path without query params). When two photos share the same canonical URL:
+      - Keep the one from the higher-priority source (PMC > VRBO > Airbnb)
+      - Merge caption (keep whichever is non-None)
+      - Merge category (keep whichever is non-None)
+      - Record the secondary source in alt_sources
+
+    Does NOT fetch bytes — O(n) with no network calls.
+    Returns the deduplicated list (order of first occurrence preserved).
+    """
+    from models.property import DataSource
+
+    canonical_map: dict[str, object] = {}   # canonical_url → PhotoAsset
+    url_duplicates = 0
+
+    for photo in photos:
+        canonical = _canonical_photo_url(photo.url)
+
+        if canonical not in canonical_map:
+            canonical_map[canonical] = photo
+            continue
+
+        # Duplicate canonical URL — decide which to keep
+        existing = canonical_map[canonical]
+        existing_prio = _SOURCE_PRIORITY.get(
+            existing.source.value if hasattr(existing.source, "value") else existing.source, 99
+        )
+        incoming_prio = _SOURCE_PRIORITY.get(
+            photo.source.value if hasattr(photo.source, "value") else photo.source, 99
+        )
+
+        if incoming_prio < existing_prio:
+            # Incoming is higher priority — replace, carry over metadata
+            if not photo.caption and existing.caption:
+                photo.caption = existing.caption
+            if not photo.category and existing.category:
+                photo.category = existing.category
+            photo.alt_sources = list(existing.alt_sources) + [existing.source]
+            canonical_map[canonical] = photo
+        else:
+            # Keep existing — absorb incoming source
+            if not existing.caption and photo.caption:
+                existing.caption = photo.caption
+            if not existing.category and photo.category:
+                existing.category = photo.category
+            if photo.source not in existing.alt_sources:
+                existing.alt_sources.append(photo.source)
+
+        url_duplicates += 1
+        logger.debug(f"[Agent 1] URL-dedup: merged {photo.url!r} → canonical {canonical!r}")
+
+    return list(canonical_map.values()), url_duplicates
+
+
 def _dedupe_photos(kb) -> object:
     """
-    SHA-256 deduplication of photos before expensive Claid processing.
-    On first run: fetches raw bytes, hashes, writes to source_assets.
-    On repeat runs: pre-queries known URLs to skip unnecessary byte fetches.
-    Duplicate photos (same bytes, different URLs) are removed from kb.photos.
+    Two-phase photo deduplication before expensive Claid processing.
+
+    Phase 0 — URL canonicalization (no network):
+      Strip query params from all URLs (resize tokens, cache params like rw/ra/impolicy/w/h).
+      Two URLs for the same image at different CDN sizes → same canonical → merged.
+      Source priority: PMC > VRBO > Airbnb. Captions and categories are merged.
+
+    Phase 1 — SHA-256 byte dedup (network, first run only):
+      Fetch bytes for new URLs, hash, record in source_assets.
+      Catches same image served from different CDN paths with identical bytes.
+      On repeat runs: pre-queries source_assets to skip already-known URLs.
+
+    Duplicate photos are removed from kb.photos.
     Non-fatal: if anything fails, kb.photos is returned unchanged.
     """
     import httpx
@@ -348,11 +441,36 @@ def _dedupe_photos(kb) -> object:
     if not kb.photos:
         return kb
 
+    raw_count = len(kb.photos)
+
+    # ── Log raw counts by source ──────────────────────────────────────────
+    source_counts: dict[str, int] = {}
+    for p in kb.photos:
+        src = p.source.value if hasattr(p.source, "value") else str(p.source)
+        source_counts[src] = source_counts.get(src, 0) + 1
+    logger.info(
+        f"[Agent 1] Photo dedup — raw input: {raw_count} photos by source: "
+        + ", ".join(f"{s}={n}" for s, n in sorted(source_counts.items()))
+    )
+
+    # ── Phase 0: URL canonicalization dedup (O(n), no network) ───────────
+    try:
+        phase0_photos, url_dupe_count = _dedupe_by_url(kb.photos)
+        logger.info(
+            f"[Agent 1] Phase 0 (URL dedup): {raw_count} → {len(phase0_photos)} "
+            f"({url_dupe_count} URL duplicates removed)"
+        )
+    except Exception as exc:
+        logger.warning(f"[Agent 1] URL dedup failed (non-fatal): {exc}")
+        phase0_photos = kb.photos
+        url_dupe_count = 0
+
+    # ── Phase 1: SHA-256 byte dedup (fetches bytes for new URLs only) ────
     try:
         supabase = get_supabase()
 
         # Pre-query all known source URLs for this property — avoids re-fetching
-        # bytes on repeat pipeline runs. One query up front, zero wasted fetches.
+        # bytes on repeat pipeline runs.
         existing_result = (
             supabase.table("source_assets")
             .select("source_url,is_canonical")
@@ -367,9 +485,10 @@ def _dedupe_photos(kb) -> object:
         canonical_hashes: dict[str, str] = {}  # content_hash → source_asset_id
         canonical_photos = []
         skipped_known = 0
+        byte_dupe_count = 0
 
         with httpx.Client(timeout=30) as client:
-            for photo in kb.photos:
+            for photo in phase0_photos:
                 # Fast path: URL already recorded from a previous run
                 if photo.url in existing_urls:
                     if existing_urls[photo.url]:
@@ -400,7 +519,8 @@ def _dedupe_photos(kb) -> object:
                             "source_system":      photo.source if isinstance(photo.source, str) else photo.source.value,
                             "source_url":         photo.url,
                         }).execute()
-                        logger.debug(f"[Agent 1] Duplicate photo skipped: {photo.url}")
+                        byte_dupe_count += 1
+                        logger.debug(f"[Agent 1] Byte-dedup: duplicate skipped: {photo.url}")
                     else:
                         # New canonical photo — record and keep
                         asset_id = str(_uuid.uuid4())
@@ -421,17 +541,18 @@ def _dedupe_photos(kb) -> object:
                     logger.warning(f"[Agent 1] Could not dedupe photo {photo.url}: {photo_exc}")
                     canonical_photos.append(photo)
 
-        removed = len(kb.photos) - len(canonical_photos) - skipped_known
         logger.info(
-            f"[Agent 1] Photo dedupe: {len(canonical_photos)} canonical, "
-            f"{removed} new duplicates, {skipped_known} known duplicates skipped "
-            f"(pre-query cache hit)"
+            f"[Agent 1] Photo dedup complete: {raw_count} raw → {len(canonical_photos)} canonical | "
+            f"URL dupes removed: {url_dupe_count}, "
+            f"byte dupes removed: {byte_dupe_count}, "
+            f"known-URL cache hits: {skipped_known}"
         )
         kb.photos = canonical_photos
         return kb
 
     except Exception as exc:
-        logger.warning(f"[Agent 1] Photo deduplication failed (non-fatal): {exc}")
+        logger.warning(f"[Agent 1] Photo deduplication (Phase 1) failed (non-fatal): {exc}")
+        kb.photos = phase0_photos
         return kb
 
 

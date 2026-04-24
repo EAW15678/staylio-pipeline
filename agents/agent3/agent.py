@@ -33,7 +33,7 @@ from typing import Optional
 import httpx
 from PIL import Image
 
-from agents.agent3.claid_enhancer import enhance_photo_batch_sync
+from agents.agent3.claid_enhancer import enhance_photo_batch_sync, ENHANCEMENT_CAP
 from agents.agent3.crop_orchestrator import generate_social_crops
 from agents.agent3.models import (
     MediaAsset,
@@ -63,6 +63,16 @@ logger = logging.getLogger(__name__)
 AGENT_NUMBER = 3
 DOWNLOAD_CONCURRENCY = 10
 DOWNLOAD_TIMEOUT     = 30
+
+# Source priority for enhancement selection when the cap is applied.
+# Lower number = higher priority. PMC uploads are selected first,
+# then VRBO, then Airbnb. Unknown sources fill last.
+_ENHANCEMENT_SOURCE_PRIORITY: dict[str, int] = {
+    "intake_upload":  0,
+    "vrbo_scraped":   1,
+    "airbnb_scraped": 2,
+    "unknown":        3,
+}
 
 
 def agent3_node(state: dict) -> dict:
@@ -144,13 +154,32 @@ def agent3_node(state: dict) -> dict:
     # ── Step 4: Claid.ai enhancement (TS-07) ─────────────────────────────
     # Check Supabase for previously enhanced photos — skip Claid for those
     cached_enhancements = _fetch_cached_enhancements(property_id)
+
+    # Log per-source breakdown before cap decision
+    source_counts: dict[str, int] = {}
+    for a in assets:
+        source_counts[a.source] = source_counts.get(a.source, 0) + 1
     logger.info(
-        f"[Agent 3] Enhancement cache: {len(cached_enhancements)} previously enhanced "
-        f"out of {len(assets)} assets"
+        f"[Agent 3] Photos by source: "
+        + ", ".join(f"{s}={n}" for s, n in sorted(source_counts.items()))
+        + f" | Supabase cache hits: {len(cached_enhancements)}"
     )
 
     uncached_assets = [a for a in assets if a.asset_url_original not in cached_enhancements]
-    uncached_urls   = [a.asset_url_original for a in uncached_assets]
+
+    # Apply source-priority cap before sending to Claid
+    selected_for_enhancement, skipped_cap = _select_for_enhancement(
+        uncached_assets, cap=ENHANCEMENT_CAP
+    )
+    logger.info(
+        f"[Agent 3] Enhancement cap={ENHANCEMENT_CAP}: "
+        f"{len(selected_for_enhancement)} selected, "
+        f"{len(cached_enhancements)} from cache, "
+        f"{len(skipped_cap)} skipped (over cap), "
+        f"total assets={len(assets)}"
+    )
+
+    uncached_urls = [a.asset_url_original for a in selected_for_enhancement]
 
     if uncached_urls:
         logger.info(f"[Agent 3] Sending {len(uncached_urls)} photos to Claid.ai")
@@ -372,6 +401,28 @@ def _detect_source(url: str) -> str:
     if "getbooked" in url or "r2.cloudflarestorage" in url:
         return "intake_upload"
     return "unknown"
+
+
+def _select_for_enhancement(
+    assets: list,
+    cap: int,
+) -> tuple[list, list]:
+    """
+    Select which assets to send to Claid.ai, applying a hard cap.
+
+    Assets are sorted by source priority (PMC uploads first, then VRBO, then
+    Airbnb, then unknown). The first `cap` assets are selected for enhancement;
+    the rest are returned as skipped and will remain at their original R2 URLs.
+
+    Returns (selected, skipped).
+    """
+    sorted_assets = sorted(
+        assets,
+        key=lambda a: _ENHANCEMENT_SOURCE_PRIORITY.get(a.source, 99),
+    )
+    selected = sorted_assets[:cap]
+    skipped  = sorted_assets[cap:]
+    return selected, skipped
 
 
 def _fetch_cached_enhancements(property_id: str) -> dict[str, str]:

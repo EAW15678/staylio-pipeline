@@ -32,7 +32,11 @@ from agents.agent1.apify_scraper import (
     _flatten_vrbo_gallery,
     _flatten_vrbo_nested_items,
 )
-from agents.agent1.agent import _generate_slug
+from agents.agent1.agent import (
+    _generate_slug,
+    _canonical_photo_url,
+    _dedupe_by_url,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────
@@ -327,6 +331,140 @@ class TestAirbnbMapping:
 
         assert len(result.ingestion_errors) > 0
         assert result.name is None   # KB unchanged
+
+
+# ── Photo Deduplication Tests ─────────────────────────────────────────────
+
+class TestPhotoDedupe:
+    """Tests for URL-canonicalization dedup (Phase 0 of _dedupe_photos)."""
+
+    # ── _canonical_photo_url ─────────────────────────────────────────────
+
+    def test_strips_query_params(self):
+        url = "https://media.vrbo.com/lodging/xxx/Photo_1.jpg?impolicy=resizecrop&rw=480&ra=fit"
+        result = _canonical_photo_url(url)
+        assert "?" not in result
+        assert "impolicy" not in result
+        assert result.endswith("/Photo_1.jpg")
+
+    def test_same_image_different_resize_params_canonical_equal(self):
+        url1 = "https://media.vrbo.com/lodging/xxx/Photo_1.jpg?rw=480"
+        url2 = "https://media.vrbo.com/lodging/xxx/Photo_1.jpg?rw=1200"
+        assert _canonical_photo_url(url1) == _canonical_photo_url(url2)
+
+    def test_airbnb_size_param_stripped(self):
+        url1 = "https://a0.muscache.com/im/pictures/abc123.jpg?im_w=720"
+        url2 = "https://a0.muscache.com/im/pictures/abc123.jpg?im_w=1440"
+        assert _canonical_photo_url(url1) == _canonical_photo_url(url2)
+
+    def test_different_image_paths_stay_distinct(self):
+        url1 = "https://media.vrbo.com/lodging/xxx/Photo_1.jpg"
+        url2 = "https://media.vrbo.com/lodging/xxx/Photo_2.jpg"
+        assert _canonical_photo_url(url1) != _canonical_photo_url(url2)
+
+    def test_url_without_query_unchanged(self):
+        url = "https://media.vrbo.com/lodging/xxx/Photo_1.jpg"
+        assert _canonical_photo_url(url) == url
+
+    def test_strips_fragment(self):
+        url = "https://example.com/photo.jpg#section"
+        result = _canonical_photo_url(url)
+        assert "#" not in result
+
+    def test_malformed_url_returns_input(self):
+        url = "not-a-valid-url"
+        assert _canonical_photo_url(url) == url
+
+    # ── _dedupe_by_url ───────────────────────────────────────────────────
+
+    def test_exact_same_url_deduped(self):
+        photos = [
+            PhotoAsset(url="https://example.com/photo.jpg", source=DataSource.AIRBNB),
+            PhotoAsset(url="https://example.com/photo.jpg", source=DataSource.VRBO),
+        ]
+        result, dupe_count = _dedupe_by_url(photos)
+        assert len(result) == 1
+        assert dupe_count == 1
+
+    def test_same_path_different_query_params_deduped(self):
+        photos = [
+            PhotoAsset(url="https://media.vrbo.com/xxx/Photo_1.jpg?rw=480", source=DataSource.VRBO),
+            PhotoAsset(url="https://media.vrbo.com/xxx/Photo_1.jpg?rw=1200", source=DataSource.VRBO),
+        ]
+        result, dupe_count = _dedupe_by_url(photos)
+        assert len(result) == 1
+        assert dupe_count == 1
+
+    def test_different_paths_both_kept(self):
+        photos = [
+            PhotoAsset(url="https://media.vrbo.com/xxx/Photo_1.jpg", source=DataSource.VRBO),
+            PhotoAsset(url="https://media.vrbo.com/xxx/Photo_2.jpg", source=DataSource.VRBO),
+        ]
+        result, dupe_count = _dedupe_by_url(photos)
+        assert len(result) == 2
+        assert dupe_count == 0
+
+    def test_higher_priority_source_wins(self):
+        """PMC_WEBSITE beats AIRBNB when deduping same canonical URL."""
+        photos = [
+            PhotoAsset(url="https://example.com/photo.jpg?size=small", source=DataSource.AIRBNB),
+            PhotoAsset(url="https://example.com/photo.jpg?size=large", source=DataSource.PMC_WEBSITE),
+        ]
+        result, _ = _dedupe_by_url(photos)
+        assert len(result) == 1
+        assert result[0].source == DataSource.PMC_WEBSITE
+
+    def test_vrbo_beats_airbnb_on_dedup(self):
+        photos = [
+            PhotoAsset(url="https://example.com/photo.jpg?im_w=720", source=DataSource.AIRBNB),
+            PhotoAsset(url="https://example.com/photo.jpg?rw=1200", source=DataSource.VRBO),
+        ]
+        result, _ = _dedupe_by_url(photos)
+        assert len(result) == 1
+        assert result[0].source == DataSource.VRBO
+
+    def test_caption_merged_from_secondary_source(self):
+        """When deduping, keep caption from whichever source has one."""
+        photos = [
+            PhotoAsset(
+                url="https://media.vrbo.com/xxx/Photo_1.jpg?rw=480",
+                source=DataSource.VRBO,
+                caption=None,
+                category="pool",
+            ),
+            PhotoAsset(
+                url="https://media.vrbo.com/xxx/Photo_1.jpg?rw=1200",
+                source=DataSource.AIRBNB,
+                caption="Beautiful pool view",
+                category=None,
+            ),
+        ]
+        result, _ = _dedupe_by_url(photos)
+        assert len(result) == 1
+        # VRBO wins (higher priority), but caption merges from Airbnb
+        assert result[0].source == DataSource.VRBO
+        assert result[0].caption == "Beautiful pool view"
+        assert result[0].category == "pool"
+
+    def test_alt_sources_populated_on_merge(self):
+        photos = [
+            PhotoAsset(url="https://example.com/photo.jpg", source=DataSource.VRBO),
+            PhotoAsset(url="https://example.com/photo.jpg?rw=480", source=DataSource.AIRBNB),
+        ]
+        result, _ = _dedupe_by_url(photos)
+        assert len(result) == 1
+        assert DataSource.AIRBNB in result[0].alt_sources
+
+    def test_empty_list_returns_empty(self):
+        result, dupe_count = _dedupe_by_url([])
+        assert result == []
+        assert dupe_count == 0
+
+    def test_single_photo_unchanged(self):
+        photos = [PhotoAsset(url="https://example.com/photo.jpg", source=DataSource.AIRBNB)]
+        result, dupe_count = _dedupe_by_url(photos)
+        assert len(result) == 1
+        assert dupe_count == 0
 
 
 # ── VRBO Scraper Tests ────────────────────────────────────────────────────

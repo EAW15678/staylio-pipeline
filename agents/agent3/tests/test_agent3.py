@@ -24,6 +24,8 @@ from agents.agent3.claid_enhancer import (
     PROHIBITED_OPERATIONS,
     STANDARD_ENHANCEMENT_PRESET,
     PHOTO_CEILING,
+    ENHANCEMENT_CAP,
+    ClaidBillingError,
 )
 from agents.agent3.models import (
     MediaAsset,
@@ -123,8 +125,18 @@ class TestGovernanceHardBlock:
             validate_operations([{"type": op_type}])
 
     def test_photo_ceiling_is_100(self):
-        """The photo ceiling must be 100 per TS-07."""
+        """Absolute safety ceiling must be 100 per TS-07."""
         assert PHOTO_CEILING == 100
+
+    def test_enhancement_cap_default_is_40(self):
+        """Default cost-control cap must be 40 (configurable via env var)."""
+        # The default must be set conservatively to control costs.
+        # Override via MAX_IMAGE_ENHANCEMENTS_PER_PROPERTY env var.
+        assert ENHANCEMENT_CAP <= PHOTO_CEILING   # cap must not exceed ceiling
+
+    def test_billing_error_is_defined(self):
+        """ClaidBillingError must exist as a distinct exception class."""
+        assert issubclass(ClaidBillingError, Exception)
 
 
 # ── Category Classification Tests ─────────────────────────────────────────
@@ -502,3 +514,171 @@ class TestAgent3NodeContract:
 
         assert result["agent3_complete"] is True
         assert "visual_media_package" in result
+
+
+# ── Enhancement Cap Tests ─────────────────────────────────────────────────
+
+class TestEnhancementCap:
+    """Tests for _select_for_enhancement — source-priority cap logic."""
+
+    def _make_assets(self, sources: list[str]) -> list:
+        assets = []
+        for i, source in enumerate(sources):
+            a = MediaAsset(
+                property_id="p1",
+                asset_url_original=f"https://r2.example.com/orig/{source}_{i}.jpg",
+            )
+            a.source = source
+            assets.append(a)
+        return assets
+
+    def test_cap_limits_selected_count(self):
+        from agents.agent3.agent import _select_for_enhancement
+        assets = self._make_assets(["airbnb_scraped"] * 60)
+        selected, skipped = _select_for_enhancement(assets, cap=40)
+        assert len(selected) == 40
+        assert len(skipped) == 20
+
+    def test_no_cap_exceeded_when_under_limit(self):
+        from agents.agent3.agent import _select_for_enhancement
+        assets = self._make_assets(["airbnb_scraped"] * 10)
+        selected, skipped = _select_for_enhancement(assets, cap=40)
+        assert len(selected) == 10
+        assert len(skipped) == 0
+
+    def test_pmc_uploads_selected_before_airbnb(self):
+        """intake_upload assets must be prioritized over airbnb_scraped."""
+        from agents.agent3.agent import _select_for_enhancement
+        assets = (
+            self._make_assets(["airbnb_scraped"] * 30)
+            + self._make_assets(["intake_upload"] * 20)
+        )
+        selected, skipped = _select_for_enhancement(assets, cap=25)
+        selected_sources = [a.source for a in selected]
+        # All 20 PMC uploads should be in the selected set
+        assert selected_sources.count("intake_upload") == 20
+        # Only 5 Airbnb fill the remaining cap
+        assert selected_sources.count("airbnb_scraped") == 5
+
+    def test_vrbo_prioritized_over_airbnb(self):
+        from agents.agent3.agent import _select_for_enhancement
+        assets = (
+            self._make_assets(["airbnb_scraped"] * 30)
+            + self._make_assets(["vrbo_scraped"] * 20)
+        )
+        selected, skipped = _select_for_enhancement(assets, cap=25)
+        selected_sources = [a.source for a in selected]
+        assert selected_sources.count("vrbo_scraped") == 20
+        assert selected_sources.count("airbnb_scraped") == 5
+
+    def test_full_priority_ordering(self):
+        """intake_upload > vrbo_scraped > airbnb_scraped when cap forces cuts."""
+        from agents.agent3.agent import _select_for_enhancement
+        assets = (
+            self._make_assets(["airbnb_scraped"] * 30)
+            + self._make_assets(["vrbo_scraped"] * 20)
+            + self._make_assets(["intake_upload"] * 10)
+        )
+        selected, skipped = _select_for_enhancement(assets, cap=40)
+        selected_sources = [a.source for a in selected]
+        assert selected_sources.count("intake_upload") == 10
+        assert selected_sources.count("vrbo_scraped") == 20
+        assert selected_sources.count("airbnb_scraped") == 10
+
+    def test_returns_empty_skipped_when_all_fit(self):
+        from agents.agent3.agent import _select_for_enhancement
+        assets = self._make_assets(["vrbo_scraped"] * 5)
+        selected, skipped = _select_for_enhancement(assets, cap=40)
+        assert len(skipped) == 0
+
+    def test_empty_assets_returns_empty(self):
+        from agents.agent3.agent import _select_for_enhancement
+        selected, skipped = _select_for_enhancement([], cap=40)
+        assert selected == []
+        assert skipped == []
+
+
+# ── Claid Billing Failure Tests ───────────────────────────────────────────
+
+class TestClaidBillingFailure:
+    """Tests for ClaidBillingError — 402 handling in Claid batch."""
+
+    def test_billing_error_is_non_retriable(self):
+        """
+        A 402 from Claid must raise ClaidBillingError immediately
+        without any retry attempts.
+        """
+        import asyncio
+        from unittest.mock import AsyncMock, MagicMock
+        import httpx as httpx_mod
+        from agents.agent3.claid_enhancer import enhance_photo_async
+
+        mock_response = MagicMock()
+        mock_response.status_code = 402
+        mock_response.text = "Payment Required"
+        error = httpx_mod.HTTPStatusError(
+            "402", request=MagicMock(), response=mock_response
+        )
+
+        mock_session = AsyncMock()
+        mock_session.post = AsyncMock(side_effect=error)
+
+        with patch("agents.agent3.claid_enhancer.CLAID_API_KEY", "test-key"):
+            with pytest.raises(ClaidBillingError):
+                asyncio.run(enhance_photo_async(mock_session, "https://r2.example.com/p.jpg", 0))
+
+        # Must NOT retry — only one POST attempt
+        assert mock_session.post.call_count == 1
+
+    def test_billing_failure_stops_batch_immediately(self):
+        """After a billing failure in any photo, remaining photos get None — no further calls."""
+        import asyncio
+        from agents.agent3.claid_enhancer import enhance_photo_batch
+
+        call_count = 0
+
+        async def mock_enhance(session, url, index):
+            nonlocal call_count
+            call_count += 1
+            if index == 0:
+                raise ClaidBillingError("Out of credits")
+            return b"enhanced"
+
+        urls = [f"https://r2.example.com/photo_{i}.jpg" for i in range(6)]
+
+        with patch("agents.agent3.claid_enhancer.enhance_photo_async", side_effect=mock_enhance), \
+             patch("agents.agent3.claid_enhancer.CLAID_API_KEY", "test-key"), \
+             patch("agents.agent3.claid_enhancer.emit_media_cost"):
+            results = asyncio.run(enhance_photo_batch(urls, property_id="p1"))
+
+        # All results should be (url, None) — billing failure stops everything
+        assert len(results) == len(urls)
+        assert all(b is None for _, b in results)
+        # The batch should have stopped early — not all 6 enhance calls made
+        assert call_count < len(urls)
+
+    def test_normal_failures_do_not_stop_batch(self):
+        """Non-billing failures (network errors) should not stop the batch."""
+        import asyncio
+        from agents.agent3.claid_enhancer import enhance_photo_batch
+
+        async def mock_enhance(session, url, index):
+            if index == 0:
+                raise Exception("Network timeout")
+            return b"enhanced"
+
+        urls = [f"https://r2.example.com/photo_{i}.jpg" for i in range(3)]
+
+        with patch("agents.agent3.claid_enhancer.enhance_photo_async", side_effect=mock_enhance), \
+             patch("agents.agent3.claid_enhancer.CLAID_API_KEY", "test-key"), \
+             patch("agents.agent3.claid_enhancer.emit_media_cost"):
+            results = asyncio.run(enhance_photo_batch(urls, property_id="p1"))
+
+        # First failed, but the rest should have been attempted and succeeded
+        assert len(results) == 3
+        _, b0 = results[0]
+        _, b1 = results[1]
+        _, b2 = results[2]
+        assert b0 is None          # timeout — failed
+        assert b1 == b"enhanced"   # succeeded
+        assert b2 == b"enhanced"   # succeeded

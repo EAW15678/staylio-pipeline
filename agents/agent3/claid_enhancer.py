@@ -31,6 +31,14 @@ logger = logging.getLogger(__name__)
 CLAID_API_BASE  = "https://api.claid.ai/v1-beta1"
 CLAID_API_KEY   = os.environ.get("CLAID_API_KEY", "")
 
+
+class ClaidBillingError(Exception):
+    """
+    Raised when Claid.ai returns 402 Payment Required (out of credits).
+    Treated as a permanent, non-retriable failure — the entire batch stops
+    immediately rather than burning retries against a depleted account.
+    """
+
 # Governance: the ONLY operations Agent 3 may request from Claid.ai
 PERMITTED_OPERATIONS = frozenset({
     "upscale",
@@ -72,8 +80,14 @@ STANDARD_ENHANCEMENT_PRESET = {
     }
 }
 
-# Maximum photos per property (cost ceiling)
+# Absolute safety ceiling — no more than this many photos can ever reach Claid per run.
+# Set at 100 to match TS-07 spec. The cost-control cap (ENHANCEMENT_CAP) is applied
+# upstream in agent3/agent.py before photos are passed to this module.
 PHOTO_CEILING = 100
+# Per-property cost-control cap: how many photos to actually send to Claid.
+# PMC/VRBO photos are prioritized; Airbnb photos fill the remainder.
+# Override via MAX_IMAGE_ENHANCEMENTS_PER_PROPERTY env var.
+ENHANCEMENT_CAP = int(os.environ.get("MAX_IMAGE_ENHANCEMENTS_PER_PROPERTY", "40"))
 # Claid.ai batch concurrency per property
 BATCH_CONCURRENCY = 3
 
@@ -159,11 +173,19 @@ async def enhance_photo_async(
             return dl_resp.content
 
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 429 and attempt < 3:
+            status = exc.response.status_code
+            if status == 402:
+                # Billing/credit exhaustion — non-retriable; raise so the batch stops
+                logger.error(
+                    f"[TS-07] Claid.ai 402 Payment Required — account out of credits. "
+                    f"Stopping batch. Remaining photos will be unenhanced."
+                )
+                raise ClaidBillingError("Claid.ai out of credits (402)")
+            if status == 429 and attempt < 3:
                 logger.warning(f"[TS-07] Claid 429 rate limit — retry {attempt}/3 for {original_url}")
                 await asyncio.sleep(5)
                 continue
-            logger.error(f"[TS-07] Claid.ai HTTP error: status={exc.response.status_code} body={exc.response.text}")
+            logger.error(f"[TS-07] Claid.ai HTTP error: status={status} body={exc.response.text}")
             return None
         except Exception as exc:
             logger.error(f"Claid.ai enhancement failed for photo {photo_index}: {exc}")
@@ -190,10 +212,13 @@ async def enhance_photo_batch(
         )
 
     results: list[tuple[str, Optional[bytes]]] = []
+    billing_failed = False
 
     # Process in batches of BATCH_CONCURRENCY
     async with httpx.AsyncClient() as session:
         for batch_start in range(0, len(capped_urls), BATCH_CONCURRENCY):
+            if billing_failed:
+                break
             batch = capped_urls[batch_start:batch_start + BATCH_CONCURRENCY]
             tasks = [
                 enhance_photo_async(session, url, batch_start + i)
@@ -201,11 +226,22 @@ async def enhance_photo_batch(
             ]
             batch_results = await asyncio.gather(*tasks, return_exceptions=True)
             for url, result in zip(batch, batch_results):
-                if isinstance(result, Exception):
+                if isinstance(result, ClaidBillingError):
+                    billing_failed = True
+                    results.append((url, None))
+                elif isinstance(result, Exception):
                     logger.error(f"Enhancement task raised exception for {url}: {result}")
                     results.append((url, None))
                 else:
                     results.append((url, result))
+            if billing_failed:
+                # Fill remaining URLs with (url, None) — no further Claid calls
+                remaining = capped_urls[len(results):]
+                for url in remaining:
+                    results.append((url, None))
+                logger.warning(
+                    f"[TS-07] Billing failure — {len(remaining)} photos left unenhanced"
+                )
 
     success_count = sum(1 for _, b in results if b is not None)
     logger.info(

@@ -41,6 +41,7 @@ class PhotoAsset:
     category: Optional[str] = None       # exterior, kitchen, bedroom, view, etc.
     caption: Optional[str] = None        # owner-provided caption from intake
     order: int = 0                       # display ordering hint from source
+    alt_sources: list = field(default_factory=list)  # Additional sources merged during URL dedup
 
     def to_dict(self) -> dict:
         return {
@@ -49,6 +50,7 @@ class PhotoAsset:
             "category": self.category,
             "caption": self.caption,
             "order": self.order,
+            "alt_sources": [s.value if hasattr(s, "value") else s for s in self.alt_sources],
         }
 
 
