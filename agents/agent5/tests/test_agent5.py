@@ -43,6 +43,10 @@ from agents.agent5.page_builder import (
     _esc,
     _format_description,
     build_landing_page_html,
+    _prepare_gallery_items,
+    MAX_GALLERY_IMAGES,
+    MAX_IMAGES_PER_GALLERY_CATEGORY,
+    _GALLERY_CATEGORY_ORDER,
 )
 from agents.agent5.ab_testing import generate_growthbook_snippet
 
@@ -548,3 +552,119 @@ class TestAgent5NodeContract:
             result = agent5_node(state)
 
         assert result["agent5_complete"] is False
+
+
+# ── Gallery Preparation Tests ─────────────────────────────────────────────
+
+def _make_asset(category: str, rank: int, labels=None, url_suffix=""):
+    """Helper: minimal media_asset dict."""
+    return {
+        "asset_url_enhanced": f"https://r2.example.com/{category}_{rank}{url_suffix}.jpg",
+        "subject_category": category,
+        "category_rank": rank,
+        "labels_enhanced": labels or [],
+    }
+
+
+class TestGalleryPreparation:
+
+    def test_max_gallery_constant_is_50(self):
+        assert MAX_GALLERY_IMAGES == 50
+
+    def test_max_per_category_constant_is_8(self):
+        assert MAX_IMAGES_PER_GALLERY_CATEGORY == 8
+
+    def test_never_exceeds_50_items(self):
+        # 6 categories x 20 photos each = 120 candidates
+        assets = []
+        for cat in ["exterior", "view", "pool_hot_tub", "outdoor_entertaining", "living_room", "kitchen"]:
+            for rank in range(1, 21):
+                assets.append(_make_asset(cat, rank))
+        items = _prepare_gallery_items(assets, "", [], "TestProp")
+        assert len(items) <= 50
+
+    def test_first_pass_cap_per_category(self):
+        # 3 categories x 12 photos = 36 total, well under 50 — all 36 appear
+        assets = []
+        for cat in ["exterior", "view", "pool_hot_tub"]:
+            for rank in range(1, 13):
+                assets.append(_make_asset(cat, rank))
+        items = _prepare_gallery_items(assets, "", [], "TestProp")
+        assert len(items) == 36
+
+    def test_category_balancing_with_overflow(self):
+        # 2 categories x 30 = 60 candidates; first pass 8+8=16, second pass fills 34 -> 50
+        assets = []
+        for rank in range(1, 31):
+            assets.append(_make_asset("exterior", rank))
+            assets.append(_make_asset("view", rank))
+        items = _prepare_gallery_items(assets, "", [], "TestProp")
+        assert len(items) == 50
+        cat_counts = {}
+        for item in items:
+            cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
+        assert cat_counts.get("exterior", 0) + cat_counts.get("view", 0) == 50
+
+    def test_priority_order_exterior_before_kitchen(self):
+        assets = [
+            _make_asset("kitchen", 1),
+            _make_asset("exterior", 1),
+        ]
+        items = _prepare_gallery_items(assets, "", [], "TestProp")
+        cats = [i["category"] for i in items]
+        assert cats.index("exterior") < cats.index("kitchen")
+
+    def test_priority_order_view_before_bathroom(self):
+        assets = [
+            _make_asset("bathroom", 1),
+            _make_asset("view", 1),
+            _make_asset("exterior", 1),
+        ]
+        items = _prepare_gallery_items(assets, "", [], "TestProp")
+        cats = [i["category"] for i in items]
+        assert cats.index("view") < cats.index("bathroom")
+
+    def test_pool_before_bedroom(self):
+        assets = [
+            _make_asset("master_bedroom", 1),
+            _make_asset("pool_hot_tub", 1),
+        ]
+        items = _prepare_gallery_items(assets, "", [], "TestProp")
+        cats = [i["category"] for i in items]
+        assert cats.index("pool_hot_tub") < cats.index("master_bedroom")
+
+    def test_alt_text_includes_property_name_when_labels_present(self):
+        assets = [_make_asset("exterior", 1, labels=["facade", "villa", "balcony"])]
+        items = _prepare_gallery_items(assets, "", [], "Vista Azule")
+        assert items[0]["alt"].startswith("Vista Azule")
+        assert "facade" in items[0]["alt"]
+
+    def test_alt_text_format_with_labels(self):
+        assets = [_make_asset("view", 1, labels=["ocean", "horizon", "sunset", "waves"])]
+        items = _prepare_gallery_items(assets, "", [], "Sea Breeze")
+        assert items[0]["alt"] == "Sea Breeze \u2013 ocean, horizon, sunset"
+
+    def test_alt_text_fallback_no_labels(self):
+        assets = [_make_asset("kitchen", 1, labels=[])]
+        items = _prepare_gallery_items(assets, "", [], "The Cottage")
+        assert items[0]["alt"] == "The Cottage photo"
+
+    def test_hero_photo_excluded(self):
+        hero = "https://r2.example.com/hero.jpg"
+        assets = [
+            {"asset_url_enhanced": hero, "subject_category": "exterior", "category_rank": 1, "labels_enhanced": []},
+            _make_asset("view", 1),
+        ]
+        items = _prepare_gallery_items(assets, hero, [], "Prop")
+        urls = [i["url"] for i in items]
+        assert hero not in urls
+
+    def test_fallback_to_kb_photos_when_no_media_assets(self):
+        kb_photos = [
+            {"url": "https://r2.example.com/kb1.jpg", "caption": "Front entrance"},
+            {"url": "https://r2.example.com/kb2.jpg", "caption": ""},
+        ]
+        items = _prepare_gallery_items([], "", kb_photos, "Mountain Haus")
+        assert len(items) == 2
+        assert items[0]["alt"] == "Front entrance"
+        assert items[1]["alt"] == "Mountain Haus photo"

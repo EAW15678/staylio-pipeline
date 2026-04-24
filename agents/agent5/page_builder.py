@@ -41,6 +41,9 @@ UTM_TEMPLATE = "?utm_source=booked&utm_medium=landing_page&utm_campaign={slug}&u
 
 # ── Gallery ordering & grouping ───────────────────────────────────────────
 
+MAX_GALLERY_IMAGES = 50          # maximum photos shown in the gallery
+MAX_IMAGES_PER_GALLERY_CATEGORY = 8  # per-category cap (first pass balancing)
+
 # Category sort order for the gallery (lower index = appears first).
 # Matches the SubjectCategory enum values from agent3/models.py.
 _GALLERY_CATEGORY_ORDER: list[str] = [
@@ -580,12 +583,14 @@ def _prepare_gallery_items(
       2. category_rank (ascending — 1 = best photo of that type)
 
     Alt text:
-      - labels_enhanced[0:3] joined if present (Vision API labels)
+      - "{property_name} – " + labels_enhanced[0:3] joined naturally (Vision API labels)
       - fallback to caption (KB photos path only)
       - fallback to "{property_name} photo"
 
     Falls back to raw KB photos (no category/rank) when Agent 3 data absent.
-    Max 24 items returned; hero photo excluded.
+    Max MAX_GALLERY_IMAGES items returned; hero photo excluded.
+    Category balancing: first pass takes up to MAX_IMAGES_PER_GALLERY_CATEGORY
+    per category in priority order; second pass fills remaining slots.
     """
     items: list[dict] = []
 
@@ -596,7 +601,10 @@ def _prepare_gallery_items(
                 continue
 
             labels = asset.get("labels_enhanced") or []
-            alt = ", ".join(labels[:3]) if labels else f"{property_name} photo"
+            if labels:
+                alt = f"{property_name} \u2013 " + ", ".join(labels[:3])
+            else:
+                alt = f"{property_name} photo"
 
             items.append({
                 "url": url,
@@ -628,7 +636,27 @@ def _prepare_gallery_items(
         return (priority, item["rank"])
 
     items.sort(key=_sort_key)
-    items = items[:24]
+
+    # Two-pass category balancing
+    # Pass 1: take up to MAX_IMAGES_PER_GALLERY_CATEGORY from each category
+    #         in sorted order, stopping at MAX_GALLERY_IMAGES.
+    # Pass 2: fill remaining slots from photos not selected in pass 1.
+    selected: list[dict] = []
+    per_cat_count: dict[str, int] = {}
+    remainder: list[dict] = []
+    for item in items:
+        cat = item["category"]
+        if per_cat_count.get(cat, 0) < MAX_IMAGES_PER_GALLERY_CATEGORY and len(selected) < MAX_GALLERY_IMAGES:
+            selected.append(item)
+            per_cat_count[cat] = per_cat_count.get(cat, 0) + 1
+        else:
+            remainder.append(item)
+
+    if len(selected) < MAX_GALLERY_IMAGES:
+        slots = MAX_GALLERY_IMAGES - len(selected)
+        selected.extend(remainder[:slots])
+
+    items = selected
 
     # Log ordering result
     cat_counts: dict[str, int] = {}
