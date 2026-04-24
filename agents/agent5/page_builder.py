@@ -39,6 +39,36 @@ logger = logging.getLogger(__name__)
 # UTM parameters applied to every Book Now link
 UTM_TEMPLATE = "?utm_source=booked&utm_medium=landing_page&utm_campaign={slug}&utm_content=book_now"
 
+# ── Gallery ordering & grouping ───────────────────────────────────────────
+
+# Category sort order for the gallery (lower index = appears first).
+# Matches the SubjectCategory enum values from agent3/models.py.
+_GALLERY_CATEGORY_ORDER: list[str] = [
+    "exterior",
+    "view",
+    "pool_hot_tub",
+    "outdoor_entertaining",
+    "living_room",
+    "kitchen",
+    "master_bedroom",
+    "standard_bedroom",
+    "bathroom",
+    "game_entertainment",
+    "local_area",
+    "uncategorised",
+]
+
+# Section headers: label → set of categories that fall under it.
+# Ordering here determines header insertion order in the gallery.
+_GALLERY_SECTIONS: list[tuple[str, frozenset]] = [
+    ("Exterior & Views",  frozenset({"exterior", "view"})),
+    ("Outdoor & Pool",    frozenset({"pool_hot_tub", "outdoor_entertaining"})),
+    ("Living & Kitchen",  frozenset({"living_room", "kitchen", "game_entertainment"})),
+    ("Bedrooms",          frozenset({"master_bedroom", "standard_bedroom"})),
+    ("Bathrooms",         frozenset({"bathroom"})),
+    # local_area and uncategorised: no header — appended silently at end
+]
+
 
 def build_landing_page_html(
     kb: dict,
@@ -98,20 +128,14 @@ def build_landing_page_html(
     guest_book_reviews = [r for r in all_reviews if r.get("is_guest_book")]
     ota_reviews        = [r for r in all_reviews if not r.get("is_guest_book")]
 
-    # Photos — prefer enhanced R2 URLs from Agent 3, fall back to KB photos
+    # Photos — sorted by category priority + quality rank using Agent 3 metadata
     media_assets = visual_media.get("media_assets", [])
-    if media_assets:
-        gallery_photos = [
-            a.get("asset_url_enhanced") or a.get("asset_url_original")
-            for a in media_assets
-            if (a.get("asset_url_enhanced") or a.get("asset_url_original"))
-            and (a.get("asset_url_enhanced") or a.get("asset_url_original")) != hero_photo
-        ][:24]
-    else:
-        gallery_photos = [
-            p.get("url") for p in (kb.get("photos") or [])
-            if p.get("url") and p.get("url") != hero_photo
-        ][:24]
+    gallery_items = _prepare_gallery_items(
+        media_assets=media_assets,
+        hero_photo=hero_photo,
+        kb_photos=kb.get("photos") or [],
+        property_name=name,
+    )
 
     # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
     hero_video_url = _get_hero_video_url(kb.get("property_id", ""))
@@ -230,7 +254,7 @@ def build_landing_page_html(
   {_build_spotlights_section(spotlights) if spotlights else ""}
 
   <!-- ── PHOTO GALLERY ────────────────────────────────────────────── -->
-  {_build_gallery_section(gallery_photos, name) if gallery_photos else ""}
+  {_build_gallery_section(gallery_items, name) if gallery_items else ""}
 
   <!-- ── AVAILABILITY CALENDAR ────────────────────────────────────── -->
   <section class="availability" id="availability">
@@ -540,16 +564,137 @@ def _build_spotlights_section(spotlights: list) -> str:
   </section>"""
 
 
-def _build_gallery_section(photos: list, property_name: str) -> str:
-    thumbs = ""
-    for i, photo in enumerate(photos[:24]):
-        url = photo.get("url", "") if isinstance(photo, dict) else photo
-        thumbs += f'<img src="{_esc(url)}" alt="{_esc(property_name)} photo {i+1}" loading="lazy" class="gallery-thumb" onclick="openLightbox({i})">\n'
+def _prepare_gallery_items(
+    media_assets: list,
+    hero_photo: str,
+    kb_photos: list,
+    property_name: str,
+) -> list[dict]:
+    """
+    Build a sorted list of gallery item dicts from Agent 3 media_assets.
+
+    Each item: {url, alt, category, rank}
+
+    Sorting:
+      1. category priority (_GALLERY_CATEGORY_ORDER index, ascending)
+      2. category_rank (ascending — 1 = best photo of that type)
+
+    Alt text:
+      - labels_enhanced[0:3] joined if present (Vision API labels)
+      - fallback to caption (KB photos path only)
+      - fallback to "{property_name} photo"
+
+    Falls back to raw KB photos (no category/rank) when Agent 3 data absent.
+    Max 24 items returned; hero photo excluded.
+    """
+    items: list[dict] = []
+
+    if media_assets:
+        for asset in media_assets:
+            url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
+            if not url or url == hero_photo:
+                continue
+
+            labels = asset.get("labels_enhanced") or []
+            alt = ", ".join(labels[:3]) if labels else f"{property_name} photo"
+
+            items.append({
+                "url": url,
+                "alt": alt,
+                "category": (asset.get("subject_category") or "uncategorised").lower(),
+                # category_rank = 0 means unranked (default) — sort after ranked photos
+                "rank": asset.get("category_rank") or 999,
+            })
+    else:
+        # Fallback: KB photos have no category/rank data
+        for p in kb_photos:
+            url = p.get("url") or ""
+            if not url or url == hero_photo:
+                continue
+            items.append({
+                "url": url,
+                "alt": p.get("caption") or f"{property_name} photo",
+                "category": "uncategorised",
+                "rank": 999,
+            })
+
+    # Sort: (category_priority_index, rank)
+    def _sort_key(item: dict) -> tuple:
+        cat = item["category"]
+        try:
+            priority = _GALLERY_CATEGORY_ORDER.index(cat)
+        except ValueError:
+            priority = len(_GALLERY_CATEGORY_ORDER)
+        return (priority, item["rank"])
+
+    items.sort(key=_sort_key)
+    items = items[:24]
+
+    # Log ordering result
+    cat_counts: dict[str, int] = {}
+    for item in items:
+        cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
+    source = "Agent 3 media_assets" if media_assets else "KB photos (fallback)"
+    sorted_cats = sorted(cat_counts.items(), key=lambda kv: _sort_key({"category": kv[0], "rank": 0}))
+    cat_summary = ", ".join(f"{c}={n}" for c, n in sorted_cats)
+    logger.info(
+        f"[Agent 5] Gallery ordering applied ({source}): {len(items)} photos. "
+        f"Categories: {cat_summary}"
+    )
+
+    return items
+
+
+def _build_gallery_section(items: list, property_name: str) -> str:
+    """
+    Render the gallery section with category-ordered photos and section headers.
+
+    Section headers span the full grid width (grid-column: 1 / -1).
+    Photo count and CSS structure are unchanged from the original layout.
+    Lightbox indices (0-based) track photo position, not including headers.
+    """
+    if not items:
+        return ""
+
+    # Build set of which categories are present for header decisions
+    present_categories = {item["category"] for item in items}
+
+    # Map each item to its section label (for header insertion)
+    def _section_for(cat: str) -> Optional[str]:
+        for label, cats in _GALLERY_SECTIONS:
+            if cat in cats:
+                return label
+        return None  # no header for local_area / uncategorised
+
+    grid_html = ""
+    last_section: Optional[str] = None
+    photo_index = 0  # lightbox index (headers don't count)
+
+    for item in items:
+        url = item["url"]
+        alt = item["alt"]
+        section = _section_for(item["category"])
+
+        # Insert section header when crossing into a new labelled section
+        if section and section != last_section:
+            # Only show header if this section has at least 1 photo (always true here)
+            grid_html += (
+                f'<p class="gallery-section-label" '
+                f'style="grid-column: 1 / -1">{_esc(section)}</p>\n'
+            )
+            last_section = section
+
+        grid_html += (
+            f'<img src="{_esc(url)}" alt="{_esc(alt)}" loading="lazy" '
+            f'class="gallery-thumb" onclick="openLightbox({photo_index})">\n'
+        )
+        photo_index += 1
+
     return f"""
   <section class="gallery" id="gallery">
     <div class="container">
       <h2>Gallery</h2>
-      <div class="gallery-grid">{thumbs}</div>
+      <div class="gallery-grid">{grid_html}</div>
     </div>
   </section>"""
 
@@ -1051,6 +1196,9 @@ def _page_css() -> str:
     .gallery-thumb { width: 100%; height: 200px; object-fit: cover; cursor: pointer;
                      transition: opacity .2s; }
     .gallery-thumb:hover { opacity: .85; }
+    .gallery-section-label { margin: 1rem 0 .25rem; font-size: .75rem; font-weight: 500;
+                              text-transform: uppercase; letter-spacing: .1em;
+                              color: var(--color-muted); }
 
     /* Reviews */
     .reviews-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
