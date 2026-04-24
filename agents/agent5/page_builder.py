@@ -264,6 +264,23 @@ def build_landing_page_html(
         hero_headline_variants=headline_variants,
     )
 
+    # ── Hero media block (extracted to avoid nested f-string, invalid in Python < 3.12) ──
+    if hero_video_url:
+        _hero_media_html = (
+            '<video id="hero-video" muted playsinline'
+            f' poster="{_esc(hero_photo)}" preload="auto">'
+            f'<source src="{_esc(hero_video_url)}" type="video/mp4"></video>'
+            '<div id="hero-cta-overlay">'
+            '<button id="hero-cta-btn" aria-label="Play hero story">'
+            '<span class="hero-cta-icon">&#9654;</span>'
+            '<span class="hero-cta-text">Hear the story behind this home</span>'
+            '</button></div>'
+            '<button id="hero-replay-btn" style="display:none"'
+            ' aria-label="Replay hero story">&#8635; Replay</button>'
+        )
+    else:
+        _hero_media_html = f'<img src="{_esc(hero_photo)}" alt="{_esc(name)}" loading="eager">'
+
     # ── Assemble HTML ──────────────────────────────────────────────────
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -317,18 +334,7 @@ def build_landing_page_html(
   <!-- ── HERO ─────────────────────────────────────────────────────── -->
   <section class="hero" id="hero">
     <div class="hero-media">
-      {(f"""
-    <video id="hero-video" muted playsinline poster="{_esc(hero_photo)}" preload="auto">
-      <source src="{_esc(hero_video_url)}" type="video/mp4">
-    </video>
-    <div id="hero-cta-overlay">
-      <button id="hero-cta-btn" aria-label="Play hero story">
-        <span class="hero-cta-icon">&#9654;</span>
-        <span class="hero-cta-text">Hear the story behind this home</span>
-      </button>
-    </div>
-    <button id="hero-replay-btn" style="display:none" aria-label="Replay hero story">&#8635; Replay</button>
-    """) if hero_video_url else f'<img src="{_esc(hero_photo)}" alt="{_esc(name)}" loading="eager">'}
+      {_hero_media_html}
     </div>
     <div class="hero-overlay"></div>
     <div class="hero-content">
