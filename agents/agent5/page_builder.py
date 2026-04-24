@@ -72,6 +72,37 @@ _GALLERY_SECTIONS: list[tuple[str, frozenset]] = [
     # local_area and uncategorised: no header — appended silently at end
 ]
 
+# ── Near-duplicate suppression ─────────────────────────────────────────────
+
+# Jaccard similarity of Vision label sets at or above this threshold
+# treats two images as near-duplicates (same scene, different angle/crop).
+NEAR_DUPE_LABEL_THRESHOLD = 0.5
+
+# Maximum images kept per near-duplicate cluster (default for most categories).
+MAX_PER_DUPE_CLUSTER = 2
+
+# These room categories are highly repetitive; use a stricter per-cluster cap.
+_STRICT_DUPE_CATEGORIES: frozenset = frozenset({
+    "bathroom",
+    "master_bedroom",
+    "standard_bedroom",
+})
+
+# Vision labels that indicate low-value shots (e.g. utility, circulation).
+# Images whose enhanced labels overlap with these receive a score penalty.
+_DEPRIORITIZED_LABELS: frozenset = frozenset({
+    "laundry",
+    "washing machine",
+    "dryer",
+    "garage",
+    "garage door",
+    "parking lot",
+    "hallway",
+    "corridor",
+    "closet",
+    "storage room",
+})
+
 
 def build_landing_page_html(
     kb: dict,
@@ -567,32 +598,141 @@ def _build_spotlights_section(spotlights: list) -> str:
   </section>"""
 
 
+def _jaccard(a, b):
+    """
+    Jaccard similarity of two frozensets (0.0–1.0).
+    Returns 0.0 when either set is empty (incomparable, not identical).
+    """
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _asset_score(asset):
+    """
+    Quality score for a single asset dict (higher = better).
+
+    Weights:
+      0.50  category_rank (inverted: rank 1 → 1.0, rank 10 → 0.1, unranked → ~0.001)
+      0.30  composition_score from Vision API
+      0.15  enhanced URL available (post-Claid quality)
+      0.05  source priority (intake > PMC > VRBO > Airbnb)
+      ×0.7  penalty when enhanced labels overlap with _DEPRIORITIZED_LABELS
+    """
+    rank = asset.get("category_rank") or 999
+    rank_score = 1.0 / rank
+    comp = float(asset.get("composition_score") or 0.0)
+    has_enhanced = 1.0 if asset.get("has_enhanced") else 0.0
+    _SRC = {
+        "intake_upload": 0.3,
+        "pmc_website": 0.2,
+        "vrbo_scraped": 0.1,
+        "airbnb_scraped": 0.0,
+        "unknown": 0.0,
+    }
+    src = _SRC.get((asset.get("source") or "unknown").lower(), 0.0)
+    score = rank_score * 0.5 + comp * 0.3 + has_enhanced * 0.15 + src * 0.05
+
+    # Penalise low-value subject matter
+    labels = set(lbl.lower() for lbl in (asset.get("labels_enhanced") or []))
+    if labels & _DEPRIORITIZED_LABELS:
+        score *= 0.7
+
+    return score
+
+
+def _suppress_near_dupes(assets):
+    """
+    Within a single subject_category, cluster images by Vision label Jaccard
+    similarity and keep at most MAX_PER_DUPE_CLUSTER images per cluster.
+
+    Algorithm (greedy, O(n²) within category — acceptable for n ≤ ~50):
+      1. Sort assets by _asset_score descending so the best image "founds" each cluster.
+      2. For each candidate, compute Jaccard against every already-kept asset's label set.
+      3. If Jaccard ≥ NEAR_DUPE_LABEL_THRESHOLD with any kept asset, the candidate
+         belongs to that kept asset's cluster.
+      4. If the cluster is full (count ≥ per-category cap), skip the candidate.
+      5. Otherwise accept and record cluster membership.
+
+    Per-category cap:
+      _STRICT_DUPE_CATEGORIES (bathroom/bedrooms): 1 per cluster
+      all others: MAX_PER_DUPE_CLUSTER (default 2)
+
+    Returns (kept_assets, n_dupes_removed).
+    Images with no labels are never clustered together
+    (empty label sets always return Jaccard = 0.0).
+    """
+    if not assets:
+        return assets, 0
+
+    category = (assets[0].get("subject_category") or "uncategorised").lower()
+    max_per_cluster = 1 if category in _STRICT_DUPE_CATEGORIES else MAX_PER_DUPE_CLUSTER
+
+    sorted_assets = sorted(assets, key=_asset_score, reverse=True)
+
+    kept = []
+    kept_label_sets = []   # parallel list: frozenset of labels for each kept asset
+    cluster_ids = []       # parallel list: which cluster each kept asset belongs to
+    cluster_counts = {}    # cluster_id -> count of assets accepted into it
+    next_cluster_id = [0]  # mutable int via list (avoids nonlocal in Py3.9)
+    n_dupes = 0
+
+    for asset in sorted_assets:
+        raw_labels = asset.get("labels_enhanced") or asset.get("labels_original") or []
+        label_set = frozenset(lbl.lower() for lbl in raw_labels)
+
+        # Find the best-matching already-kept asset (highest Jaccard ≥ threshold)
+        matched_cluster = None
+        best_sim = 0.0
+        for i, kept_set in enumerate(kept_label_sets):
+            sim = _jaccard(label_set, kept_set)
+            if sim >= NEAR_DUPE_LABEL_THRESHOLD and sim > best_sim:
+                best_sim = sim
+                matched_cluster = cluster_ids[i]
+
+        if matched_cluster is not None:
+            # Near-duplicate of an existing cluster
+            if cluster_counts[matched_cluster] >= max_per_cluster:
+                n_dupes += 1
+                continue  # cluster full — skip this image
+            cluster_counts[matched_cluster] += 1
+        else:
+            # Start a new cluster
+            matched_cluster = next_cluster_id[0]
+            next_cluster_id[0] += 1
+            cluster_counts[matched_cluster] = 1
+
+        kept.append(asset)
+        kept_label_sets.append(label_set)
+        cluster_ids.append(matched_cluster)
+
+    return kept, n_dupes
+
+
 def _prepare_gallery_items(
-    media_assets: list,
-    hero_photo: str,
-    kb_photos: list,
-    property_name: str,
-) -> list[dict]:
+    media_assets,
+    hero_photo,
+    kb_photos,
+    property_name,
+):
     """
     Build a sorted list of gallery item dicts from Agent 3 media_assets.
 
     Each item: {url, alt, category, rank}
 
-    Sorting:
-      1. category priority (_GALLERY_CATEGORY_ORDER index, ascending)
-      2. category_rank (ascending — 1 = best photo of that type)
+    Pipeline:
+      1. Extract all candidate assets (hero excluded).
+      2. Near-duplicate suppression within each subject_category
+         using Vision label Jaccard similarity (Agent 3 data only, no paid calls).
+      3. Sort by (category_priority, category_rank).
+      4. Two-pass category balancing:
+           pass 1 — up to MAX_IMAGES_PER_GALLERY_CATEGORY per category
+           pass 2 — fill remaining slots from overflow
+      5. Cap total at MAX_GALLERY_IMAGES.
 
-    Alt text:
-      - "{property_name} – " + labels_enhanced[0:3] joined naturally (Vision API labels)
-      - fallback to caption (KB photos path only)
-      - fallback to "{property_name} photo"
-
-    Falls back to raw KB photos (no category/rank) when Agent 3 data absent.
-    Max MAX_GALLERY_IMAGES items returned; hero photo excluded.
-    Category balancing: first pass takes up to MAX_IMAGES_PER_GALLERY_CATEGORY
-    per category in priority order; second pass fills remaining slots.
+    Falls back to raw KB photos (no near-dupe suppression) when Agent 3 absent.
     """
-    items: list[dict] = []
+    raw_assets = []
 
     if media_assets:
         for asset in media_assets:
@@ -606,28 +746,63 @@ def _prepare_gallery_items(
             else:
                 alt = f"{property_name} photo"
 
-            items.append({
+            raw_assets.append({
+                # display fields
                 "url": url,
                 "alt": alt,
                 "category": (asset.get("subject_category") or "uncategorised").lower(),
-                # category_rank = 0 means unranked (default) — sort after ranked photos
                 "rank": asset.get("category_rank") or 999,
+                # scoring / clustering fields (stripped before return)
+                "labels_enhanced": asset.get("labels_enhanced") or [],
+                "labels_original": asset.get("labels_original") or [],
+                "composition_score": asset.get("composition_score") or 0.0,
+                "has_enhanced": bool(asset.get("asset_url_enhanced")),
+                "source": asset.get("source") or "unknown",
+                "category_rank": asset.get("category_rank") or 999,
+                # keep subject_category as string for _suppress_near_dupes
+                "subject_category": (asset.get("subject_category") or "uncategorised").lower(),
             })
     else:
-        # Fallback: KB photos have no category/rank data
+        # Fallback: KB photos have no metadata — no near-dupe suppression
         for p in kb_photos:
             url = p.get("url") or ""
             if not url or url == hero_photo:
                 continue
-            items.append({
+            raw_assets.append({
                 "url": url,
-                "alt": p.get("caption") or f"{property_name} photo",
+                "alt": p.get("caption") or (property_name + " photo"),
                 "category": "uncategorised",
                 "rank": 999,
+                "labels_enhanced": [],
+                "labels_original": [],
+                "composition_score": 0.0,
+                "has_enhanced": False,
+                "source": "unknown",
+                "category_rank": 999,
+                "subject_category": "uncategorised",
             })
 
-    # Sort: (category_priority_index, rank)
-    def _sort_key(item: dict) -> tuple:
+    total_candidates = len(raw_assets)
+    total_dupes_removed = 0
+
+    # ── Near-duplicate suppression (Agent 3 path only) ──────────────────
+    if media_assets:
+        by_cat = {}
+        for a in raw_assets:
+            cat = a["category"]
+            if cat not in by_cat:
+                by_cat[cat] = []
+            by_cat[cat].append(a)
+
+        suppressed = []
+        for cat_assets in by_cat.values():
+            kept, n_dupes = _suppress_near_dupes(cat_assets)
+            suppressed.extend(kept)
+            total_dupes_removed += n_dupes
+        raw_assets = suppressed
+
+    # ── Sort: (category_priority_index, rank) ───────────────────────────
+    def _sort_key(item):
         cat = item["category"]
         try:
             priority = _GALLERY_CATEGORY_ORDER.index(cat)
@@ -635,18 +810,16 @@ def _prepare_gallery_items(
             priority = len(_GALLERY_CATEGORY_ORDER)
         return (priority, item["rank"])
 
-    items.sort(key=_sort_key)
+    raw_assets.sort(key=_sort_key)
 
-    # Two-pass category balancing
-    # Pass 1: take up to MAX_IMAGES_PER_GALLERY_CATEGORY from each category
-    #         in sorted order, stopping at MAX_GALLERY_IMAGES.
-    # Pass 2: fill remaining slots from photos not selected in pass 1.
-    selected: list[dict] = []
-    per_cat_count: dict[str, int] = {}
-    remainder: list[dict] = []
-    for item in items:
+    # ── Two-pass category balancing ──────────────────────────────────────
+    selected = []
+    per_cat_count = {}
+    remainder = []
+    for item in raw_assets:
         cat = item["category"]
-        if per_cat_count.get(cat, 0) < MAX_IMAGES_PER_GALLERY_CATEGORY and len(selected) < MAX_GALLERY_IMAGES:
+        if (per_cat_count.get(cat, 0) < MAX_IMAGES_PER_GALLERY_CATEGORY
+                and len(selected) < MAX_GALLERY_IMAGES):
             selected.append(item)
             per_cat_count[cat] = per_cat_count.get(cat, 0) + 1
         else:
@@ -656,21 +829,33 @@ def _prepare_gallery_items(
         slots = MAX_GALLERY_IMAGES - len(selected)
         selected.extend(remainder[:slots])
 
-    items = selected
-
-    # Log ordering result
-    cat_counts: dict[str, int] = {}
-    for item in items:
+    # ── Logging ──────────────────────────────────────────────────────────
+    cat_counts = {}
+    for item in selected:
         cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
-    source = "Agent 3 media_assets" if media_assets else "KB photos (fallback)"
-    sorted_cats = sorted(cat_counts.items(), key=lambda kv: _sort_key({"category": kv[0], "rank": 0}))
-    cat_summary = ", ".join(f"{c}={n}" for c, n in sorted_cats)
+    src_label = "Agent 3 media_assets" if media_assets else "KB photos (fallback)"
+    sorted_cats = sorted(
+        cat_counts.items(),
+        key=lambda kv: _sort_key({"category": kv[0], "rank": 0}),
+    )
+    cat_summary = ", ".join((c + "=" + str(n)) for c, n in sorted_cats)
     logger.info(
-        f"[Agent 5] Gallery ordering applied ({source}): {len(items)} photos. "
-        f"Categories: {cat_summary}"
+        "[Agent 5] Gallery selection (%s): candidates=%d, "
+        "near-dupes suppressed=%d, after-dedup=%d, final=%d. "
+        "Categories: %s",
+        src_label,
+        total_candidates,
+        total_dupes_removed,
+        total_candidates - total_dupes_removed,
+        len(selected),
+        cat_summary,
     )
 
-    return items
+    # Strip scoring/clustering fields — return only display fields
+    return [
+        {"url": i["url"], "alt": i["alt"], "category": i["category"], "rank": i["rank"]}
+        for i in selected
+    ]
 
 
 def _build_gallery_section(items: list, property_name: str) -> str:

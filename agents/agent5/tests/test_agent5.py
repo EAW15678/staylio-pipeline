@@ -44,8 +44,15 @@ from agents.agent5.page_builder import (
     _format_description,
     build_landing_page_html,
     _prepare_gallery_items,
+    _jaccard,
+    _asset_score,
+    _suppress_near_dupes,
     MAX_GALLERY_IMAGES,
     MAX_IMAGES_PER_GALLERY_CATEGORY,
+    NEAR_DUPE_LABEL_THRESHOLD,
+    MAX_PER_DUPE_CLUSTER,
+    _STRICT_DUPE_CATEGORIES,
+    _DEPRIORITIZED_LABELS,
     _GALLERY_CATEGORY_ORDER,
 )
 from agents.agent5.ab_testing import generate_growthbook_snippet
@@ -668,3 +675,225 @@ class TestGalleryPreparation:
         assert len(items) == 2
         assert items[0]["alt"] == "Front entrance"
         assert items[1]["alt"] == "Mountain Haus photo"
+
+
+# ── Near-Duplicate Suppression Tests ─────────────────────────────────────
+
+def _make_rich_asset(category, rank, labels, comp=0.5, source="airbnb_scraped", enhanced=True, url_suffix=""):
+    """Minimal asset dict with all fields _suppress_near_dupes needs."""
+    url = f"https://r2.example.com/{category}_{rank}{url_suffix}.jpg"
+    return {
+        "asset_url_enhanced": url if enhanced else None,
+        "asset_url_original": url,
+        "subject_category": category,
+        "category_rank": rank,
+        "labels_enhanced": labels or [],
+        "labels_original": labels or [],
+        "composition_score": comp,
+        "has_enhanced": enhanced,
+        "source": source,
+    }
+
+
+class TestJaccard:
+    def test_empty_sets_return_zero(self):
+        assert _jaccard(frozenset(), frozenset()) == 0.0
+
+    def test_identical_sets_return_one(self):
+        assert _jaccard(frozenset(["a", "b"]), frozenset(["a", "b"])) == 1.0
+
+    def test_one_empty_returns_zero(self):
+        assert _jaccard(frozenset(["a"]), frozenset()) == 0.0
+
+    def test_partial_overlap(self):
+        # {a,b} ∩ {b,c} = {b}, union = {a,b,c} → 1/3
+        sim = _jaccard(frozenset(["a", "b"]), frozenset(["b", "c"]))
+        assert abs(sim - 1/3) < 0.01
+
+    def test_no_overlap_returns_zero(self):
+        assert _jaccard(frozenset(["a"]), frozenset(["b"])) == 0.0
+
+
+class TestAssetScore:
+    def test_rank1_beats_rank2_all_else_equal(self):
+        a1 = _make_rich_asset("exterior", 1, ["house"])
+        a2 = _make_rich_asset("exterior", 2, ["house"])
+        assert _asset_score(a1) > _asset_score(a2)
+
+    def test_intake_upload_beats_airbnb_same_rank(self):
+        intake = _make_rich_asset("exterior", 2, ["house"], source="intake_upload")
+        airbnb = _make_rich_asset("exterior", 2, ["house"], source="airbnb_scraped")
+        assert _asset_score(intake) > _asset_score(airbnb)
+
+    def test_deprioritized_label_reduces_score(self):
+        # Same rank and comp — only labels differ
+        laundry = _make_rich_asset("uncategorised", 2, ["laundry", "washing machine"], comp=0.5)
+        pool = _make_rich_asset("uncategorised", 2, ["pool", "water", "deck"], comp=0.5)
+        assert _asset_score(laundry) < _asset_score(pool)
+
+    def test_deprioritized_penalty_is_0_7_factor(self):
+        base = _make_rich_asset("uncategorised", 2, ["pool"], comp=0.5)
+        penalised = _make_rich_asset("uncategorised", 2, ["hallway", "corridor"], comp=0.5)
+        ratio = _asset_score(penalised) / _asset_score(base)
+        assert abs(ratio - 0.7) < 0.01
+
+    def test_composition_score_increases_score(self):
+        low = _make_rich_asset("exterior", 1, ["house"], comp=0.2)
+        high = _make_rich_asset("exterior", 1, ["house"], comp=0.8)
+        assert _asset_score(high) > _asset_score(low)
+
+
+class TestSuppressNearDupes:
+    def test_overlapping_labels_cluster_together(self):
+        assets = [
+            _make_rich_asset("standard_bedroom", 1, ["bed", "pillow", "bedroom", "nightstand"]),
+            _make_rich_asset("standard_bedroom", 2, ["bed", "pillow", "bedroom", "lamp"]),
+        ]
+        # Jaccard("bed","pillow","bedroom","nightstand" vs "bed","pillow","bedroom","lamp") = 3/5 = 0.6
+        kept, n_dupes = _suppress_near_dupes(assets)
+        # strict category: max 1 per cluster → 1 removed
+        assert n_dupes == 1
+        assert len(kept) == 1
+
+    def test_best_image_kept_from_cluster(self):
+        # rank 1 = best; both in same cluster
+        assets = [
+            _make_rich_asset("pool_hot_tub", 3, ["pool", "water", "hot tub", "tile"], comp=0.3),
+            _make_rich_asset("pool_hot_tub", 1, ["pool", "water", "hot tub", "deck"], comp=0.8),
+        ]
+        kept, _ = _suppress_near_dupes(assets)
+        # rank-1/high-comp should survive
+        kept_ranks = [a["category_rank"] for a in kept]
+        assert 1 in kept_ranks
+
+    def test_pool_duplicates_reduced_to_max_per_cluster(self):
+        # 5 near-identical pool shots → only MAX_PER_DUPE_CLUSTER=2 kept
+        assets = [
+            _make_rich_asset("pool_hot_tub", i+1, ["pool", "water", "hot tub", "tile", str(i)])
+            for i in range(5)
+        ]
+        kept, n_dupes = _suppress_near_dupes(assets)
+        assert len(kept) <= MAX_PER_DUPE_CLUSTER
+
+    def test_bedroom_duplicates_reduced_to_one_per_cluster(self):
+        # master_bedroom in _STRICT_DUPE_CATEGORIES → max 1 per cluster
+        assets = [
+            _make_rich_asset("master_bedroom", i+1, ["bed", "pillow", "bedroom", "luxury"])
+            for i in range(5)
+        ]
+        kept, _ = _suppress_near_dupes(assets)
+        assert len(kept) == 1
+
+    def test_bathroom_strict_cap_one_per_cluster(self):
+        assets = [
+            _make_rich_asset("bathroom", i+1, ["shower", "tile", "glass", "mirror"])
+            for i in range(4)
+        ]
+        kept, _ = _suppress_near_dupes(assets)
+        assert len(kept) == 1
+
+    def test_distinct_scenes_not_deduplicated(self):
+        assets = [
+            _make_rich_asset("bathroom", 1, ["shower", "tile", "glass door", "steam"]),
+            _make_rich_asset("bathroom", 2, ["bathtub", "faucet", "soaking tub", "marble"]),
+            _make_rich_asset("bathroom", 3, ["sink", "vanity", "mirror", "countertop"]),
+        ]
+        kept, n_dupes = _suppress_near_dupes(assets)
+        assert len(kept) == 3
+        assert n_dupes == 0
+
+    def test_no_label_images_not_clustered_together(self):
+        assets = [
+            _make_rich_asset("exterior", 1, []),
+            _make_rich_asset("exterior", 2, []),
+            _make_rich_asset("exterior", 3, []),
+        ]
+        kept, n_dupes = _suppress_near_dupes(assets)
+        assert len(kept) == 3
+        assert n_dupes == 0
+
+    def test_empty_input_returns_empty(self):
+        kept, n = _suppress_near_dupes([])
+        assert kept == []
+        assert n == 0
+
+
+class TestNearDupeGallery:
+    """End-to-end _prepare_gallery_items tests with near-dupe suppression."""
+
+    def _to_media_asset(self, a):
+        return {
+            "asset_url_enhanced": a["asset_url_enhanced"],
+            "asset_url_original": a["asset_url_original"],
+            "subject_category": a["subject_category"],
+            "category_rank": a["category_rank"],
+            "labels_enhanced": a["labels_enhanced"],
+            "labels_original": a["labels_original"],
+            "composition_score": a["composition_score"],
+            "source": a["source"],
+        }
+
+    def test_final_gallery_includes_multiple_categories(self):
+        assets = []
+        for cat, labels in [
+            ("exterior", ["house", "facade", "driveway"]),
+            ("view", ["ocean", "horizon", "sunset"]),
+            ("pool_hot_tub", ["pool", "water", "deck"]),
+            ("living_room", ["sofa", "couch", "furniture"]),
+            ("kitchen", ["kitchen", "countertop", "stove"]),
+            ("master_bedroom", ["bed", "pillow", "bedroom"]),
+            ("bathroom", ["shower", "tile", "glass"]),
+        ]:
+            for i in range(3):
+                assets.append(_make_rich_asset(cat, i+1, labels + [str(i)]))
+        items = _prepare_gallery_items(
+            [self._to_media_asset(a) for a in assets], "", [], "TestProp"
+        )
+        cats = {i["category"] for i in items}
+        assert len(cats) >= 5
+
+    def test_max_gallery_count_50(self):
+        assets = []
+        for cat in _GALLERY_CATEGORY_ORDER[:6]:
+            for i in range(20):
+                assets.append(_make_rich_asset(cat, i+1, ["label_a", "label_b", str(i)]))
+        items = _prepare_gallery_items(
+            [self._to_media_asset(a) for a in assets], "", [], "BigProp"
+        )
+        assert len(items) <= MAX_GALLERY_IMAGES
+
+    def test_near_dupe_pool_shots_reduced(self):
+        # 10 near-identical pool shots + varied categories — pool should be trimmed
+        assets = []
+        for i in range(10):
+            assets.append(_make_rich_asset("pool_hot_tub", i+1, ["pool", "water", "hot tub", "tile"]))
+        for i in range(3):
+            assets.append(_make_rich_asset("exterior", i+1, ["house", "facade", str(i)]))
+        items = _prepare_gallery_items(
+            [self._to_media_asset(a) for a in assets], "", [], "Prop"
+        )
+        pool_count = sum(1 for i in items if i["category"] == "pool_hot_tub")
+        # 10 near-identical pool shots → max MAX_PER_DUPE_CLUSTER=2 from same cluster
+        assert pool_count <= MAX_PER_DUPE_CLUSTER
+
+    def test_near_dupe_bedroom_shots_reduced(self):
+        # 8 near-identical bedroom shots → max 1 per cluster (strict category)
+        assets = []
+        for i in range(8):
+            assets.append(_make_rich_asset("master_bedroom", i+1, ["bed", "pillow", "bedroom", "luxury"]))
+        for i in range(3):
+            assets.append(_make_rich_asset("exterior", i+1, ["house", str(i)]))
+        items = _prepare_gallery_items(
+            [self._to_media_asset(a) for a in assets], "", [], "Prop"
+        )
+        bed_count = sum(1 for i in items if i["category"] == "master_bedroom")
+        assert bed_count <= 1
+
+    def test_constants(self):
+        assert MAX_GALLERY_IMAGES == 50
+        assert MAX_PER_DUPE_CLUSTER == 2
+        assert NEAR_DUPE_LABEL_THRESHOLD == 0.5
+        assert "bathroom" in _STRICT_DUPE_CATEGORIES
+        assert "master_bedroom" in _STRICT_DUPE_CATEGORIES
+        assert "standard_bedroom" in _STRICT_DUPE_CATEGORIES
+        assert "laundry" in _DEPRIORITIZED_LABELS
