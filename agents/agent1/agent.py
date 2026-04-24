@@ -197,7 +197,7 @@ def _run_scrapers(kb: PropertyKnowledgeBase) -> PropertyKnowledgeBase:
             # PMC: reviews only — property data comes from the PMC website (TS-04b)
             tasks.append(("apify_airbnb_reviews", lambda: scrape_airbnb_reviews_only(kb.airbnb_url, kb)))
 
-    if kb.vrbo_url and kb.client_channel == ClientChannel.IO:
+    if kb.vrbo_url:
         tasks.append(("apify_vrbo", lambda: scrape_ota_listing(kb.vrbo_url, kb, scrape_reviews=True)))
 
     if kb.booking_com_url:

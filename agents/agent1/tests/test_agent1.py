@@ -26,7 +26,12 @@ from models.property import (
     PropertyKnowledgeBase,
     VibeProfile,
 )
-from agents.agent1.apify_scraper import detect_ota_platform
+from agents.agent1.apify_scraper import (
+    detect_ota_platform,
+    _extract_vrbo_property_id,
+    _flatten_vrbo_gallery,
+    _flatten_vrbo_nested_items,
+)
 from agents.agent1.agent import _generate_slug
 
 
@@ -322,6 +327,143 @@ class TestAirbnbMapping:
 
         assert len(result.ingestion_errors) > 0
         assert result.name is None   # KB unchanged
+
+
+# ── VRBO Scraper Tests ────────────────────────────────────────────────────
+
+class TestVrboScraper:
+    def test_extract_property_id_numeric(self):
+        assert _extract_vrbo_property_id("https://www.vrbo.com/4886746") == "4886746"
+
+    def test_extract_property_id_ha_suffix(self):
+        assert _extract_vrbo_property_id("https://www.vrbo.com/4193579ha") == "4193579ha"
+
+    def test_extract_property_id_trailing_slash(self):
+        assert _extract_vrbo_property_id("https://www.vrbo.com/4886746/") == "4886746"
+
+    def test_extract_property_id_invalid(self):
+        assert _extract_vrbo_property_id("https://www.vrbo.com/search?q=beach") is None
+        assert _extract_vrbo_property_id("https://www.vrbo.com/") is None
+
+    def test_flatten_nested_items(self):
+        container = {
+            "items": [
+                {"items": [{"value": "WiFi"}, {"value": "Pool"}]},
+                {"items": [{"value": "Hot Tub"}]},
+            ]
+        }
+        result = _flatten_vrbo_nested_items(container)
+        assert result == ["WiFi", "Pool", "Hot Tub"]
+
+    def test_flatten_nested_items_empty(self):
+        assert _flatten_vrbo_nested_items({}) == []
+        assert _flatten_vrbo_nested_items({"items": []}) == []
+
+    def test_flatten_gallery_dedup(self):
+        gallery = [
+            {
+                "images": [
+                    {"url": "https://media.vrbo.com/photo1.jpg", "caption": "Living room"},
+                    {"url": "https://media.vrbo.com/photo2.jpg", "caption": "Kitchen"},
+                ]
+            },
+            {
+                "images": [
+                    {"url": "https://media.vrbo.com/photo1.jpg", "caption": "Living room (dup)"},
+                    {"url": "https://media.vrbo.com/photo3.jpg", "caption": "Bedroom"},
+                ]
+            },
+        ]
+        result = _flatten_vrbo_gallery(gallery)
+        urls = [p["url"] for p in result]
+        assert len(urls) == len(set(urls)), "Duplicate URLs found after dedup"
+        assert len(result) == 3
+
+    def test_flatten_gallery_empty(self):
+        assert _flatten_vrbo_gallery([]) == []
+
+    def test_scrape_vrbo_zero_reviews(self):
+        """reviews.total == 0 must not populate guest_reviews."""
+        from agents.agent1.apify_scraper import _scrape_vrbo
+
+        mock_listing = {
+            "name": "Test VRBO Property",
+            "description": {"about": {"items": [{"items": [{"value": "Great place"}]}]}},
+            "highlights": {"bedroomsCount": 3, "bathroomsCount": 2, "sleepsCount": 6},
+            "address": {"city": "Breckenridge", "province": "CO"},
+            "coordinate": {"latitude": 39.48, "longitude": -106.04},
+            "amenities": {"items": []},
+            "gallery": [],
+            "reviews": {"total": 0, "reviews": []},
+        }
+
+        kb = make_kb()
+
+        with patch("agents.agent1.apify_scraper._run_apify_actor", return_value=[mock_listing]):
+            result = _scrape_vrbo("https://www.vrbo.com/4886746", kb, scrape_reviews=True)
+
+        assert len(result.guest_reviews) == 0
+        assert result.name.value == "Test VRBO Property"
+        assert result.bedrooms.value == 3
+        assert result.city.value == "Breckenridge"
+
+    def test_scrape_vrbo_full_field_mapping(self):
+        """All mapped fields arrive in the KB with correct values."""
+        from agents.agent1.apify_scraper import _scrape_vrbo
+
+        mock_listing = {
+            "name": "Mountain Retreat",
+            "description": {
+                "about": {
+                    "items": [
+                        {"items": [{"value": "Stunning views."}, {"value": "Sleeps 8."}]}
+                    ]
+                }
+            },
+            "highlights": {"bedroomsCount": 4, "bathroomsCount": 3, "sleepsCount": 8},
+            "address": {"city": "Aspen", "province": "CO"},
+            "coordinate": {"latitude": 39.19, "longitude": -106.82},
+            "amenities": {
+                "items": [
+                    {"items": [{"value": "Hot tub"}, {"value": "Ski-in/ski-out"}]}
+                ]
+            },
+            "gallery": [
+                {"images": [{"url": "https://media.vrbo.com/ext/a1.jpg", "caption": "Exterior"}]}
+            ],
+            "reviews": {
+                "total": 1,
+                "reviews": [
+                    {
+                        "text": "Amazing stay!",
+                        "reviewer": {"name": "John D."},
+                        "date": "2024-12-01",
+                        "rating": 5,
+                    }
+                ],
+            },
+        }
+
+        kb = make_kb()
+
+        with patch("agents.agent1.apify_scraper._run_apify_actor", return_value=[mock_listing]):
+            result = _scrape_vrbo("https://www.vrbo.com/4193579ha", kb, scrape_reviews=True)
+
+        assert result.name.value == "Mountain Retreat"
+        assert result.bedrooms.value == 4
+        assert result.bathrooms.value == 3
+        assert result.max_occupancy.value == 8
+        assert result.city.value == "Aspen"
+        assert result.state.value == "CO"
+        assert result.latitude.value == 39.19
+        assert result.longitude.value == -106.82
+        assert "Hot tub" in result.amenities
+        assert len(result.photos) == 1
+        assert result.photos[0].url == "https://media.vrbo.com/ext/a1.jpg"
+        assert len(result.guest_reviews) == 1
+        assert result.guest_reviews[0].reviewer_name == "John D."
+        assert result.guest_reviews[0].star_rating == 5
+        assert result.guest_reviews[0].source == DataSource.VRBO
 
 
 # ── Knowledge Base Serialisation ─────────────────────────────────────────
