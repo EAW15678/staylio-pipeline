@@ -72,6 +72,25 @@ _GALLERY_SECTIONS: list[tuple[str, frozenset]] = [
     # local_area and uncategorised: no header — appended silently at end
 ]
 
+# ── Category modules (Photo Tour section) ─────────────────────────────────
+#
+# Ordered list of (display_label, frozenset of subject_categories).
+# Each entry becomes one 1-hero + 2-supporting module in the Photo Tour section.
+# Ordering determines vertical render order on the page.
+_CATEGORY_MODULES: list[tuple[str, frozenset]] = [
+    ("Exterior & Views",    frozenset({"exterior", "view"})),
+    ("Outdoor & Pool",      frozenset({"pool_hot_tub", "outdoor_entertaining"})),
+    ("Living Room",         frozenset({"living_room", "game_entertainment"})),
+    ("Kitchen",             frozenset({"kitchen"})),
+    ("Bedrooms",            frozenset({"master_bedroom", "standard_bedroom"})),
+    ("Bathrooms",           frozenset({"bathroom"})),
+    ("Amenities & Extras",  frozenset({"local_area", "uncategorised"})),
+]
+
+# Modules whose absence is silently skipped (no log warning).
+# All others log a warning when no images are available.
+_OPTIONAL_MODULE_LABELS: frozenset = frozenset({"Amenities & Extras"})
+
 # ── Near-duplicate suppression ─────────────────────────────────────────────
 
 # Jaccard similarity of Vision label sets at or above this threshold
@@ -174,6 +193,9 @@ def build_landing_page_html(
         kb_photos=kb.get("photos") or [],
         property_name=name,
     )
+
+    # Category modules — curated 1-hero + 2-supporting per section (Agent 3 path only)
+    category_modules = _build_category_modules(gallery_items) if media_assets else {}
 
     # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
     hero_video_url = _get_hero_video_url(kb.get("property_id", ""))
@@ -291,7 +313,10 @@ def build_landing_page_html(
   <!-- ── FEATURE SPOTLIGHTS ───────────────────────────────────────── -->
   {_build_spotlights_section(spotlights) if spotlights else ""}
 
-  <!-- ── PHOTO GALLERY ────────────────────────────────────────────── -->
+  <!-- ── PHOTO TOUR (category modules) ──────────────────────────── -->
+  {_build_category_modules_section(category_modules, gallery_items) if category_modules else ""}
+
+  <!-- ── ALL PHOTOS (full gallery) ───────────────────────────────── -->
   {_build_gallery_section(gallery_items, name) if gallery_items else ""}
 
   <!-- ── AVAILABILITY CALENDAR ────────────────────────────────────── -->
@@ -995,9 +1020,142 @@ def _prepare_gallery_items(
     ]
 
 
+def _build_category_modules(gallery_items: list) -> dict:
+    """
+    Build curated category modules from the flat gallery items list.
+
+    Groups the already-prepared gallery items (from _prepare_gallery_items) by
+    _CATEGORY_MODULES section definitions and selects up to 3 featured images
+    per module: 1 hero + 2 supporting.
+
+    Selection:
+      - hero      = lowest category_rank in the section (best quality)
+      - supporting = next 2 by rank; URLs guaranteed distinct from hero
+      - all        = all section images (for full gallery cross-referencing)
+
+    Returns an ordered dict: {label: {hero, supporting, all}}.
+    Modules with no images are omitted; missing required modules are logged.
+    """
+    by_category: dict = {}
+    for item in gallery_items:
+        by_category.setdefault(item["category"], []).append(item)
+
+    result: dict = {}
+    missing_required: list = []
+    missing_optional: list = []
+
+    for label, cats in _CATEGORY_MODULES:
+        section_items: list = []
+        for cat in cats:
+            section_items.extend(by_category.get(cat, []))
+
+        # Sort ascending by rank (rank 1 = best); break ties by URL for stability
+        section_items.sort(key=lambda x: (x["rank"], x["url"]))
+
+        if not section_items:
+            if label in _OPTIONAL_MODULE_LABELS:
+                missing_optional.append(label)
+            else:
+                missing_required.append(label)
+            continue
+
+        hero = section_items[0]
+        supporting = [x for x in section_items[1:] if x["url"] != hero["url"]][:2]
+
+        result[label] = {
+            "hero": hero,
+            "supporting": supporting,
+            "all": section_items,
+        }
+
+    for lbl in missing_required:
+        logger.info("[Agent 5] Photo tour module '%s' skipped — no images available", lbl)
+
+    featured_summary = ", ".join(
+        "{lbl}={n}img".format(lbl=lbl, n=1 + len(mod["supporting"]))
+        for lbl, mod in result.items()
+    )
+    skipped = missing_required + missing_optional
+    logger.info(
+        "[Agent 5] Photo tour: %d modules built (%s); skipped: %s",
+        len(result),
+        featured_summary or "none",
+        ", ".join(skipped) if skipped else "none",
+    )
+
+    return result
+
+
+def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
+    """
+    Render the Photo Tour section: one hero + up to two supporting images per
+    category module. Clicking any image opens the full gallery lightbox at the
+    correct position. A 'View all photos' anchor scrolls to the full gallery.
+
+    Layout per module (desktop):
+      ┌────────────────────────────┬──────────────┐
+      │  hero (2fr, 420px tall)    │ supporting 1 │
+      │                            │──────────────│
+      │                            │ supporting 2 │
+      └────────────────────────────┴──────────────┘
+
+    Layout falls back to stacked single-column on mobile.
+    """
+    if not modules:
+        return ""
+
+    # Build url → lightbox-index lookup (gallery_items order = lightbox order)
+    lightbox_idx: dict = {item["url"]: i for i, item in enumerate(gallery_items)}
+
+    modules_html = ""
+    for label, module in modules.items():
+        hero = module["hero"]
+        supporting = module["supporting"]
+
+        h_idx = lightbox_idx.get(hero["url"], 0)
+        hero_html = (
+            f'<img src="{_esc(hero["url"])}" alt="{_esc(hero["alt"])}" loading="lazy" '
+            f'class="cat-module-hero" onclick="openLightbox({h_idx})">'
+        )
+
+        sup_html = ""
+        for img in supporting:
+            i_idx = lightbox_idx.get(img["url"], 0)
+            sup_html += (
+                f'<img src="{_esc(img["url"])}" alt="{_esc(img["alt"])}" loading="lazy" '
+                f'class="cat-module-thumb" onclick="openLightbox({i_idx})">'
+            )
+
+        # If no supporting images, hero spans full width (no 2-column grid)
+        if supporting:
+            grid_class = "cat-module-grid"
+            grid_inner = hero_html + f'<div class="cat-module-supporting">{sup_html}</div>'
+        else:
+            grid_class = "cat-module-grid cat-module-grid--solo"
+            grid_inner = hero_html
+
+        modules_html += f"""
+    <div class="cat-module">
+      <h3 class="cat-module-label">{_esc(label)}</h3>
+      <div class="{grid_class}">{grid_inner}</div>
+    </div>"""
+
+    return f"""
+  <section class="cat-modules" id="photo-tour">
+    <div class="container">
+      <h2>Photo Tour</h2>
+      <div class="cat-modules-list">{modules_html}
+      </div>
+      <div class="view-all-wrap">
+        <a href="#gallery" class="staylio-cta-btn">View all photos</a>
+      </div>
+    </div>
+  </section>"""
+
+
 def _build_gallery_section(items: list, property_name: str) -> str:
     """
-    Render the gallery section with category-ordered photos and section headers.
+    Render the full gallery section with category-ordered photos and section headers.
 
     Section headers span the full grid width (grid-column: 1 / -1).
     Photo count and CSS structure are unchanged from the original layout.
@@ -1043,7 +1201,7 @@ def _build_gallery_section(items: list, property_name: str) -> str:
     return f"""
   <section class="gallery" id="gallery">
     <div class="container">
-      <h2>Gallery</h2>
+      <h2>All Photos</h2>
       <div class="gallery-grid">{grid_html}</div>
     </div>
   </section>"""
@@ -1540,7 +1698,21 @@ def _page_css() -> str:
     .spotlight-feature { font-size: .85rem; color: var(--color-muted); text-transform: uppercase;
                          letter-spacing: .1em; margin-bottom: .75rem; }
 
-    /* Gallery */
+    /* Photo Tour — category modules */
+    .cat-modules-list { display: flex; flex-direction: column; gap: 3rem; }
+    .cat-module-label { font-family: var(--font-serif); font-size: 1.5rem; font-weight: 400;
+                        margin-bottom: .75rem; }
+    .cat-module-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 4px; }
+    .cat-module-grid--solo { grid-template-columns: 1fr; }
+    .cat-module-hero { width: 100%; height: 420px; object-fit: cover; cursor: pointer;
+                       display: block; transition: opacity .2s; }
+    .cat-module-supporting { display: flex; flex-direction: column; gap: 4px; height: 420px; }
+    .cat-module-thumb { width: 100%; flex: 1; min-height: 0; object-fit: cover;
+                        cursor: pointer; display: block; transition: opacity .2s; }
+    .cat-module-hero:hover, .cat-module-thumb:hover { opacity: .85; }
+    .view-all-wrap { margin-top: 2.5rem; text-align: center; }
+
+    /* Gallery (full / secondary) */
     .gallery-grid { display: grid;
                     grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: .5rem; }
     .gallery-thumb { width: 100%; height: 200px; object-fit: cover; cursor: pointer;
@@ -1655,5 +1827,9 @@ def _page_css() -> str:
     @media (max-width: 600px) {
       .hero-headline { font-size: 2rem; }
       .gallery-grid { grid-template-columns: repeat(2, 1fr); }
+      .cat-module-grid, .cat-module-grid--solo { grid-template-columns: 1fr; }
+      .cat-module-hero { height: 260px; }
+      .cat-module-supporting { flex-direction: row; height: auto; }
+      .cat-module-thumb { height: 160px; flex: 1; }
     }
   """

@@ -44,6 +44,8 @@ from agents.agent5.page_builder import (
     _format_description,
     build_landing_page_html,
     _prepare_gallery_items,
+    _build_category_modules,
+    _build_category_modules_section,
     _jaccard,
     _filename_seq_num,
     _caption_word_overlap,
@@ -58,6 +60,8 @@ from agents.agent5.page_builder import (
     _STRICT_DUPE_CATEGORIES,
     _DEPRIORITIZED_LABELS,
     _GALLERY_CATEGORY_ORDER,
+    _CATEGORY_MODULES,
+    _OPTIONAL_MODULE_LABELS,
 )
 from agents.agent5.ab_testing import generate_growthbook_snippet
 
@@ -1064,3 +1068,202 @@ class TestCombinedSimilarity:
 class TestSimilarityPenaltyConstant:
     def test_constant_value(self):
         assert SIMILARITY_PENALTY_WEIGHT == 0.3
+
+
+# ── Helpers for category module tests ─────────────────────────────────────
+
+def _make_gallery_item(category, rank, url=None, alt=None):
+    """Minimal gallery item dict (output format of _prepare_gallery_items)."""
+    url = url or f"https://r2.example.com/{category}_{rank}.jpg"
+    alt = alt or f"Prop – {category} photo"
+    return {"url": url, "alt": alt, "category": category, "rank": rank}
+
+
+class TestBuildCategoryModules:
+    """Unit tests for _build_category_modules."""
+
+    def _items(self, specs):
+        """specs: list of (category, rank) tuples."""
+        return [_make_gallery_item(cat, rank) for cat, rank in specs]
+
+    def test_hero_is_lowest_rank(self):
+        items = self._items([
+            ("exterior", 3),
+            ("exterior", 1),
+            ("exterior", 2),
+        ])
+        modules = _build_category_modules(items)
+        assert "Exterior & Views" in modules
+        assert modules["Exterior & Views"]["hero"]["rank"] == 1
+
+    def test_supporting_excludes_hero_url(self):
+        items = self._items([
+            ("exterior", 1),
+            ("exterior", 2),
+            ("exterior", 3),
+        ])
+        modules = _build_category_modules(items)
+        hero_url = modules["Exterior & Views"]["hero"]["url"]
+        for s in modules["Exterior & Views"]["supporting"]:
+            assert s["url"] != hero_url
+
+    def test_supporting_max_two(self):
+        items = self._items([("pool_hot_tub", i + 1) for i in range(10)])
+        modules = _build_category_modules(items)
+        assert len(modules["Outdoor & Pool"]["supporting"]) <= 2
+
+    def test_module_with_one_image_has_empty_supporting(self):
+        items = self._items([("kitchen", 1)])
+        modules = _build_category_modules(items)
+        assert "Kitchen" in modules
+        assert modules["Kitchen"]["hero"]["rank"] == 1
+        assert modules["Kitchen"]["supporting"] == []
+
+    def test_bathroom_module_present_when_images_exist(self):
+        items = self._items([("bathroom", 1), ("bathroom", 2)])
+        modules = _build_category_modules(items)
+        assert "Bathrooms" in modules
+
+    def test_bedroom_module_present_when_images_exist(self):
+        items = self._items([
+            ("master_bedroom", 1),
+            ("standard_bedroom", 1),
+        ])
+        modules = _build_category_modules(items)
+        assert "Bedrooms" in modules
+
+    def test_missing_required_module_not_in_result(self):
+        # Only exterior images — kitchen/bedroom/etc. modules should be absent
+        items = self._items([("exterior", 1), ("exterior", 2)])
+        modules = _build_category_modules(items)
+        assert "Kitchen" not in modules
+        assert "Bathrooms" not in modules
+
+    def test_amenities_extras_optional_skipped_silently(self):
+        # local_area and uncategorised absent → "Amenities & Extras" not in result
+        items = self._items([("exterior", 1)])
+        modules = _build_category_modules(items)
+        assert "Amenities & Extras" not in modules
+        # But no KeyError / exception
+
+    def test_amenities_extras_included_when_images_present(self):
+        items = self._items([("local_area", 1), ("uncategorised", 2)])
+        modules = _build_category_modules(items)
+        assert "Amenities & Extras" in modules
+
+    def test_all_contains_full_section(self):
+        items = self._items([
+            ("exterior", 1), ("exterior", 2), ("exterior", 3), ("exterior", 4),
+        ])
+        modules = _build_category_modules(items)
+        assert len(modules["Exterior & Views"]["all"]) == 4
+
+    def test_module_ordering_matches_category_modules_definition(self):
+        # All categories present — result should iterate in _CATEGORY_MODULES order
+        specs = []
+        for label, cats in _CATEGORY_MODULES:
+            for cat in list(cats)[:1]:
+                specs.append((cat, 1))
+        items = [_make_gallery_item(cat, rank) for cat, rank in specs]
+        modules = _build_category_modules(items)
+        expected_order = [lbl for lbl, _ in _CATEGORY_MODULES if lbl not in _OPTIONAL_MODULE_LABELS]
+        # only labels that have images
+        result_labels = list(modules.keys())
+        # result_labels should be a subsequence of expected_order
+        idx = 0
+        for lbl in result_labels:
+            while idx < len(expected_order) and expected_order[idx] != lbl:
+                idx += 1
+            assert idx < len(expected_order), f"{lbl} out of order"
+            idx += 1
+
+    def test_empty_gallery_returns_empty_modules(self):
+        modules = _build_category_modules([])
+        assert modules == {}
+
+    def test_view_and_exterior_share_module(self):
+        items = self._items([("exterior", 1), ("view", 2)])
+        modules = _build_category_modules(items)
+        assert "Exterior & Views" in modules
+        # Both categories should be represented in 'all'
+        cats = {x["category"] for x in modules["Exterior & Views"]["all"]}
+        assert "exterior" in cats
+        assert "view" in cats
+
+
+class TestBuildCategoryModulesSection:
+    """Tests for the HTML rendering of category modules."""
+
+    def _basic_gallery(self):
+        return [
+            _make_gallery_item("exterior", 1, url="https://r2.example.com/ext1.jpg"),
+            _make_gallery_item("exterior", 2, url="https://r2.example.com/ext2.jpg"),
+            _make_gallery_item("exterior", 3, url="https://r2.example.com/ext3.jpg"),
+            _make_gallery_item("pool_hot_tub", 1, url="https://r2.example.com/pool1.jpg"),
+        ]
+
+    def test_returns_empty_string_when_no_modules(self):
+        assert _build_category_modules_section({}, []) == ""
+
+    def test_section_contains_photo_tour_heading(self):
+        gallery = self._basic_gallery()
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        assert "Photo Tour" in html
+
+    def test_hero_image_url_in_html(self):
+        gallery = self._basic_gallery()
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        assert "ext1.jpg" in html   # best exterior rank=1
+
+    def test_view_all_photos_anchor_present(self):
+        gallery = self._basic_gallery()
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        assert 'href="#gallery"' in html
+        assert "View all photos" in html
+
+    def test_lightbox_index_assigned(self):
+        # lightbox indices are 0-based positions in gallery_items
+        gallery = self._basic_gallery()
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        assert "openLightbox(0)" in html   # first gallery item
+
+    def test_hero_url_not_duplicated_as_supporting(self):
+        # Even with only 1 image in a category, supporting should be empty
+        gallery = [_make_gallery_item("kitchen", 1, url="https://r2.example.com/kitchen1.jpg")]
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        # kitchen1.jpg should appear only once in the output
+        assert html.count("kitchen1.jpg") == 1
+
+    def test_solo_module_uses_grid_solo_class(self):
+        gallery = [_make_gallery_item("kitchen", 1, url="https://r2.example.com/kitchen1.jpg")]
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        assert "cat-module-grid--solo" in html
+
+    def test_module_with_supporting_uses_standard_grid_class(self):
+        gallery = [
+            _make_gallery_item("bathroom", 1, url="https://r2.example.com/bath1.jpg"),
+            _make_gallery_item("bathroom", 2, url="https://r2.example.com/bath2.jpg"),
+            _make_gallery_item("bathroom", 3, url="https://r2.example.com/bath3.jpg"),
+        ]
+        modules = _build_category_modules(gallery)
+        html = _build_category_modules_section(modules, gallery)
+        assert 'class="cat-module-grid"' in html
+
+    def test_full_gallery_still_contains_all_items(self):
+        # _prepare_gallery_items is tested separately; here just verify that
+        # gallery_items used for modules are a subset of the full gallery
+        gallery = self._basic_gallery()
+        modules = _build_category_modules(gallery)
+        all_module_urls = set()
+        for mod in modules.values():
+            all_module_urls.add(mod["hero"]["url"])
+            for s in mod["supporting"]:
+                all_module_urls.add(s["url"])
+        gallery_urls = {i["url"] for i in gallery}
+        assert all_module_urls.issubset(gallery_urls)
