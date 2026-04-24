@@ -349,7 +349,7 @@ print(f"""
   ─────────────────────────────────────────────────
   Total images    : {len(records)}
   Enhanced        : {n_enhanced} / {len(records)}
-  Sheets          : {len(sheets)} (Sheet {"–".join(list(sheets.keys())[[0,-1]])})
+  Sheets          : {len(sheets)} (Sheet {list(sheets.keys())[0]}–{list(sheets.keys())[-1]})
   Categories      : {cat_summary}
 
   Output files
