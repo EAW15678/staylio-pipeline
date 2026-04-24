@@ -91,11 +91,47 @@ _CATEGORY_MODULES: list[tuple[str, frozenset]] = [
 # All others log a warning when no images are available.
 _OPTIONAL_MODULE_LABELS: frozenset = frozenset({"Amenities & Extras"})
 
+# Per-module label preferences and penalties used by _module_quality_score.
+# Keys must match display labels in _CATEGORY_MODULES exactly.
+_MODULE_PREFERRED_LABELS: dict = {
+    "Exterior & Views":   frozenset({"exterior", "house", "facade", "balcony", "porch",
+                                     "view", "ocean", "horizon", "sunset", "skyline"}),
+    "Outdoor & Pool":     frozenset({"pool", "swimming pool", "deck", "hot tub", "spa",
+                                     "seating", "lounge chair", "patio", "pergola"}),
+    "Living Room":        frozenset({"living room", "sofa", "couch", "great room",
+                                     "family room", "fireplace", "sitting area", "sectional"}),
+    "Kitchen":            frozenset({"kitchen", "island", "countertop", "refrigerator",
+                                     "stove", "oven", "dining table", "dining room", "sink",
+                                     "cabinet"}),
+    "Bedrooms":           frozenset({"bedroom", "bed", "king", "bunk", "primary bedroom",
+                                     "master bedroom", "pillow", "nightstand", "headboard"}),
+    "Bathrooms":          frozenset({"bathroom", "vanity", "bathtub", "soaking tub",
+                                     "marble", "mirror", "double sink", "freestanding tub"}),
+    "Amenities & Extras": frozenset({"game room", "gym", "office", "library",
+                                     "wine cellar", "bar", "garage", "laundry room"}),
+}
+
+# Labels that trigger a hard penalty for a specific module (wrong-category content).
+_MODULE_PENALTY_LABELS: dict = {
+    "Kitchen":    frozenset({"laundry", "washer", "dryer", "closet", "hallway", "corridor",
+                              "washing machine", "coffee maker", "coffee cup"}),
+    "Bathrooms":  frozenset({"shower head", "showerhead", "shower curtain",
+                              "soap dispenser", "towel rack"}),
+}
+
+# Labels suggesting tight decorative closeups — deprioritised as hero/supporting candidates.
+_CLOSEUP_LABELS: frozenset = frozenset({
+    "coffee maker", "coffee cup", "throw pillow", "candle", "vase",
+    "plant", "artwork", "picture frame", "book", "remote control",
+    "lamp shade", "decorative bowl", "fruit bowl",
+})
+
 # ── Near-duplicate suppression ─────────────────────────────────────────────
 
-# Jaccard similarity of Vision label sets at or above this threshold
-# treats two images as near-duplicates (same scene, different angle/crop).
-NEAR_DUPE_LABEL_THRESHOLD = 0.5
+# Combined-similarity threshold for near-duplicate clustering.
+# Lower value = more aggressive suppression (more images treated as dupes).
+# Was 0.5; tightened to 0.4 to reduce visible repetition.
+NEAR_DUPE_LABEL_THRESHOLD = 0.4
 
 # Maximum images kept per near-duplicate cluster (default for most categories).
 MAX_PER_DUPE_CLUSTER = 2
@@ -125,6 +161,15 @@ _DEPRIORITIZED_LABELS: frozenset = frozenset({
 # Weight applied to max similarity when computing diversity-adjusted score.
 # adjusted_score = raw_score - max_similarity_to_selected * SIMILARITY_PENALTY_WEIGHT
 SIMILARITY_PENALTY_WEIGHT = 0.3
+
+# Maximum combined-similarity allowed between any two images selected for the
+# same module (hero vs supporting, or supporting vs supporting).
+# Stricter than NEAR_DUPE_LABEL_THRESHOLD — module curation is tighter than gallery.
+MODULE_MAX_SIMILARITY = 0.35
+
+# Maximum thumbnails rendered inline in the All Photos grid.
+# The full dataset (up to MAX_GALLERY_IMAGES=50) is preserved for lightbox use.
+MAX_VISIBLE_ALL_PHOTOS = 30
 
 
 def build_landing_page_html(
@@ -742,6 +787,39 @@ def _asset_score(asset):
     return score
 
 
+def _module_quality_score(asset: dict, module_label: str) -> float:
+    """
+    Module-level quality score layered on top of _asset_score.
+
+    Applies category-specific boosts and penalties so that the best image
+    for *this module's context* rises to the top, even if its raw gallery
+    rank is slightly lower.
+
+    Multipliers (applied to _asset_score base):
+      ×1.25  preferred labels for this module are present
+      ×0.40  penalty labels for this module are present (wrong-category content)
+      ×0.80  tight decorative closeup labels detected (prefer room-level shots)
+
+    Multiple multipliers can stack (e.g. preferred AND closeup → 1.25 × 0.80).
+    """
+    base = _asset_score(asset)
+    labels = set(lbl.lower() for lbl in (asset.get("labels_enhanced") or []))
+
+    preferred = _MODULE_PREFERRED_LABELS.get(module_label, frozenset())
+    penalty_set = _MODULE_PENALTY_LABELS.get(module_label, frozenset())
+
+    if labels & preferred:
+        base *= 1.25
+
+    if labels & penalty_set:
+        base *= 0.4   # hard suppression for clearly wrong-category content
+
+    if labels & _CLOSEUP_LABELS:
+        base *= 0.8   # prefer wide/room-level shots over decorative closeups
+
+    return base
+
+
 def _suppress_near_dupes(assets):
     """
     Within a single subject_category, cluster images by multi-signal similarity
@@ -1013,9 +1091,21 @@ def _prepare_gallery_items(
         if cluster_detail:
             logger.info("[Agent 5] Cluster detail: %s", cluster_detail)
 
-    # Strip scoring/clustering fields — return only display fields
+    # Return display fields plus metadata needed by _build_category_modules.
+    # Rendering helpers (_build_gallery_section, etc.) only read url/alt/category/rank.
     return [
-        {"url": i["url"], "alt": i["alt"], "category": i["category"], "rank": i["rank"]}
+        {
+            "url": i["url"],
+            "alt": i["alt"],
+            "category": i["category"],
+            "rank": i["rank"],
+            # Preserved for module scoring — not used by rendering helpers
+            "labels_enhanced": i.get("labels_enhanced") or [],
+            "composition_score": i.get("composition_score") or 0.0,
+            "has_enhanced": i.get("has_enhanced", False),
+            "source": i.get("source") or "unknown",
+            "subject_category": i.get("subject_category") or i["category"],
+        }
         for i in selected
     ]
 
@@ -1028,10 +1118,13 @@ def _build_category_modules(gallery_items: list) -> dict:
     _CATEGORY_MODULES section definitions and selects up to 3 featured images
     per module: 1 hero + 2 supporting.
 
-    Selection:
-      - hero      = lowest category_rank in the section (best quality)
-      - supporting = next 2 by rank; URLs guaranteed distinct from hero
-      - all        = all section images (for full gallery cross-referencing)
+    Selection algorithm (per module):
+      1. Score all section images with _module_quality_score (category-aware).
+      2. Iterate candidates in descending score order.
+      3. Accept the first candidate as hero; subsequent candidates must have
+         combined_similarity < MODULE_MAX_SIMILARITY with every already-selected
+         module image, otherwise they are skipped.
+      4. Stop after 3 images (hero + 2 supporting) or when candidates exhausted.
 
     Returns an ordered dict: {label: {hero, supporting, all}}.
     Modules with no images are omitted; missing required modules are logged.
@@ -1049,9 +1142,6 @@ def _build_category_modules(gallery_items: list) -> dict:
         for cat in cats:
             section_items.extend(by_category.get(cat, []))
 
-        # Sort ascending by rank (rank 1 = best); break ties by URL for stability
-        section_items.sort(key=lambda x: (x["rank"], x["url"]))
-
         if not section_items:
             if label in _OPTIONAL_MODULE_LABELS:
                 missing_optional.append(label)
@@ -1059,17 +1149,64 @@ def _build_category_modules(gallery_items: list) -> dict:
                 missing_required.append(label)
             continue
 
-        hero = section_items[0]
-        supporting = [x for x in section_items[1:] if x["url"] != hero["url"]][:2]
+        # Sort by module quality score descending so the best candidate is tried first
+        section_items.sort(
+            key=lambda x: _module_quality_score(x, label),
+            reverse=True,
+        )
+
+        selected: list = []
+        selected_label_sets: list = []
+        n_skipped_sim = 0
+
+        for item in section_items:
+            if len(selected) >= 3:
+                break
+
+            raw_labels = item.get("labels_enhanced") or []
+            label_set = frozenset(lbl.lower() for lbl in raw_labels)
+
+            if selected:
+                max_sim = max(
+                    _combined_similarity(label_set, sel_ls, item, sel_item)
+                    for sel_item, sel_ls in zip(selected, selected_label_sets)
+                )
+                if max_sim > MODULE_MAX_SIMILARITY:
+                    n_skipped_sim += 1
+                    logger.debug(
+                        "[Agent 5] Module '%s': skipped %s (similarity=%.2f > %.2f)",
+                        label, item["url"], max_sim, MODULE_MAX_SIMILARITY,
+                    )
+                    continue
+
+            selected.append(item)
+            selected_label_sets.append(label_set)
+            logger.debug(
+                "[Agent 5] Module '%s': selected %s (rank=%s, cat=%s, score=%.3f)",
+                label, item["url"], item.get("rank"), item.get("category"),
+                _module_quality_score(item, label),
+            )
+
+        if not selected:
+            if label in _OPTIONAL_MODULE_LABELS:
+                missing_optional.append(label)
+            else:
+                missing_required.append(label)
+            continue
 
         result[label] = {
-            "hero": hero,
-            "supporting": supporting,
+            "hero": selected[0],
+            "supporting": selected[1:],
             "all": section_items,
         }
+        if n_skipped_sim:
+            logger.info(
+                "[Agent 5] Module '%s': %d candidate(s) skipped for visual similarity",
+                label, n_skipped_sim,
+            )
 
     for lbl in missing_required:
-        logger.info("[Agent 5] Photo tour module '%s' skipped — no images available", lbl)
+        logger.info("[Agent 5] Photo tour module '%s' skipped — no qualifying images", lbl)
 
     featured_summary = ", ".join(
         "{lbl}={n}img".format(lbl=lbl, n=1 + len(mod["supporting"]))
@@ -1155,17 +1292,26 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
 
 def _build_gallery_section(items: list, property_name: str) -> str:
     """
-    Render the full gallery section with category-ordered photos and section headers.
+    Render the All Photos section with category-ordered thumbnails and section headers.
+
+    Only the first MAX_VISIBLE_ALL_PHOTOS thumbnails are rendered inline.
+    The full dataset (up to MAX_GALLERY_IMAGES) is preserved in gallery_items
+    for lightbox index consistency — indices here match those in the Photo Tour.
 
     Section headers span the full grid width (grid-column: 1 / -1).
-    Photo count and CSS structure are unchanged from the original layout.
     Lightbox indices (0-based) track photo position, not including headers.
     """
     if not items:
         return ""
 
-    # Build set of which categories are present for header decisions
-    present_categories = {item["category"] for item in items}
+    total = len(items)
+    visible_items = items[:MAX_VISIBLE_ALL_PHOTOS]
+    hidden_count = max(0, total - MAX_VISIBLE_ALL_PHOTOS)
+
+    logger.info(
+        "[Agent 5] All Photos grid: rendering %d of %d total (MAX_VISIBLE=%d)",
+        len(visible_items), total, MAX_VISIBLE_ALL_PHOTOS,
+    )
 
     # Map each item to its section label (for header insertion)
     def _section_for(cat: str) -> Optional[str]:
@@ -1176,16 +1322,15 @@ def _build_gallery_section(items: list, property_name: str) -> str:
 
     grid_html = ""
     last_section: Optional[str] = None
-    photo_index = 0  # lightbox index (headers don't count)
+    photo_index = 0  # lightbox index (headers don't count; indices match gallery_items)
 
-    for item in items:
+    for item in visible_items:
         url = item["url"]
         alt = item["alt"]
         section = _section_for(item["category"])
 
         # Insert section header when crossing into a new labelled section
         if section and section != last_section:
-            # Only show header if this section has at least 1 photo (always true here)
             grid_html += (
                 f'<p class="gallery-section-label" '
                 f'style="grid-column: 1 / -1">{_esc(section)}</p>\n'
@@ -1198,11 +1343,18 @@ def _build_gallery_section(items: list, property_name: str) -> str:
         )
         photo_index += 1
 
+    hidden_note = (
+        f'<p class="gallery-hidden-note" style="grid-column: 1 / -1; '
+        f'font-size: .85rem; color: var(--color-muted); margin-top: .5rem;">'
+        f'Showing {len(visible_items)} of {total} photos</p>\n'
+        if hidden_count > 0 else ""
+    )
+
     return f"""
   <section class="gallery" id="gallery">
     <div class="container">
       <h2>All Photos</h2>
-      <div class="gallery-grid">{grid_html}</div>
+      <div class="gallery-grid">{grid_html}{hidden_note}</div>
     </div>
   </section>"""
 

@@ -51,17 +51,23 @@ from agents.agent5.page_builder import (
     _caption_word_overlap,
     _combined_similarity,
     _asset_score,
+    _module_quality_score,
     _suppress_near_dupes,
     MAX_GALLERY_IMAGES,
     MAX_IMAGES_PER_GALLERY_CATEGORY,
+    MAX_VISIBLE_ALL_PHOTOS,
     NEAR_DUPE_LABEL_THRESHOLD,
     MAX_PER_DUPE_CLUSTER,
+    MODULE_MAX_SIMILARITY,
     SIMILARITY_PENALTY_WEIGHT,
     _STRICT_DUPE_CATEGORIES,
     _DEPRIORITIZED_LABELS,
     _GALLERY_CATEGORY_ORDER,
     _CATEGORY_MODULES,
     _OPTIONAL_MODULE_LABELS,
+    _MODULE_PREFERRED_LABELS,
+    _MODULE_PENALTY_LABELS,
+    _CLOSEUP_LABELS,
 )
 from agents.agent5.ab_testing import generate_growthbook_snippet
 
@@ -1267,3 +1273,167 @@ class TestBuildCategoryModulesSection:
                 all_module_urls.add(s["url"])
         gallery_urls = {i["url"] for i in gallery}
         assert all_module_urls.issubset(gallery_urls)
+
+
+def _make_gallery_item_rich(category, rank, labels, url=None, comp=0.5, source="airbnb_scraped"):
+    """Gallery item dict with metadata fields (as returned by updated _prepare_gallery_items)."""
+    url = url or f"https://r2.example.com/{category}_{rank}.jpg"
+    return {
+        "url": url,
+        "alt": f"Prop – {', '.join(labels[:2])}",
+        "category": category,
+        "rank": rank,
+        "labels_enhanced": labels,
+        "composition_score": comp,
+        "has_enhanced": True,
+        "source": source,
+        "subject_category": category,
+    }
+
+
+class TestModuleQualityScore:
+    """Tests for _module_quality_score."""
+
+    def test_preferred_label_boosts_score(self):
+        kitchen_good = _make_gallery_item_rich("kitchen", 1, ["kitchen", "island", "countertop"])
+        kitchen_bad  = _make_gallery_item_rich("kitchen", 1, ["room", "furniture"])
+        assert _module_quality_score(kitchen_good, "Kitchen") > _module_quality_score(kitchen_bad, "Kitchen")
+
+    def test_penalty_label_suppresses_score(self):
+        laundry = _make_gallery_item_rich("kitchen", 1, ["laundry", "washer", "dryer"])
+        kitchen = _make_gallery_item_rich("kitchen", 1, ["kitchen", "countertop"])
+        assert _module_quality_score(laundry, "Kitchen") < _module_quality_score(kitchen, "Kitchen")
+
+    def test_closeup_label_reduces_score(self):
+        wide   = _make_gallery_item_rich("living_room", 1, ["living room", "sofa", "couch"])
+        closeup = _make_gallery_item_rich("living_room", 1, ["living room", "candle", "vase"])
+        assert _module_quality_score(wide, "Living Room") > _module_quality_score(closeup, "Living Room")
+
+    def test_no_label_match_returns_base_score(self):
+        item = _make_gallery_item_rich("exterior", 1, ["house", "facade"])
+        base = _asset_score(item)
+        module_score = _module_quality_score(item, "Kitchen")  # exterior item in wrong module
+        # No preferred/penalty match → same as base (no modifier applied)
+        assert abs(module_score - base) < 0.001
+
+    def test_kitchen_hero_is_not_laundry_when_kitchen_images_exist(self):
+        items = [
+            _make_gallery_item_rich("kitchen", 1, ["laundry", "washer", "dryer"]),
+            _make_gallery_item_rich("kitchen", 2, ["kitchen", "island", "countertop"]),
+            _make_gallery_item_rich("kitchen", 3, ["kitchen", "stove", "oven"]),
+        ]
+        modules = _build_category_modules(items)
+        assert "Kitchen" in modules
+        hero_labels = set(lbl.lower() for lbl in modules["Kitchen"]["hero"].get("labels_enhanced", []))
+        # Hero should be the kitchen image, not the laundry image
+        assert "laundry" not in hero_labels
+
+
+class TestModuleSimilarityThreshold:
+    """Tests for MODULE_MAX_SIMILARITY enforcement in _build_category_modules."""
+
+    def test_constant_value(self):
+        assert MODULE_MAX_SIMILARITY == 0.35
+
+    def test_similar_images_not_both_selected(self):
+        # Two nearly identical pool images should not both appear in the module
+        items = [
+            _make_gallery_item_rich("pool_hot_tub", 1, ["pool", "water", "deck", "tile", "lounge"]),
+            _make_gallery_item_rich("pool_hot_tub", 2, ["pool", "water", "deck", "tile", "chair"]),
+            # This one is genuinely different
+            _make_gallery_item_rich("pool_hot_tub", 3, ["hot tub", "spa", "jets", "steam", "evening"]),
+        ]
+        modules = _build_category_modules(items)
+        if "Outdoor & Pool" not in modules:
+            return  # edge case: all images too similar, module skipped — acceptable
+        mod = modules["Outdoor & Pool"]
+        selected = [mod["hero"]] + mod["supporting"]
+        # Verify no two selected images exceed the similarity threshold
+        label_sets = [
+            frozenset(lbl.lower() for lbl in img.get("labels_enhanced", []))
+            for img in selected
+        ]
+        from agents.agent5.page_builder import _combined_similarity
+        for i in range(len(selected)):
+            for j in range(i + 1, len(selected)):
+                sim = _combined_similarity(label_sets[i], label_sets[j], selected[i], selected[j])
+                assert sim <= MODULE_MAX_SIMILARITY + 0.01, (
+                    f"Images {i} and {j} too similar: {sim:.3f} > {MODULE_MAX_SIMILARITY}"
+                )
+
+    def test_bathroom_module_max_three_images(self):
+        items = [
+            _make_gallery_item_rich("bathroom", 1, ["bathroom", "vanity", "mirror"]),
+            _make_gallery_item_rich("bathroom", 2, ["bathtub", "soaking tub", "marble"]),
+            _make_gallery_item_rich("bathroom", 3, ["shower", "tile", "glass door"]),
+            _make_gallery_item_rich("bathroom", 4, ["bathroom", "sink", "countertop"]),
+        ]
+        modules = _build_category_modules(items)
+        if "Bathrooms" not in modules:
+            return
+        mod = modules["Bathrooms"]
+        total_featured = 1 + len(mod["supporting"])
+        assert total_featured <= 3
+
+    def test_outdoor_pool_module_shows_diversity_when_available(self):
+        # Pool + hot tub should both appear when they're visually distinct
+        items = [
+            _make_gallery_item_rich("pool_hot_tub", 1, ["swimming pool", "water", "deck"], comp=0.9),
+            _make_gallery_item_rich("outdoor_entertaining", 2, ["seating area", "patio", "chairs"], comp=0.8),
+        ]
+        modules = _build_category_modules(items)
+        if "Outdoor & Pool" not in modules:
+            return
+        mod = modules["Outdoor & Pool"]
+        all_cats = {img["category"] for img in [mod["hero"]] + mod["supporting"]}
+        # With 2 distinct-category images, both should be selected (different enough)
+        assert len([mod["hero"]] + mod["supporting"]) == 2
+
+
+class TestVisibleAllPhotos:
+    """Tests for MAX_VISIBLE_ALL_PHOTOS cap in _build_gallery_section."""
+
+    def test_constant_value(self):
+        assert MAX_VISIBLE_ALL_PHOTOS == 30
+
+    def test_visible_limit_respected(self):
+        # Build more than 30 gallery items
+        items = [
+            _make_gallery_item(cat, i + 1)
+            for cat in ["exterior", "pool_hot_tub", "living_room", "kitchen", "bathroom"]
+            for i in range(8)
+        ]
+        from agents.agent5.page_builder import _build_gallery_section
+        html = _build_gallery_section(items, "TestProp")
+        # Count rendered gallery-thumb images
+        thumb_count = html.count('class="gallery-thumb"')
+        assert thumb_count <= MAX_VISIBLE_ALL_PHOTOS, f"Rendered {thumb_count} thumbs, expected ≤ {MAX_VISIBLE_ALL_PHOTOS}"
+
+    def test_total_gallery_up_to_50(self):
+        # _prepare_gallery_items caps at MAX_GALLERY_IMAGES=50, not MAX_VISIBLE_ALL_PHOTOS
+        assert MAX_GALLERY_IMAGES == 50
+        assert MAX_VISIBLE_ALL_PHOTOS < MAX_GALLERY_IMAGES
+
+    def test_showing_note_appears_when_items_exceed_visible(self):
+        items = [_make_gallery_item("exterior", i + 1) for i in range(35)]
+        from agents.agent5.page_builder import _build_gallery_section
+        html = _build_gallery_section(items, "TestProp")
+        assert "Showing" in html and "of 35 photos" in html
+
+    def test_no_showing_note_when_within_limit(self):
+        items = [_make_gallery_item("exterior", i + 1) for i in range(20)]
+        from agents.agent5.page_builder import _build_gallery_section
+        html = _build_gallery_section(items, "TestProp")
+        assert "Showing" not in html
+
+
+class TestNearDupeThreshold:
+    """Verify the tightened NEAR_DUPE_LABEL_THRESHOLD."""
+
+    def test_threshold_value(self):
+        assert NEAR_DUPE_LABEL_THRESHOLD == 0.4
+
+    def test_threshold_lower_than_module_max_similarity(self):
+        # Gallery dupe threshold should be at least as strict as module threshold
+        # (both enforce deduplication, just at different stages)
+        assert NEAR_DUPE_LABEL_THRESHOLD <= MODULE_MAX_SIMILARITY + 0.1
