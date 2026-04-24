@@ -1,0 +1,146 @@
+{
+  "_comment": "Sample mock curation for local preview testing. Replace asset_id values with real R2 original URLs from your property's media_assets. Run: python tools/preview_agent5.py <property_id> --mock-curation tools/sample_curation.json",
+  "images": [
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_1",
+      "llm_category": "exterior",
+      "room_subtype": null,
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "hero",
+      "reason": null,
+      "alt": "Front exterior of the property at golden hour"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_2",
+      "llm_category": "view",
+      "room_subtype": null,
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "supporting",
+      "reason": null,
+      "alt": "Panoramic view from the property"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_3",
+      "llm_category": "pool_hot_tub",
+      "room_subtype": null,
+      "duplicate_group": "dg_pool",
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "supporting",
+      "reason": null,
+      "alt": "Private pool with lounge chairs"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_4",
+      "llm_category": "pool_hot_tub",
+      "room_subtype": null,
+      "duplicate_group": "dg_pool",
+      "is_primary_in_group": false,
+      "rank_within_category": 2,
+      "role": "gallery_only",
+      "reason": null,
+      "alt": "Pool from alternate angle"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_5",
+      "llm_category": "living_room",
+      "room_subtype": null,
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "supporting",
+      "reason": null,
+      "alt": "Open-plan living room with vaulted ceilings"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_6",
+      "llm_category": "kitchen",
+      "room_subtype": "island_kitchen",
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "supporting",
+      "reason": null,
+      "alt": "Gourmet kitchen with marble island"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_7",
+      "llm_category": "master_bedroom",
+      "room_subtype": null,
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "supporting",
+      "reason": null,
+      "alt": "Primary bedroom with king bed and ocean view"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_8",
+      "llm_category": "bathroom",
+      "room_subtype": null,
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "gallery_only",
+      "reason": null,
+      "alt": "Spa-style bathroom with soaking tub"
+    },
+    {
+      "asset_id": "REPLACE_WITH_R2_ORIGINAL_URL_9",
+      "llm_category": "uncategorised",
+      "room_subtype": null,
+      "duplicate_group": null,
+      "is_primary_in_group": true,
+      "rank_within_category": 1,
+      "role": "exclude",
+      "reason": "dark_and_blurry",
+      "alt": ""
+    }
+  ],
+  "property": {
+    "page_hero": "REPLACE_WITH_R2_ORIGINAL_URL_1",
+    "photo_tour_sections": [
+      {
+        "section": "Exterior & Views",
+        "hero": "REPLACE_WITH_R2_ORIGINAL_URL_1",
+        "supporting": ["REPLACE_WITH_R2_ORIGINAL_URL_2"]
+      },
+      {
+        "section": "Outdoor & Pool",
+        "hero": "REPLACE_WITH_R2_ORIGINAL_URL_3",
+        "supporting": []
+      },
+      {
+        "section": "Living Room",
+        "hero": "REPLACE_WITH_R2_ORIGINAL_URL_5",
+        "supporting": []
+      },
+      {
+        "section": "Kitchen",
+        "hero": "REPLACE_WITH_R2_ORIGINAL_URL_6",
+        "supporting": []
+      },
+      {
+        "section": "Bedrooms",
+        "hero": "REPLACE_WITH_R2_ORIGINAL_URL_7",
+        "supporting": []
+      }
+    ],
+    "category_order": [
+      "Exterior & Views",
+      "Outdoor & Pool",
+      "Living Room",
+      "Kitchen",
+      "Bedrooms"
+    ],
+    "vibe": "A light-filled coastal retreat with sweeping views and resort-style amenities.",
+    "merchandising_strategy": {
+      "prioritize": ["golden hour exterior", "pool and view together", "open-plan living"],
+      "deprioritize": ["bathroom closeups", "utility areas"]
+    }
+  }
+}

@@ -44,6 +44,18 @@ UTM_TEMPLATE = "?utm_source=booked&utm_medium=landing_page&utm_campaign={slug}&u
 MAX_GALLERY_IMAGES = 50          # maximum photos shown in the gallery
 MAX_IMAGES_PER_GALLERY_CATEGORY = 8  # per-category cap (first pass balancing)
 
+# Valid LLM curation categories — must match SubjectCategory enum in agent3/models.py.
+# Used to validate llm_category values before applying them; invalid values fall back
+# to GCV subject_category.
+_CURATION_VALID_CATEGORIES: frozenset = frozenset({
+    "exterior", "view", "pool_hot_tub", "outdoor_entertaining",
+    "living_room", "kitchen", "master_bedroom", "standard_bedroom",
+    "bathroom", "game_entertainment", "local_area", "uncategorised",
+})
+
+# Roles that qualify an image for the Photo Tour (not just gallery).
+_PHOTO_TOUR_ROLES: frozenset = frozenset({"hero", "supporting"})
+
 # Category sort order for the gallery (lower index = appears first).
 # Matches the SubjectCategory enum values from agent3/models.py.
 _GALLERY_CATEGORY_ORDER: list[str] = [
@@ -975,66 +987,97 @@ def _gallery_items_from_curation(
     """
     Build the gallery_items list from LLM curation results.
 
-    Uses llm_category (not GCV subject_category) and rank_within_category.
-    Excludes images with role='exclude' and the current hero photo.
-    Falls back gracefully if asset_id can't be matched in media_assets.
+    Filtering rules (in order):
+      1. role == 'exclude'          → always dropped
+      2. is_primary_in_group==False → duplicate suppressed (non-best angle)
+      3. llm_category invalid       → fall back to GCV subject_category
+      4. asset_id not in media_assets → skipped (unresolvable)
+      5. display_url == hero_photo  → skipped (hero shown separately)
 
-    Returns same dict shape as _prepare_gallery_items (url, alt, category, rank,
-    labels_enhanced, composition_score, has_enhanced, source, subject_category).
+    Returns same dict shape as _prepare_gallery_items.
     """
-    # Build lookup: asset_url_original → asset dict
     original_lookup: dict = {
         a.get("asset_url_original"): a
         for a in media_assets
         if a.get("asset_url_original")
     }
-    # Also build enhanced → asset dict (for hero comparison)
-    enhanced_lookup: dict = {
-        a.get("asset_url_enhanced"): a
-        for a in media_assets
-        if a.get("asset_url_enhanced")
-    }
 
     items: list[dict] = []
     per_image = curation.get("images") or []
 
+    # Counters for debug logging
+    n_excluded      = 0
+    n_dupe_removed  = 0
+    n_unresolvable  = 0
+    n_hero_skipped  = 0
+    n_cat_corrected = 0
+    role_counts: dict[str, int] = {}
+
     for result in per_image:
         role = result.get("role") or "gallery_only"
+        role_counts[role] = role_counts.get(role, 0) + 1
+
+        # 1. Excluded by LLM
         if role == "exclude":
+            n_excluded += 1
+            continue
+
+        # 2. Duplicate suppression — keep only the primary image in each group
+        if not result.get("is_primary_in_group", True):
+            n_dupe_removed += 1
+            logger.debug(
+                "[Agent 5] Curation: suppressed duplicate %s (group=%s)",
+                result.get("asset_id", "")[-30:],
+                result.get("duplicate_group"),
+            )
             continue
 
         asset_id = result.get("asset_id") or ""
         asset = original_lookup.get(asset_id)
         if not asset:
+            n_unresolvable += 1
             continue
 
         display_url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
         if not display_url or display_url == hero_photo:
+            n_hero_skipped += 1
             continue
 
-        alt = result.get("alt") or ""
+        # 3. Category validation — fall back to GCV category if LLM gave invalid value
+        llm_cat = result.get("llm_category") or ""
+        if llm_cat in _CURATION_VALID_CATEGORIES:
+            category = llm_cat
+        else:
+            gcv_cat = (asset.get("subject_category") or "uncategorised").lower()
+            category = gcv_cat if gcv_cat in _CURATION_VALID_CATEGORIES else "uncategorised"
+            n_cat_corrected += 1
+            logger.debug(
+                "[Agent 5] Curation: invalid llm_category %r for %s — using GCV %r",
+                llm_cat, asset_id[-30:], category,
+            )
+
+        rank = result.get("rank_within_category") or 999
+        alt  = result.get("alt") or ""
         if not alt:
             labels = asset.get("labels_enhanced") or []
-            alt = f"{property_name} \u2013 " + ", ".join(labels[:3]) if labels else f"{property_name} photo"
-
-        category = result.get("llm_category") or "uncategorised"
-        rank = result.get("rank_within_category") or 999
+            alt = (
+                f"{property_name} \u2013 " + ", ".join(labels[:3])
+                if labels else f"{property_name} photo"
+            )
 
         items.append({
             "url":               display_url,
             "alt":               alt,
             "category":          category,
             "rank":              rank,
-            # Preserved for rendering helpers
             "labels_enhanced":   asset.get("labels_enhanced") or [],
             "composition_score": asset.get("composition_score") or 0.0,
             "has_enhanced":      bool(asset.get("asset_url_enhanced")),
             "source":            asset.get("source") or "unknown",
             "subject_category":  category,
-            # Curation extras (available to callers that need them)
             "role":              role,
             "duplicate_group":   result.get("duplicate_group"),
-            "is_primary":        result.get("is_primary_in_group", True),
+            "is_primary":        True,  # guaranteed by filter above
         })
 
     # Sort: (category_priority_index, rank)
@@ -1046,16 +1089,19 @@ def _gallery_items_from_curation(
         return (pri, item["rank"])
 
     items.sort(key=_sort_key_curation)
-
-    # Cap at MAX_GALLERY_IMAGES
     items = items[:MAX_GALLERY_IMAGES]
 
+    # ── Debug logging ──────────────────────────────────────────────────────
+    role_summary = ", ".join(f"{r}={n}" for r, n in sorted(role_counts.items()))
     logger.info(
-        "[Agent 5] Gallery from LLM curation: %d images (excluded %d), %d categories",
-        len(items),
-        sum(1 for r in per_image if r.get("role") == "exclude"),
-        len({i["category"] for i in items}),
+        "[Agent 5] Curation gallery: total=%d candidates, roles=(%s), "
+        "excluded=%d, dupes_removed=%d, unresolvable=%d, hero_skipped=%d, "
+        "cat_corrected=%d → %d items in gallery (%d categories)",
+        len(per_image), role_summary,
+        n_excluded, n_dupe_removed, n_unresolvable, n_hero_skipped,
+        n_cat_corrected, len(items), len({i["category"] for i in items}),
     )
+
     return items
 
 
@@ -1065,80 +1111,99 @@ def _modules_from_curation(
     media_assets: list,
 ) -> dict:
     """
-    Build category_modules from LLM curation's photo_tour_sections.
+    Build category_modules strictly from LLM curation's photo_tour_sections.
 
-    Uses the same output format as _build_category_modules:
-        {section_label: {hero: item, supporting: [items], all: [items]}}
+    Rules:
+      - Only images with role 'hero' or 'supporting' are eligible for modules.
+      - No synthesised fallbacks: if an asset_id can't be resolved to a
+        qualifying gallery item, the section slot is left empty (not filled
+        from the broader gallery pool).
+      - The 'all' list for each section is drawn from gallery_items (same as
+        the heuristic path) so lightbox navigation remains consistent.
 
-    gallery_items is the already-built list from _gallery_items_from_curation,
-    used to populate the 'all' list for each section.
+    Output format: {section_label: {hero: item, supporting: [items], all: [items]}}
     """
     original_lookup: dict = {
         a.get("asset_url_original"): a
         for a in media_assets
         if a.get("asset_url_original")
     }
-    # URL-to-gallery-item lookup for quick access
+    # URL-to-gallery-item lookup (gallery_items already filtered/sorted)
     url_to_item: dict = {item["url"]: item for item in gallery_items}
 
-    property_recs = curation.get("property") or {}
-    sections_raw  = property_recs.get("photo_tour_sections") or []
+    # Build role lookup from curation: asset_id → role
+    curation_roles: dict[str, str] = {
+        r["asset_id"]: r.get("role") or "gallery_only"
+        for r in (curation.get("images") or [])
+        if r.get("asset_id")
+    }
 
-    def _curation_item_to_gallery(asset_id: str, fallback_cat: str = "uncategorised") -> Optional[dict]:
-        """Resolve an asset_id to a gallery item dict."""
+    def _resolve_module_item(asset_id: str) -> Optional[dict]:
+        """
+        Resolve asset_id to a gallery item ONLY if:
+          1. Its role is 'hero' or 'supporting' per curation data.
+          2. It maps to a known media asset with a display URL.
+          3. It is present in gallery_items (not excluded or hero-only).
+        Returns None if any condition fails — no synthesised fallbacks.
+        """
+        role = curation_roles.get(asset_id, "")
+        if role not in _PHOTO_TOUR_ROLES:
+            logger.debug(
+                "[Agent 5] Module: skipped %s — role=%r not in photo-tour roles",
+                asset_id[-30:], role,
+            )
+            return None
+
         asset = original_lookup.get(asset_id)
         if not asset:
             return None
+
         display_url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
         if not display_url:
             return None
-        # If already in gallery_items (not excluded), use that version
-        existing = url_to_item.get(display_url)
-        if existing:
-            return existing
-        # Asset was not in gallery (may have been hero) — synthesise item
-        labels = asset.get("labels_enhanced") or []
-        return {
-            "url":               display_url,
-            "alt":               ", ".join(labels[:3]) if labels else "",
-            "category":          fallback_cat,
-            "rank":              1,
-            "labels_enhanced":   labels,
-            "composition_score": asset.get("composition_score") or 0.0,
-            "has_enhanced":      bool(asset.get("asset_url_enhanced")),
-            "source":            asset.get("source") or "unknown",
-            "subject_category":  fallback_cat,
-        }
+
+        item = url_to_item.get(display_url)
+        if item is None:
+            logger.debug(
+                "[Agent 5] Module: skipped %s — not in gallery_items (excluded or hero-only)",
+                asset_id[-30:],
+            )
+        return item
 
     # Build per-section 'all' list from gallery_items
     by_section_label: dict[str, list] = {}
     for item in gallery_items:
-        # Map category back to section label
         cat = item.get("category") or "uncategorised"
         for lbl, cats in _CATEGORY_MODULES:
             if cat in cats:
                 by_section_label.setdefault(lbl, []).append(item)
                 break
 
+    property_recs = curation.get("property") or {}
+    sections_raw  = property_recs.get("photo_tour_sections") or []
+    valid_section_names = {lbl for lbl, _ in _CATEGORY_MODULES}
+
     result: dict = {}
+    n_skipped_sections = 0
+
     for sec in sections_raw:
         section_name = sec.get("section") or ""
-        if section_name not in {lbl for lbl, _ in _CATEGORY_MODULES}:
+        if section_name not in valid_section_names:
             continue
 
-        hero_id = sec.get("hero") or ""
-
-        # Determine section category (for synthesised items)
-        section_cats = next((cats for lbl, cats in _CATEGORY_MODULES if lbl == section_name), frozenset())
-        fallback_cat = next(iter(section_cats), "uncategorised")
-
-        hero_item = _curation_item_to_gallery(hero_id, fallback_cat)
+        hero_id   = sec.get("hero") or ""
+        hero_item = _resolve_module_item(hero_id)
         if not hero_item:
+            n_skipped_sections += 1
+            logger.info(
+                "[Agent 5] Module '%s' skipped — hero asset_id unresolvable or wrong role",
+                section_name,
+            )
             continue
 
         supporting_items: list = []
         for sid in (sec.get("supporting") or [])[:2]:
-            sitem = _curation_item_to_gallery(sid, fallback_cat)
+            sitem = _resolve_module_item(sid)
             if sitem and sitem["url"] != hero_item["url"]:
                 supporting_items.append(sitem)
 
@@ -1149,9 +1214,13 @@ def _modules_from_curation(
         }
 
     logger.info(
-        "[Agent 5] Photo tour from LLM curation: %d sections (%s)",
+        "[Agent 5] Photo tour from LLM curation: %d sections built (%s); %d skipped",
         len(result),
-        ", ".join(result.keys()),
+        ", ".join(
+            f"{lbl}={1 + len(mod['supporting'])}img"
+            for lbl, mod in result.items()
+        ) or "none",
+        n_skipped_sections,
     )
     return result
 
