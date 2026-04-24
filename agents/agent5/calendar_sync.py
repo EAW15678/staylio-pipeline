@@ -45,14 +45,15 @@ SUPPORTED_PMS = {"guesty", "hostaway", "ownerrez"}
 # The property's iCal URL is baked into the worker at deploy time
 ICAL_WORKER_TEMPLATE = """
 addEventListener('fetch', event => {{
-  event.respondWith(handleRequest(event.request))
+  event.respondWith(handleRequest(event))
 }})
 
 const ICAL_URL = "{ical_url}";
 const CACHE_KEY = "ical_cache_{property_id}";
 const CACHE_TTL = 1800; // 30 minutes
 
-async function handleRequest(request) {{
+async function handleRequest(event) {{
+  const request = event.request;
   const cache = caches.default;
   const cacheUrl = new URL(request.url);
   const cachedResponse = await cache.match(cacheUrl);
