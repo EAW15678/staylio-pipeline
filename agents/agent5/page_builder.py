@@ -239,6 +239,7 @@ def build_landing_page_html(
       <p class="calendar-subtext">Real-time availability based on the booking system</p>
       <div id="calendar-widget" data-cache-url="{_esc(calendar_cache_endpoint or '')}">
         <div class="cal-nav">
+          <button id="cal-prev-btn" class="cal-nav-btn" type="button" disabled>&#8592; Prev</button>
           <button id="cal-next-btn" class="cal-nav-btn" type="button">Next &#8594;</button>
         </div>
         <div id="cal-month-grid" class="cal-month-grid"></div>
@@ -813,17 +814,30 @@ def _calendar_widget_js() -> str:
                        'July','August','September','October','November','December'];
   const MAX_ADVANCE = 12; // months forward from today
 
-  const today     = new Date();
+  const today       = new Date();
   const originYear  = today.getFullYear();
   const originMonth = today.getMonth(); // 0-indexed, never goes backward
+
+  // Today as a comparable "YYYY-MM-DD" string (local date, no UTC drift)
+  const todayYMD = originYear + '-'
+    + String(originMonth + 1).padStart(2, '0') + '-'
+    + String(today.getDate()).padStart(2, '0');
 
   // offset = how many months past today's month the LEFT panel shows (0 = current)
   let offset = 0;
 
+  // Stored as raw "YYYY-MM-DD" strings — avoids UTC vs local-midnight drift
   let blockedRanges = [];
 
-  function isBlocked(date) {
-    return blockedRanges.some(r => date >= r.start && date < r.end);
+  function dayYMD(year, month, day) {
+    return year + '-'
+      + String(month + 1).padStart(2, '0') + '-'
+      + String(day).padStart(2, '0');
+  }
+
+  // String comparison is safe for ISO dates: "2026-05-02" >= "2026-05-02" etc.
+  function isBlocked(ymd) {
+    return blockedRanges.some(r => ymd >= r.start && ymd < r.end);
   }
 
   function buildMonthHTML(year, month) {
@@ -836,11 +850,11 @@ def _calendar_widget_js() -> str:
               .map(d => `<div class="cal-header">${d}</div>`).join('');
     for (let i = 0; i < firstDay; i++) html += '<div class="cal-day empty"></div>';
     for (let day = 1; day <= daysInMonth; day++) {
-      const date = new Date(year, month, day);
-      const past = date < today;
+      const ymd = dayYMD(year, month, day);
+      const past = ymd < todayYMD;
       const cls  = past ? 'cal-day past'
-                        : isBlocked(date) ? 'cal-day blocked'
-                                          : 'cal-day available';
+                        : isBlocked(ymd) ? 'cal-day blocked'
+                                         : 'cal-day available';
       html += `<div class="${cls}">${day}</div>`;
     }
     html += '</div></div>';
@@ -848,14 +862,21 @@ def _calendar_widget_js() -> str:
   }
 
   function render() {
-    // Left panel month
     const leftDate  = new Date(originYear, originMonth + offset, 1);
     const rightDate = new Date(originYear, originMonth + offset + 1, 1);
 
+    const atStart = offset === 0;
     const atLimit = (offset + 1) >= MAX_ADVANCE;
+
+    const prevBtn = document.getElementById('cal-prev-btn');
+    if (prevBtn) {
+      prevBtn.disabled       = atStart;
+      prevBtn.style.opacity  = atStart ? '0.35' : '1';
+      prevBtn.style.cursor   = atStart ? 'not-allowed' : 'pointer';
+    }
     const nextBtn = document.getElementById('cal-next-btn');
     if (nextBtn) {
-      nextBtn.disabled = atLimit;
+      nextBtn.disabled       = atLimit;
       nextBtn.style.opacity  = atLimit ? '0.35' : '1';
       nextBtn.style.cursor   = atLimit ? 'not-allowed' : 'pointer';
     }
@@ -870,12 +891,19 @@ def _calendar_widget_js() -> str:
   fetch(cacheUrl)
     .then(r => r.json())
     .then(data => {
+      // Keep as strings — no Date construction, no UTC/local-midnight drift
       blockedRanges = (data.blocked_dates || []).map(b => ({
-        start: new Date(b.start),
-        end:   new Date(b.end),
+        start: b.start,
+        end:   b.end,
       }));
 
       // Wire navigation ONCE after data loads
+      const prevBtn = document.getElementById('cal-prev-btn');
+      if (prevBtn) {
+        prevBtn.addEventListener('click', function() {
+          if (offset > 0) { offset -= 1; render(); }
+        });
+      }
       const nextBtn = document.getElementById('cal-next-btn');
       if (nextBtn) {
         nextBtn.addEventListener('click', function() {
@@ -1049,7 +1077,7 @@ def _page_css() -> str:
     .calendar-helper { font-size: .85rem; color: var(--color-muted); margin-top: .75rem; }
     #calendar-widget { margin: 1.5rem auto; max-width: 100%; }
     /* Navigation */
-    .cal-nav { display: flex; justify-content: flex-end; margin-bottom: .75rem; }
+    .cal-nav { display: flex; justify-content: space-between; margin-bottom: .75rem; }
     .cal-nav-btn { background: transparent; border: 1px solid #ccc; border-radius: 4px;
                    padding: .35rem .85rem; font-size: .9rem; cursor: pointer;
                    color: var(--color-text, #222); }
