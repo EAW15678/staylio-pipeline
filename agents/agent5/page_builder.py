@@ -103,6 +103,10 @@ _DEPRIORITIZED_LABELS: frozenset = frozenset({
     "storage room",
 })
 
+# Weight applied to max similarity when computing diversity-adjusted score.
+# adjusted_score = raw_score - max_similarity_to_selected * SIMILARITY_PENALTY_WEIGHT
+SIMILARITY_PENALTY_WEIGHT = 0.3
+
 
 def build_landing_page_html(
     kb: dict,
@@ -608,6 +612,78 @@ def _jaccard(a, b):
     return len(a & b) / len(a | b)
 
 
+def _filename_seq_num(url):
+    """
+    Extract the sequential upload number from an R2 photo filename.
+    Filename pattern: photo_NNN_<hash>.jpg  → returns NNN as int.
+    Returns None when the pattern is not found.
+    """
+    import os
+    import re
+    try:
+        stem = os.path.splitext(os.path.basename(url))[0]
+        m = re.match(r"^photo_(\d+)", stem)
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _caption_word_overlap(labels_a, labels_b):
+    """
+    Word-level Jaccard similarity between two label lists.
+    Splits each label string into individual words (>2 chars) to catch
+    partial matches that label-level Jaccard misses
+    (e.g. "swimming pool" vs "pool deck" share the word "pool").
+
+    Returns 0.0 when either tokenised set is empty.
+    """
+    def _tokenize(labels):
+        words = set()
+        for label in labels:
+            for word in label.lower().split():
+                if len(word) > 2:
+                    words.add(word)
+        return words
+
+    ta = _tokenize(labels_a)
+    tb = _tokenize(labels_b)
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _combined_similarity(label_set_a, label_set_b, asset_a, asset_b):
+    """
+    Multi-signal similarity score between two assets (0.0–1.0).
+
+    Weights:
+      0.60  Vision label Jaccard (frozenset)
+      0.25  Word-level caption overlap (catches partial label matches)
+      0.15  Filename sequential proximity (same source, ≤3 photos apart)
+
+    Filename proximity is only applied when both images came from the same
+    source (same scrape batch → likely same burst of shots on the property).
+    """
+    label_sim = _jaccard(label_set_a, label_set_b)
+    word_sim = _caption_word_overlap(
+        asset_a.get("labels_enhanced") or asset_a.get("labels_original") or [],
+        asset_b.get("labels_enhanced") or asset_b.get("labels_original") or [],
+    )
+    fname_sim = 0.0
+    src_a = (asset_a.get("source") or "").lower()
+    src_b = (asset_b.get("source") or "").lower()
+    if src_a and src_a == src_b:
+        url_a = asset_a.get("url") or asset_a.get("asset_url_enhanced") or ""
+        url_b = asset_b.get("url") or asset_b.get("asset_url_enhanced") or ""
+        n_a = _filename_seq_num(url_a)
+        n_b = _filename_seq_num(url_b)
+        if n_a is not None and n_b is not None and abs(n_a - n_b) <= 3:
+            fname_sim = 1.0
+    return min(1.0, label_sim * 0.60 + word_sim * 0.25 + fname_sim * 0.15)
+
+
 def _asset_score(asset):
     """
     Quality score for a single asset dict (higher = better).
@@ -643,70 +719,115 @@ def _asset_score(asset):
 
 def _suppress_near_dupes(assets):
     """
-    Within a single subject_category, cluster images by Vision label Jaccard
-    similarity and keep at most MAX_PER_DUPE_CLUSTER images per cluster.
+    Within a single subject_category, cluster images by multi-signal similarity
+    and select diverse representatives from each cluster.
 
-    Algorithm (greedy, O(n²) within category — acceptable for n ≤ ~50):
-      1. Sort assets by _asset_score descending so the best image "founds" each cluster.
-      2. For each candidate, compute Jaccard against every already-kept asset's label set.
-      3. If Jaccard ≥ NEAR_DUPE_LABEL_THRESHOLD with any kept asset, the candidate
-         belongs to that kept asset's cluster.
-      4. If the cluster is full (count ≥ per-category cap), skip the candidate.
-      5. Otherwise accept and record cluster membership.
+    Two-phase algorithm (O(n²) within category — acceptable for n ≤ ~50):
+
+    Phase 1 — Cluster assignment (greedy):
+      Sort by _asset_score descending so the best image founds each cluster.
+      For each candidate compute _combined_similarity against every cluster
+      founder. If similarity ≥ NEAR_DUPE_LABEL_THRESHOLD, assign to that
+      cluster; otherwise start a new one.
+
+    Phase 2 — Diversity-aware selection within each cluster:
+      For each cluster, iteratively pick the image with the highest
+      adjusted_score = raw_score - max_similarity_to_already_selected * SIMILARITY_PENALTY_WEIGHT
+      until the per-cluster cap is reached.
 
     Per-category cap:
       _STRICT_DUPE_CATEGORIES (bathroom/bedrooms): 1 per cluster
       all others: MAX_PER_DUPE_CLUSTER (default 2)
 
-    Returns (kept_assets, n_dupes_removed).
+    Returns (kept_assets, n_dupes_removed, n_clusters).
     Images with no labels are never clustered together
-    (empty label sets always return Jaccard = 0.0).
+    (empty label sets always return similarity = 0.0).
     """
     if not assets:
-        return assets, 0
+        return assets, 0, 0
 
     category = (assets[0].get("subject_category") or "uncategorised").lower()
     max_per_cluster = 1 if category in _STRICT_DUPE_CATEGORIES else MAX_PER_DUPE_CLUSTER
 
+    # ── Phase 1: cluster assignment ──────────────────────────────────────
     sorted_assets = sorted(assets, key=_asset_score, reverse=True)
 
-    kept = []
-    kept_label_sets = []   # parallel list: frozenset of labels for each kept asset
-    cluster_ids = []       # parallel list: which cluster each kept asset belongs to
-    cluster_counts = {}    # cluster_id -> count of assets accepted into it
-    next_cluster_id = [0]  # mutable int via list (avoids nonlocal in Py3.9)
-    n_dupes = 0
+    # Each entry: list of asset dicts
+    clusters = []            # clusters[cluster_id] = [asset, ...]
+    founder_label_sets = []  # frozenset of labels for each cluster founder
+    founder_assets = []      # first asset in each cluster (for _combined_similarity)
 
     for asset in sorted_assets:
         raw_labels = asset.get("labels_enhanced") or asset.get("labels_original") or []
         label_set = frozenset(lbl.lower() for lbl in raw_labels)
 
-        # Find the best-matching already-kept asset (highest Jaccard ≥ threshold)
         matched_cluster = None
         best_sim = 0.0
-        for i, kept_set in enumerate(kept_label_sets):
-            sim = _jaccard(label_set, kept_set)
+        for i, founder_set in enumerate(founder_label_sets):
+            sim = _combined_similarity(label_set, founder_set, asset, founder_assets[i])
             if sim >= NEAR_DUPE_LABEL_THRESHOLD and sim > best_sim:
                 best_sim = sim
-                matched_cluster = cluster_ids[i]
+                matched_cluster = i
 
         if matched_cluster is not None:
-            # Near-duplicate of an existing cluster
-            if cluster_counts[matched_cluster] >= max_per_cluster:
-                n_dupes += 1
-                continue  # cluster full — skip this image
-            cluster_counts[matched_cluster] += 1
+            clusters[matched_cluster].append(asset)
         else:
-            # Start a new cluster
-            matched_cluster = next_cluster_id[0]
-            next_cluster_id[0] += 1
-            cluster_counts[matched_cluster] = 1
+            matched_cluster = len(clusters)
+            clusters.append([asset])
+            founder_label_sets.append(label_set)
+            founder_assets.append(asset)
 
-        kept.append(asset)
-        kept_label_sets.append(label_set)
-        cluster_ids.append(matched_cluster)
+    # ── Phase 2: diversity-aware selection within each cluster ───────────
+    kept = []
+    n_dupes = 0
 
-    return kept, n_dupes
+    for cluster in clusters:
+        if len(cluster) == 1:
+            kept.extend(cluster)
+            continue
+
+        # Precompute label sets and raw scores for every asset in the cluster
+        label_sets = []
+        raw_scores = []
+        for a in cluster:
+            raw_lbl = a.get("labels_enhanced") or a.get("labels_original") or []
+            label_sets.append(frozenset(lbl.lower() for lbl in raw_lbl))
+            raw_scores.append(_asset_score(a))
+
+        selected_indices = []
+        remaining = list(range(len(cluster)))
+
+        for _ in range(max_per_cluster):
+            if not remaining:
+                break
+            best_idx = None
+            best_adj = -1.0
+            for ri in remaining:
+                if not selected_indices:
+                    adj = raw_scores[ri]
+                else:
+                    # Penalty = max similarity to any already-selected asset
+                    max_sim = max(
+                        _combined_similarity(
+                            label_sets[ri], label_sets[si], cluster[ri], cluster[si]
+                        )
+                        for si in selected_indices
+                    )
+                    adj = raw_scores[ri] - max_sim * SIMILARITY_PENALTY_WEIGHT
+                if adj > best_adj:
+                    best_adj = adj
+                    best_idx = ri
+            selected_indices.append(best_idx)
+            remaining.remove(best_idx)
+
+        for i, a in enumerate(cluster):
+            if i in selected_indices:
+                kept.append(a)
+            else:
+                n_dupes += 1
+
+    n_clusters = len(clusters)
+    return kept, n_dupes, n_clusters
 
 
 def _prepare_gallery_items(
@@ -784,6 +905,7 @@ def _prepare_gallery_items(
 
     total_candidates = len(raw_assets)
     total_dupes_removed = 0
+    total_clusters = 0
 
     # ── Near-duplicate suppression (Agent 3 path only) ──────────────────
     if media_assets:
@@ -795,10 +917,13 @@ def _prepare_gallery_items(
             by_cat[cat].append(a)
 
         suppressed = []
-        for cat_assets in by_cat.values():
-            kept, n_dupes = _suppress_near_dupes(cat_assets)
+        cat_cluster_info = {}  # cat -> (n_clusters, n_dupes) for logging
+        for cat, cat_assets in by_cat.items():
+            kept, n_dupes, n_cl = _suppress_near_dupes(cat_assets)
             suppressed.extend(kept)
             total_dupes_removed += n_dupes
+            total_clusters += n_cl
+            cat_cluster_info[cat] = (n_cl, n_dupes)
         raw_assets = suppressed
 
     # ── Sort: (category_priority_index, rank) ───────────────────────────
@@ -841,15 +966,27 @@ def _prepare_gallery_items(
     cat_summary = ", ".join((c + "=" + str(n)) for c, n in sorted_cats)
     logger.info(
         "[Agent 5] Gallery selection (%s): candidates=%d, "
-        "near-dupes suppressed=%d, after-dedup=%d, final=%d. "
+        "near-dupes suppressed=%d, clusters=%d, after-dedup=%d, final=%d. "
         "Categories: %s",
         src_label,
         total_candidates,
         total_dupes_removed,
+        total_clusters,
         total_candidates - total_dupes_removed,
         len(selected),
         cat_summary,
     )
+    if media_assets and cat_cluster_info:
+        cluster_detail = ", ".join(
+            "{cat}({cl}cl/{dp}dp)".format(cat=cat, cl=cl, dp=dp)
+            for cat, (cl, dp) in sorted(
+                cat_cluster_info.items(),
+                key=lambda kv: _sort_key({"category": kv[0], "rank": 0}),
+            )
+            if dp > 0 or cl > 1
+        )
+        if cluster_detail:
+            logger.info("[Agent 5] Cluster detail: %s", cluster_detail)
 
     # Strip scoring/clustering fields — return only display fields
     return [

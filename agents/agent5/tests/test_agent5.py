@@ -45,12 +45,16 @@ from agents.agent5.page_builder import (
     build_landing_page_html,
     _prepare_gallery_items,
     _jaccard,
+    _filename_seq_num,
+    _caption_word_overlap,
+    _combined_similarity,
     _asset_score,
     _suppress_near_dupes,
     MAX_GALLERY_IMAGES,
     MAX_IMAGES_PER_GALLERY_CATEGORY,
     NEAR_DUPE_LABEL_THRESHOLD,
     MAX_PER_DUPE_CLUSTER,
+    SIMILARITY_PENALTY_WEIGHT,
     _STRICT_DUPE_CATEGORIES,
     _DEPRIORITIZED_LABELS,
     _GALLERY_CATEGORY_ORDER,
@@ -750,7 +754,7 @@ class TestSuppressNearDupes:
             _make_rich_asset("standard_bedroom", 2, ["bed", "pillow", "bedroom", "lamp"]),
         ]
         # Jaccard("bed","pillow","bedroom","nightstand" vs "bed","pillow","bedroom","lamp") = 3/5 = 0.6
-        kept, n_dupes = _suppress_near_dupes(assets)
+        kept, n_dupes, _ = _suppress_near_dupes(assets)
         # strict category: max 1 per cluster → 1 removed
         assert n_dupes == 1
         assert len(kept) == 1
@@ -761,7 +765,7 @@ class TestSuppressNearDupes:
             _make_rich_asset("pool_hot_tub", 3, ["pool", "water", "hot tub", "tile"], comp=0.3),
             _make_rich_asset("pool_hot_tub", 1, ["pool", "water", "hot tub", "deck"], comp=0.8),
         ]
-        kept, _ = _suppress_near_dupes(assets)
+        kept, _, _ = _suppress_near_dupes(assets)
         # rank-1/high-comp should survive
         kept_ranks = [a["category_rank"] for a in kept]
         assert 1 in kept_ranks
@@ -772,7 +776,7 @@ class TestSuppressNearDupes:
             _make_rich_asset("pool_hot_tub", i+1, ["pool", "water", "hot tub", "tile", str(i)])
             for i in range(5)
         ]
-        kept, n_dupes = _suppress_near_dupes(assets)
+        kept, n_dupes, _ = _suppress_near_dupes(assets)
         assert len(kept) <= MAX_PER_DUPE_CLUSTER
 
     def test_bedroom_duplicates_reduced_to_one_per_cluster(self):
@@ -781,7 +785,7 @@ class TestSuppressNearDupes:
             _make_rich_asset("master_bedroom", i+1, ["bed", "pillow", "bedroom", "luxury"])
             for i in range(5)
         ]
-        kept, _ = _suppress_near_dupes(assets)
+        kept, _, _ = _suppress_near_dupes(assets)
         assert len(kept) == 1
 
     def test_bathroom_strict_cap_one_per_cluster(self):
@@ -789,7 +793,7 @@ class TestSuppressNearDupes:
             _make_rich_asset("bathroom", i+1, ["shower", "tile", "glass", "mirror"])
             for i in range(4)
         ]
-        kept, _ = _suppress_near_dupes(assets)
+        kept, _, _ = _suppress_near_dupes(assets)
         assert len(kept) == 1
 
     def test_distinct_scenes_not_deduplicated(self):
@@ -798,7 +802,7 @@ class TestSuppressNearDupes:
             _make_rich_asset("bathroom", 2, ["bathtub", "faucet", "soaking tub", "marble"]),
             _make_rich_asset("bathroom", 3, ["sink", "vanity", "mirror", "countertop"]),
         ]
-        kept, n_dupes = _suppress_near_dupes(assets)
+        kept, n_dupes, _ = _suppress_near_dupes(assets)
         assert len(kept) == 3
         assert n_dupes == 0
 
@@ -808,14 +812,57 @@ class TestSuppressNearDupes:
             _make_rich_asset("exterior", 2, []),
             _make_rich_asset("exterior", 3, []),
         ]
-        kept, n_dupes = _suppress_near_dupes(assets)
+        kept, n_dupes, _ = _suppress_near_dupes(assets)
         assert len(kept) == 3
         assert n_dupes == 0
 
     def test_empty_input_returns_empty(self):
-        kept, n = _suppress_near_dupes([])
+        kept, n, nc = _suppress_near_dupes([])
         assert kept == []
         assert n == 0
+        assert nc == 0
+
+    def test_returns_three_tuple(self):
+        assets = [_make_rich_asset("exterior", 1, ["house", "facade"])]
+        result = _suppress_near_dupes(assets)
+        assert len(result) == 3
+
+    def test_n_clusters_counted(self):
+        # 3 distinct scenes → 3 clusters
+        assets = [
+            _make_rich_asset("pool_hot_tub", 1, ["pool", "water", "deck"]),
+            _make_rich_asset("pool_hot_tub", 2, ["hot tub", "spa", "jets"]),
+            _make_rich_asset("pool_hot_tub", 3, ["fountain", "garden", "stone"]),
+        ]
+        kept, _, n_clusters = _suppress_near_dupes(assets)
+        assert n_clusters == 3
+        assert len(kept) == 3
+
+    def test_similarity_penalty_favors_diverse_selection(self):
+        # Demonstrate that the similarity penalty causes a near-clone of A to be
+        # dropped in favour of a more diverse image, even when the clone has a
+        # slightly higher raw score.
+        #
+        # Setup (all 3 land in the same cluster — verified by hand below):
+        #   A: rank=1, labels=["pool","water","deck"]  raw≈0.89
+        #   B: rank=2, labels=["pool","water","deck"]  raw≈0.64  ← identical to A
+        #   C: rank=3, labels=["pool","water","deck","sunset","sky"]  raw≈0.56  ← diverse
+        #
+        # combined_sim(B, A) ≈ 0.85  →  adj_B = 0.64 - 0.85*0.3 = 0.385
+        # combined_sim(C, A) ≈ 0.51  →  adj_C = 0.56 - 0.51*0.3 = 0.407
+        #
+        # adj_C > adj_B → C is selected instead of B, proving the penalty works.
+        assets = [
+            _make_rich_asset("pool_hot_tub", 1, ["pool", "water", "deck"], comp=0.8),
+            _make_rich_asset("pool_hot_tub", 2, ["pool", "water", "deck"], comp=0.8),  # clone of A
+            _make_rich_asset("pool_hot_tub", 3, ["pool", "water", "deck", "sunset", "sky"], comp=0.8),  # diverse
+        ]
+        kept, _, _ = _suppress_near_dupes(assets)
+        assert len(kept) == 2
+        kept_ranks = {a["category_rank"] for a in kept}
+        assert 1 in kept_ranks   # best quality always kept
+        assert 2 not in kept_ranks  # near-clone of A was penalised and dropped
+        assert 3 in kept_ranks   # diverse pick kept over near-copy
 
 
 class TestNearDupeGallery:
@@ -897,3 +944,123 @@ class TestNearDupeGallery:
         assert "master_bedroom" in _STRICT_DUPE_CATEGORIES
         assert "standard_bedroom" in _STRICT_DUPE_CATEGORIES
         assert "laundry" in _DEPRIORITIZED_LABELS
+
+    def test_diverse_pool_shots_retained(self):
+        # 5 pool shots, but 3 are visually distinct — all 3 should survive
+        assets = []
+        # Shot A: pool deck angle (high comp)
+        assets.append(_make_rich_asset("pool_hot_tub", 1, ["pool", "water", "deck", "lounge"], comp=0.9))
+        # Shot B: near-duplicate of A
+        assets.append(_make_rich_asset("pool_hot_tub", 2, ["pool", "water", "deck", "umbrella"], comp=0.85))
+        # Shot C: night shot of pool — distinct
+        assets.append(_make_rich_asset("pool_hot_tub", 3, ["pool", "night", "lighting", "reflection"], comp=0.8))
+        # Shot D: close-up of hot tub — distinct
+        assets.append(_make_rich_asset("pool_hot_tub", 4, ["hot tub", "spa", "jets", "bubbly"], comp=0.75))
+        items = _prepare_gallery_items(
+            [self._to_media_asset(a) for a in assets], "", [], "Prop"
+        )
+        pool_count = sum(1 for i in items if i["category"] == "pool_hot_tub")
+        # A+B cluster → 2 kept (max_per_cluster=2); C and D are distinct → 1 each
+        # Total: up to 4, min distinct clusters = 3 images
+        assert pool_count >= 3
+
+
+class TestFilenameSeqNum:
+    def test_standard_r2_url(self):
+        url = "https://r2.staylio.ai/prop-001/photo_042_abc123.jpg"
+        assert _filename_seq_num(url) == 42
+
+    def test_leading_zeros(self):
+        url = "https://r2.staylio.ai/prop/photo_007_def.jpg"
+        assert _filename_seq_num(url) == 7
+
+    def test_no_photo_prefix(self):
+        url = "https://r2.staylio.ai/prop/hero_image.jpg"
+        assert _filename_seq_num(url) is None
+
+    def test_empty_url(self):
+        assert _filename_seq_num("") is None
+
+    def test_url_without_extension(self):
+        url = "https://r2.staylio.ai/prop/photo_010_hash"
+        assert _filename_seq_num(url) == 10
+
+
+class TestCaptionWordOverlap:
+    def test_identical_labels_return_one(self):
+        labels = ["swimming pool", "deck chairs", "water feature"]
+        assert _caption_word_overlap(labels, labels) == 1.0
+
+    def test_empty_labels_return_zero(self):
+        assert _caption_word_overlap([], ["pool", "water"]) == 0.0
+        assert _caption_word_overlap(["pool"], []) == 0.0
+
+    def test_partial_word_overlap(self):
+        # "swimming pool" vs "pool deck" → shared word: "pool"
+        a = ["swimming pool"]
+        b = ["pool deck"]
+        sim = _caption_word_overlap(a, b)
+        assert sim > 0.0
+
+    def test_no_overlap(self):
+        a = ["bedroom", "pillow", "nightstand"]
+        b = ["kitchen", "countertop", "stove"]
+        assert _caption_word_overlap(a, b) == 0.0
+
+    def test_short_words_ignored(self):
+        # Words ≤2 chars ("a", "of", "to") should not contribute
+        a = ["a pool"]
+        b = ["a spa"]
+        sim = _caption_word_overlap(a, b)
+        # Only "pool" and "spa" qualify (>2 chars) — no overlap
+        assert sim == 0.0
+
+
+class TestCombinedSimilarity:
+    def test_identical_labels_same_source_adjacent_files_max(self):
+        # Identical labels + same source + adjacent filenames → very high similarity
+        a = _make_rich_asset("pool_hot_tub", 1, ["pool", "water", "deck"], source="vrbo_scraped")
+        b = _make_rich_asset("pool_hot_tub", 2, ["pool", "water", "deck"], source="vrbo_scraped")
+        a["url"] = "https://r2.staylio.ai/prop/photo_010_abc.jpg"
+        b["url"] = "https://r2.staylio.ai/prop/photo_012_def.jpg"
+        ls_a = frozenset(lbl.lower() for lbl in a["labels_enhanced"])
+        ls_b = frozenset(lbl.lower() for lbl in b["labels_enhanced"])
+        sim = _combined_similarity(ls_a, ls_b, a, b)
+        assert sim > 0.9
+
+    def test_different_labels_different_source_far_files_low(self):
+        a = _make_rich_asset("exterior", 1, ["house", "facade", "driveway"], source="airbnb_scraped")
+        b = _make_rich_asset("exterior", 2, ["ocean", "horizon", "sunset"], source="vrbo_scraped")
+        a["url"] = "https://r2.staylio.ai/prop/photo_001_abc.jpg"
+        b["url"] = "https://r2.staylio.ai/prop/photo_099_def.jpg"
+        ls_a = frozenset(lbl.lower() for lbl in a["labels_enhanced"])
+        ls_b = frozenset(lbl.lower() for lbl in b["labels_enhanced"])
+        sim = _combined_similarity(ls_a, ls_b, a, b)
+        assert sim < 0.3
+
+    def test_filename_proximity_only_applies_same_source(self):
+        a = _make_rich_asset("exterior", 1, ["house"], source="vrbo_scraped")
+        b = _make_rich_asset("exterior", 2, ["house"], source="airbnb_scraped")
+        a["url"] = "https://r2.staylio.ai/prop/photo_010_abc.jpg"
+        b["url"] = "https://r2.staylio.ai/prop/photo_011_def.jpg"
+        ls_a = frozenset(["house"])
+        ls_b = frozenset(["house"])
+        sim = _combined_similarity(ls_a, ls_b, a, b)
+        # filename proximity not applied (different source) → only label + word similarity
+        sim_no_fname = 1.0 * 0.60 + 1.0 * 0.25  # = 0.85 (identical labels/words, no fname bonus)
+        assert abs(sim - sim_no_fname) < 0.01
+
+    def test_result_capped_at_one(self):
+        a = _make_rich_asset("exterior", 1, ["house", "facade"], source="vrbo_scraped")
+        b = _make_rich_asset("exterior", 2, ["house", "facade"], source="vrbo_scraped")
+        a["url"] = "https://r2.staylio.ai/prop/photo_001_abc.jpg"
+        b["url"] = "https://r2.staylio.ai/prop/photo_002_def.jpg"
+        ls_a = frozenset(["house", "facade"])
+        ls_b = frozenset(["house", "facade"])
+        sim = _combined_similarity(ls_a, ls_b, a, b)
+        assert sim <= 1.0
+
+
+class TestSimilarityPenaltyConstant:
+    def test_constant_value(self):
+        assert SIMILARITY_PENALTY_WEIGHT == 0.3
