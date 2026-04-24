@@ -230,17 +230,38 @@ def build_landing_page_html(
     guest_book_reviews = [r for r in all_reviews if r.get("is_guest_book")]
     ota_reviews        = [r for r in all_reviews if not r.get("is_guest_book")]
 
-    # Photos — sorted by category priority + quality rank using Agent 3 metadata
-    media_assets = visual_media.get("media_assets", [])
-    gallery_items = _prepare_gallery_items(
-        media_assets=media_assets,
-        hero_photo=hero_photo,
-        kb_photos=kb.get("photos") or [],
-        property_name=name,
+    # Photos — gallery items and category modules
+    media_assets   = visual_media.get("media_assets", [])
+    image_curation = visual_media.get("image_curation")
+    _curation_active = (
+        image_curation is not None
+        and image_curation.get("status") == "complete"
+        and bool(image_curation.get("images"))
     )
 
-    # Category modules — curated 1-hero + 2-supporting per section (Agent 3 path only)
-    category_modules = _build_category_modules(gallery_items) if media_assets else {}
+    if _curation_active:
+        # LLM curation is source of truth — Agent 5 is a render engine only
+        logger.info("[Agent 5] Using LLM vision curation for gallery and photo tour")
+        gallery_items    = _gallery_items_from_curation(image_curation, media_assets, hero_photo, name)
+        category_modules = _modules_from_curation(image_curation, gallery_items, media_assets)
+        # Use LLM-selected hero if page hero_photo not already set by Agent 3
+        if not hero_photo:
+            llm_hero_id = (image_curation.get("property") or {}).get("page_hero") or ""
+            if llm_hero_id:
+                for a in media_assets:
+                    if a.get("asset_url_original") == llm_hero_id:
+                        hero_photo = a.get("asset_url_enhanced") or a.get("asset_url_original") or ""
+                        break
+    else:
+        # Fallback: heuristic GCV-based path (original behavior)
+        logger.info("[Agent 5] No LLM curation — using GCV heuristic gallery selection")
+        gallery_items    = _prepare_gallery_items(
+            media_assets=media_assets,
+            hero_photo=hero_photo,
+            kb_photos=kb.get("photos") or [],
+            property_name=name,
+        )
+        category_modules = _build_category_modules(gallery_items) if media_assets else {}
 
     # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
     hero_video_url = _get_hero_video_url(kb.get("property_id", ""))
@@ -937,6 +958,202 @@ def _suppress_near_dupes(assets):
 
     n_clusters = len(clusters)
     return kept, n_dupes, n_clusters
+
+
+# ── LLM curation-aware gallery builders ──────────────────────────────────────
+# These replace _prepare_gallery_items / _build_category_modules when Agent 3
+# has run LLM vision curation and embedded results in the visual_media payload.
+# Downstream rendering functions (_build_gallery_section, _build_category_modules_section)
+# consume the same dict shape and require no changes.
+
+def _gallery_items_from_curation(
+    curation: dict,
+    media_assets: list,
+    hero_photo: str,
+    property_name: str,
+) -> list:
+    """
+    Build the gallery_items list from LLM curation results.
+
+    Uses llm_category (not GCV subject_category) and rank_within_category.
+    Excludes images with role='exclude' and the current hero photo.
+    Falls back gracefully if asset_id can't be matched in media_assets.
+
+    Returns same dict shape as _prepare_gallery_items (url, alt, category, rank,
+    labels_enhanced, composition_score, has_enhanced, source, subject_category).
+    """
+    # Build lookup: asset_url_original → asset dict
+    original_lookup: dict = {
+        a.get("asset_url_original"): a
+        for a in media_assets
+        if a.get("asset_url_original")
+    }
+    # Also build enhanced → asset dict (for hero comparison)
+    enhanced_lookup: dict = {
+        a.get("asset_url_enhanced"): a
+        for a in media_assets
+        if a.get("asset_url_enhanced")
+    }
+
+    items: list[dict] = []
+    per_image = curation.get("images") or []
+
+    for result in per_image:
+        role = result.get("role") or "gallery_only"
+        if role == "exclude":
+            continue
+
+        asset_id = result.get("asset_id") or ""
+        asset = original_lookup.get(asset_id)
+        if not asset:
+            continue
+
+        display_url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
+        if not display_url or display_url == hero_photo:
+            continue
+
+        alt = result.get("alt") or ""
+        if not alt:
+            labels = asset.get("labels_enhanced") or []
+            alt = f"{property_name} \u2013 " + ", ".join(labels[:3]) if labels else f"{property_name} photo"
+
+        category = result.get("llm_category") or "uncategorised"
+        rank = result.get("rank_within_category") or 999
+
+        items.append({
+            "url":               display_url,
+            "alt":               alt,
+            "category":          category,
+            "rank":              rank,
+            # Preserved for rendering helpers
+            "labels_enhanced":   asset.get("labels_enhanced") or [],
+            "composition_score": asset.get("composition_score") or 0.0,
+            "has_enhanced":      bool(asset.get("asset_url_enhanced")),
+            "source":            asset.get("source") or "unknown",
+            "subject_category":  category,
+            # Curation extras (available to callers that need them)
+            "role":              role,
+            "duplicate_group":   result.get("duplicate_group"),
+            "is_primary":        result.get("is_primary_in_group", True),
+        })
+
+    # Sort: (category_priority_index, rank)
+    def _sort_key_curation(item: dict) -> tuple:
+        try:
+            pri = _GALLERY_CATEGORY_ORDER.index(item["category"])
+        except ValueError:
+            pri = len(_GALLERY_CATEGORY_ORDER)
+        return (pri, item["rank"])
+
+    items.sort(key=_sort_key_curation)
+
+    # Cap at MAX_GALLERY_IMAGES
+    items = items[:MAX_GALLERY_IMAGES]
+
+    logger.info(
+        "[Agent 5] Gallery from LLM curation: %d images (excluded %d), %d categories",
+        len(items),
+        sum(1 for r in per_image if r.get("role") == "exclude"),
+        len({i["category"] for i in items}),
+    )
+    return items
+
+
+def _modules_from_curation(
+    curation: dict,
+    gallery_items: list,
+    media_assets: list,
+) -> dict:
+    """
+    Build category_modules from LLM curation's photo_tour_sections.
+
+    Uses the same output format as _build_category_modules:
+        {section_label: {hero: item, supporting: [items], all: [items]}}
+
+    gallery_items is the already-built list from _gallery_items_from_curation,
+    used to populate the 'all' list for each section.
+    """
+    original_lookup: dict = {
+        a.get("asset_url_original"): a
+        for a in media_assets
+        if a.get("asset_url_original")
+    }
+    # URL-to-gallery-item lookup for quick access
+    url_to_item: dict = {item["url"]: item for item in gallery_items}
+
+    property_recs = curation.get("property") or {}
+    sections_raw  = property_recs.get("photo_tour_sections") or []
+
+    def _curation_item_to_gallery(asset_id: str, fallback_cat: str = "uncategorised") -> Optional[dict]:
+        """Resolve an asset_id to a gallery item dict."""
+        asset = original_lookup.get(asset_id)
+        if not asset:
+            return None
+        display_url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
+        if not display_url:
+            return None
+        # If already in gallery_items (not excluded), use that version
+        existing = url_to_item.get(display_url)
+        if existing:
+            return existing
+        # Asset was not in gallery (may have been hero) — synthesise item
+        labels = asset.get("labels_enhanced") or []
+        return {
+            "url":               display_url,
+            "alt":               ", ".join(labels[:3]) if labels else "",
+            "category":          fallback_cat,
+            "rank":              1,
+            "labels_enhanced":   labels,
+            "composition_score": asset.get("composition_score") or 0.0,
+            "has_enhanced":      bool(asset.get("asset_url_enhanced")),
+            "source":            asset.get("source") or "unknown",
+            "subject_category":  fallback_cat,
+        }
+
+    # Build per-section 'all' list from gallery_items
+    by_section_label: dict[str, list] = {}
+    for item in gallery_items:
+        # Map category back to section label
+        cat = item.get("category") or "uncategorised"
+        for lbl, cats in _CATEGORY_MODULES:
+            if cat in cats:
+                by_section_label.setdefault(lbl, []).append(item)
+                break
+
+    result: dict = {}
+    for sec in sections_raw:
+        section_name = sec.get("section") or ""
+        if section_name not in {lbl for lbl, _ in _CATEGORY_MODULES}:
+            continue
+
+        hero_id = sec.get("hero") or ""
+
+        # Determine section category (for synthesised items)
+        section_cats = next((cats for lbl, cats in _CATEGORY_MODULES if lbl == section_name), frozenset())
+        fallback_cat = next(iter(section_cats), "uncategorised")
+
+        hero_item = _curation_item_to_gallery(hero_id, fallback_cat)
+        if not hero_item:
+            continue
+
+        supporting_items: list = []
+        for sid in (sec.get("supporting") or [])[:2]:
+            sitem = _curation_item_to_gallery(sid, fallback_cat)
+            if sitem and sitem["url"] != hero_item["url"]:
+                supporting_items.append(sitem)
+
+        result[section_name] = {
+            "hero":       hero_item,
+            "supporting": supporting_items,
+            "all":        by_section_label.get(section_name, []),
+        }
+
+    logger.info(
+        "[Agent 5] Photo tour from LLM curation: %d sections (%s)",
+        len(result),
+        ", ".join(result.keys()),
+    )
+    return result
 
 
 def _prepare_gallery_items(

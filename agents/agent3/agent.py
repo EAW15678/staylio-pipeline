@@ -46,6 +46,7 @@ from agents.agent3.r2_storage import (
     upload_photo_enhanced,
     upload_photo_original,
 )
+from agents.agent3.llm_curator import run_llm_vision_curation
 from agents.agent3.video_generator import generate_all_videos
 from agents.agent3.vision_tagger import (
     tag_and_score_photos,
@@ -254,6 +255,21 @@ def agent3_node(state: dict) -> dict:
                 f"subject labels changed after enhancement. Human review required."
             )
 
+    # ── Step 5b: LLM vision curation (one-time, idempotent) ──────────────
+    # Runs after GCV tagging so all assets have labels and R2 URLs.
+    # Returns None on failure — pipeline always continues.
+    logger.info(f"[Agent 3] Running LLM vision curation for {len(assets)} assets")
+    llm_curation = run_llm_vision_curation(
+        assets=assets,
+        enhanced_bytes_map=enhanced_bytes_map,
+        property_id=property_id,
+        kb=kb,
+    )
+    if llm_curation:
+        logger.info("[Agent 3] LLM curation complete — embedded in visual_media cache")
+    else:
+        logger.info("[Agent 3] LLM curation unavailable — Agent 5 uses GCV fallback path")
+
     # ── Step 6: Social format crops (TS-08) ───────────────────────────────
     logger.info(f"[Agent 3] Generating social crops for {len(category_winners)} category winners")
     social_crops = generate_social_crops(
@@ -306,6 +322,10 @@ def agent3_node(state: dict) -> dict:
 
     # ── Step 9: Cache in Redis for Agent 5 ───────────────────────────────
     pkg_dict = pkg.to_dict()
+    # Embed LLM curation results so Agent 5 can use them without a separate
+    # cache read. Falls back to GCV heuristics when image_curation is absent.
+    if llm_curation:
+        pkg_dict["image_curation"] = llm_curation
     cache_knowledge_base(f"{property_id}:visual_media", pkg_dict, ttl_seconds=86400)
 
     # ── Step 10: Pipeline status ──────────────────────────────────────────
