@@ -264,6 +264,7 @@ def agent3_node(state: dict) -> dict:
         enhanced_bytes_map=enhanced_bytes_map,
         property_id=property_id,
         kb=kb,
+        source_hero_url=hero_url,
     )
     if llm_curation:
         logger.info("[Agent 3] LLM curation complete — embedded in visual_media cache")

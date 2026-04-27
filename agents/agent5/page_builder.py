@@ -103,19 +103,8 @@ _CATEGORY_MODULES: list[tuple[str, frozenset]] = [
 # All others log a warning when no images are available.
 _OPTIONAL_MODULE_LABELS: frozenset = frozenset({"Amenities & Extras"})
 
-# Ordered section names used when LLM curation provides curated_section per image.
-# Determines gallery sort order and section header insertion when curation is active.
-_CURATION_SECTION_ORDER: list[str] = [
-    "Exterior",
-    "Pool",
-    "Living Areas",
-    "Kitchen",
-    "Primary Bedroom",
-    "Bedrooms",
-    "Primary Bathroom",
-    "Bathrooms",
-    "Extras",
-]
+# Ordered section names when LLM curation is active — single source of truth in llm_curator.
+from agents.agent3.llm_curator import CURATED_SECTION_NAMES as _CURATION_SECTION_ORDER  # noqa: E402
 
 # Per-module label preferences and penalties used by _module_quality_score.
 # Keys must match display labels in _CATEGORY_MODULES exactly.

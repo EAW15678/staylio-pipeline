@@ -48,21 +48,64 @@ _CELL_PAD           = 6         # px between cells
 _GRID_COLS          = 3
 _GRID_ROWS          = 4
 _IMAGES_PER_SHEET   = _GRID_COLS * _GRID_ROWS   # 12
-_MAX_IMAGES_TO_CURATE = 80      # hard cap — cost control
+_MAX_IMAGES_TO_CURATE = 120     # hard cap — cost control (raised from 80)
 _SHEETS_PER_CALL    = 6         # max contact-sheet images per API call (within token budget)
 _SUPABASE_TABLE     = "property_image_curations"
 _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 
-# Must match _CATEGORY_MODULES display labels in agent5/page_builder.py exactly
-_PHOTO_TOUR_SECTIONS = [
-    "Exterior & Views",
-    "Outdoor & Pool",
-    "Living Room",
-    "Kitchen",
-    "Bedrooms",
-    "Bathrooms",
-    "Amenities & Extras",
+# ── Canonical section taxonomy ─────────────────────────────────────────────────
+# Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
+# gcv_categories drives _derive_curated_section_fallback for uncapped/unanalysed images.
+CURATED_SECTIONS: list[dict] = [
+    {
+        "name":           "Exterior",
+        "description":    "Building exterior, facade, driveway, landscaping, entrance",
+        "gcv_categories": ["exterior", "view"],
+    },
+    {
+        "name":           "Pool",
+        "description":    "Pool, hot tub, spa, water features",
+        "gcv_categories": ["pool_hot_tub"],
+    },
+    {
+        "name":           "Living Areas",
+        "description":    "Living room, great room, lounge, sitting area, game room",
+        "gcv_categories": ["living_room", "game_entertainment"],
+    },
+    {
+        "name":           "Kitchen",
+        "description":    "Kitchen, island, dining area",
+        "gcv_categories": ["kitchen"],
+    },
+    {
+        "name":           "Primary Bedroom",
+        "description":    "Main suite or master bedroom only — not secondary bedrooms",
+        "gcv_categories": [],   # ambiguous with Bedrooms; fallback defaults to Bedrooms
+    },
+    {
+        "name":           "Bedrooms",
+        "description":    "Secondary bedrooms, bunk rooms, twin rooms, guest rooms",
+        "gcv_categories": ["master_bedroom", "standard_bedroom"],
+    },
+    {
+        "name":           "Primary Bathroom",
+        "description":    "Ensuite directly attached to the primary suite only",
+        "gcv_categories": [],   # ambiguous with Bathrooms; fallback defaults to Bathrooms
+    },
+    {
+        "name":           "Bathrooms",
+        "description":    "Other bathrooms, guest bathrooms, powder rooms",
+        "gcv_categories": ["bathroom"],
+    },
+    {
+        "name":           "Extras",
+        "description":    "Gym, office, laundry, garage, utility, outdoor entertaining",
+        "gcv_categories": ["outdoor_entertaining", "local_area", "uncategorised"],
+    },
 ]
+
+CURATED_SECTION_NAMES: list[str] = [s["name"] for s in CURATED_SECTIONS]
+_CURATED_SECTION_NAMES_SET: frozenset = frozenset(CURATED_SECTION_NAMES)
 
 _VALID_CATEGORIES = frozenset({
     "exterior", "view", "pool_hot_tub", "outdoor_entertaining",
@@ -82,6 +125,7 @@ def run_llm_vision_curation(
     enhanced_bytes_map: dict,
     property_id: str,
     kb: dict,
+    source_hero_url: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Run one-time LLM vision curation for a property's image set.
@@ -92,6 +136,9 @@ def run_llm_vision_curation(
                             bytes for freshly Claid-enhanced images.
         property_id:        Property UUID string.
         kb:                 Knowledge base dict (for vibe context in prompt).
+        source_hero_url:    GCV-selected hero URL. Treated as the default page
+                            hero — LLM should only override if clearly inferior.
+                            Matching contact sheet cell is labelled with "*".
 
     Returns:
         dict with keys 'images' and 'property' (the full curation result),
@@ -131,14 +178,27 @@ def run_llm_vision_curation(
         )
 
         # ── Build index: cell_label → asset_id (R2 original URL) ─────────
+        # The source hero cell is annotated with "*" so the LLM can see it.
+        # The index_map value remains the plain asset_url_original (no "*").
         index_map: dict[str, str] = {}   # "A01" → asset_url_original
+        index_map_display: dict[str, str] = {}  # "A01*" → asset_url_original (for prompt)
         asset_list: list = []            # ordered, parallel with index_map
+        source_hero_label: Optional[str] = None
+
         for i, asset in enumerate(candidate_assets):
             sheet_idx  = i // _IMAGES_PER_SHEET
             cell_idx   = i %  _IMAGES_PER_SHEET
             sheet_letter = _SHEET_LETTERS[sheet_idx % len(_SHEET_LETTERS)]
             label = f"{sheet_letter}{cell_idx + 1:02d}"
             index_map[label] = asset.asset_url_original
+            # Mark source hero with "*" in display map and contact sheet
+            display_label = label
+            if (source_hero_url and
+                    asset.asset_url_original == source_hero_url or
+                    (asset.asset_url_enhanced and asset.asset_url_enhanced == source_hero_url)):
+                display_label = f"{label}*"
+                source_hero_label = label
+            index_map_display[display_label] = asset.asset_url_original
             asset_list.append(asset)
 
         # ── Fetch image bytes for contact sheet building ──────────────────
@@ -156,6 +216,10 @@ def run_llm_vision_curation(
             return None
 
         # ── Build contact sheets ──────────────────────────────────────────
+        # Use display labels (with * for source hero) in the sheet cells.
+        # Build a reverse map: asset_url_original → display_label for cell lookup.
+        orig_to_display = {v: k for k, v in index_map_display.items()}
+
         n_sheets = math.ceil(len(asset_list) / _IMAGES_PER_SHEET)
         sheet_jpeg_list: list[bytes] = []  # one JPEG per sheet
         for sheet_idx in range(n_sheets):
@@ -163,19 +227,29 @@ def run_llm_vision_curation(
             sheet_assets = asset_list[start: start + _IMAGES_PER_SHEET]
             sheet_letter = _SHEET_LETTERS[sheet_idx % len(_SHEET_LETTERS)]
             cells: list[tuple[str, Optional[bytes]]] = []
-            for cell_idx, asset in enumerate(sheet_assets):
-                label = f"{sheet_letter}{cell_idx + 1:02d}"
+            for asset in sheet_assets:
+                display_label = orig_to_display.get(asset.asset_url_original,
+                                                    f"{sheet_letter}??")
                 img_bytes = bytes_by_original.get(asset.asset_url_original)
-                cells.append((label, img_bytes))
+                cells.append((display_label, img_bytes))
             sheet_jpeg = _build_contact_sheet(cells, sheet_letter)
             sheet_jpeg_list.append(sheet_jpeg)
+
+        if source_hero_label:
+            logger.info(
+                "[LLM Curator] Source hero annotated as %s* in contact sheets",
+                source_hero_label,
+            )
 
         # ── Call LLM ──────────────────────────────────────────────────────
         result = _run_curation_call(
             sheet_jpeg_list=sheet_jpeg_list,
             index_map=index_map,
+            index_map_display=index_map_display,
             kb=kb,
             property_id=property_id,
+            source_hero_url=source_hero_url,
+            source_hero_label=source_hero_label,
         )
 
         if result is None:
@@ -185,6 +259,10 @@ def run_llm_vision_curation(
             )
             _mark_failed(property_id, image_set_hash, len(candidate_assets))
             return None
+
+        # ── Post-process: fill missing curated_section + log summary ──────
+        result["images"] = _derive_curated_section_fallback(result["images"])
+        _log_curation_summary(result, source_hero_url)
 
         # ── Persist to Supabase ───────────────────────────────────────────
         _save_curation(
@@ -386,8 +464,11 @@ def _build_contact_sheet(
 def _run_curation_call(
     sheet_jpeg_list: list[bytes],
     index_map: dict[str, str],
+    index_map_display: dict[str, str],
     kb: dict,
     property_id: str,
+    source_hero_url: Optional[str] = None,
+    source_hero_label: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Send all contact sheets to Claude in one or two API calls.
@@ -402,22 +483,17 @@ def _run_curation_call(
 
     system_prompt = _build_system_prompt()
 
-    # Split sheets across calls if needed (≤ _SHEETS_PER_CALL per call)
-    # For 1–6 sheets: single call. For 7–12: two calls.
-    all_images_parsed: list[dict] = []
-    property_recs: dict = {}
-
     # If sheets fit in one call, do everything in one request.
     # If not, do per-image analysis in batches then a text-only synthesis pass.
     if len(sheet_jpeg_list) <= _SHEETS_PER_CALL:
-        result = _single_call(client, system_prompt, sheet_jpeg_list, index_map, kb)
+        result = _single_call(
+            client, system_prompt, sheet_jpeg_list, index_map, index_map_display,
+            kb, source_hero_url, source_hero_label,
+        )
         if result is None:
             return None
         return result
     else:
-        # Batch 1: first N sheets — per-image analysis only
-        # Batch 2: remaining sheets — per-image analysis only
-        # Synthesis: text-only pass combining all per-image results
         partial_results: list[dict] = []
         for batch_start in range(0, len(sheet_jpeg_list), _SHEETS_PER_CALL):
             batch = sheet_jpeg_list[batch_start: batch_start + _SHEETS_PER_CALL]
@@ -427,14 +503,24 @@ def _run_curation_call(
                     batch_start, min(batch_start + _SHEETS_PER_CALL, len(sheet_jpeg_list))
                 )
             }
-            partial = _batch_call(client, system_prompt, batch, batch_index, kb)
+            batch_index_display = {
+                k: v for k, v in index_map_display.items()
+                if ord(k[0]) - ord("A") in range(
+                    batch_start, min(batch_start + _SHEETS_PER_CALL, len(sheet_jpeg_list))
+                )
+            }
+            partial = _batch_call(
+                client, system_prompt, batch, batch_index, batch_index_display, kb,
+            )
             if partial:
                 partial_results.extend(partial)
 
         if not partial_results:
             return None
 
-        property_recs = _synthesis_call(client, partial_results, index_map, kb)
+        property_recs = _synthesis_call(
+            client, partial_results, index_map, kb, source_hero_url, source_hero_label,
+        )
         return {
             "images": partial_results,
             "property": property_recs or {},
@@ -446,7 +532,10 @@ def _single_call(
     system_prompt: str,
     sheet_jpeg_list: list[bytes],
     index_map: dict[str, str],
+    index_map_display: dict[str, str],
     kb: dict,
+    source_hero_url: Optional[str] = None,
+    source_hero_label: Optional[str] = None,
 ) -> Optional[dict]:
     """Single API call: all sheets + full JSON response including property-level."""
     content: list[dict] = []
@@ -463,7 +552,9 @@ def _single_call(
 
     content.append({
         "type": "text",
-        "text": _build_full_prompt(index_map, kb),
+        "text": _build_full_prompt(
+            index_map, index_map_display, kb, source_hero_url, source_hero_label,
+        ),
     })
 
     try:
@@ -473,6 +564,7 @@ def _single_call(
             system=system_prompt,
             messages=[{"role": "user", "content": content}],
         )
+        _log_token_usage(resp, "single")
         raw = resp.content[0].text
         return _parse_and_validate(raw, index_map)
     except Exception as exc:
@@ -485,6 +577,7 @@ def _batch_call(
     system_prompt: str,
     sheet_batch: list[bytes],
     batch_index: dict[str, str],
+    batch_index_display: dict[str, str],
     kb: dict,
 ) -> list[dict]:
     """Batch call: returns only per-image results (no property-level)."""
@@ -500,7 +593,7 @@ def _batch_call(
         })
     content.append({
         "type": "text",
-        "text": _build_per_image_only_prompt(batch_index, kb),
+        "text": _build_per_image_only_prompt(batch_index, batch_index_display, kb),
     })
     try:
         resp = client.messages.create(
@@ -509,6 +602,7 @@ def _batch_call(
             system=system_prompt,
             messages=[{"role": "user", "content": content}],
         )
+        _log_token_usage(resp, "batch")
         raw = resp.content[0].text
         parsed = _parse_and_validate(raw, batch_index)
         return parsed["images"] if parsed else []
@@ -522,15 +616,20 @@ def _synthesis_call(
     per_image_results: list[dict],
     index_map: dict[str, str],
     kb: dict,
+    source_hero_url: Optional[str] = None,
+    source_hero_label: Optional[str] = None,
 ) -> dict:
     """Text-only synthesis: produces property-level recommendations from per-image results."""
-    prompt = _build_synthesis_prompt(per_image_results, kb)
+    prompt = _build_synthesis_prompt(
+        per_image_results, kb, source_hero_url, source_hero_label,
+    )
     try:
         resp = client.messages.create(
             model=_MODEL,
             max_tokens=3000,
             messages=[{"role": "user", "content": prompt}],
         )
+        _log_token_usage(resp, "synthesis")
         raw = resp.content[0].text
         parsed = _extract_json(raw)
         if parsed and isinstance(parsed, dict):
@@ -538,6 +637,23 @@ def _synthesis_call(
     except Exception as exc:
         logger.error("[LLM Curator] Synthesis call failed: %s", exc)
     return {}
+
+
+def _log_token_usage(resp, call_type: str) -> None:
+    """Log token counts and estimated cost after an API call."""
+    try:
+        usage = resp.usage
+        input_tokens  = getattr(usage, "input_tokens", 0) or 0
+        output_tokens = getattr(usage, "output_tokens", 0) or 0
+        # Sonnet 4.6: $3/M input, $15/M output
+        cost_usd = (input_tokens * 3 + output_tokens * 15) / 1_000_000
+        logger.info(
+            "[LLM Curator] %s call — input_tokens=%d, output_tokens=%d, "
+            "estimated_cost=USD %.4f",
+            call_type, input_tokens, output_tokens, cost_usd,
+        )
+    except Exception:
+        pass   # non-fatal
 
 
 # ── Prompts ───────────────────────────────────────────────────────────────────
@@ -560,74 +676,116 @@ Rules:
 """
 
 
-def _build_full_prompt(index_map: dict[str, str], kb: dict) -> str:
+def _build_full_prompt(
+    index_map: dict[str, str],
+    index_map_display: dict[str, str],
+    kb: dict,
+    source_hero_url: Optional[str] = None,
+    source_hero_label: Optional[str] = None,
+) -> str:
     """Full prompt: per-image analysis + property-level recommendations."""
     context = _property_context(kb)
     schema_example = _schema_example()
     categories = ", ".join(sorted(_VALID_CATEGORIES))
-    sections = ", ".join(f'"{s}"' for s in _PHOTO_TOUR_SECTIONS)
+    sections_list = "\n".join(
+        f'  - "{s["name"]}": {s["description"]}' for s in CURATED_SECTIONS
+    )
+    section_names = ", ".join(f'"{s["name"]}"' for s in CURATED_SECTIONS)
+
+    hero_instruction = ""
+    if source_hero_url and source_hero_label:
+        hero_instruction = f"""
+Source hero note:
+The image labelled {source_hero_label}* is the current property hero selected by the \
+listing platform. Treat it as the default page_hero unless you identify a clearly superior \
+image elsewhere. If you override it, still include it as "supporting" or "gallery_only" — \
+never exclude it solely because another image is better.
+"""
 
     return f"""\
 Property context:
 {context}
-
+{hero_instruction}
 Image index (label → asset_id):
-{json.dumps(index_map, indent=2)}
+{json.dumps(index_map_display, indent=2)}
 
 Task:
 1. For EVERY label in the image_index, produce one entry in "images".
-2. Identify the correct room/space category.
-3. Group images that show the same room from different angles — assign them \
-   the same duplicate_group string (e.g. "dg_kitchen_1"). Use null if unique.
-4. Within each duplicate group, mark exactly one image as is_primary_in_group=true \
-   (the best angle/quality). All others: false.
-5. Assign rank_within_category: 1 = best photo in that category, 2 = second best, etc.
+   Use the exact asset_id value from the index (the URL string, not the label).
+2. Identify the correct room/space category (llm_category).
+3. Group images showing the same room from different angles — assign the same
+   duplicate_group string (e.g. "dg_kitchen_1"). Use null if unique.
+4. Within each duplicate group, mark exactly one image is_primary_in_group=true
+   (best angle/quality). All others: false.
+5. Assign rank_within_category: 1 = best in that category, 2 = second best, etc.
 6. Assign role:
-   - "hero"         → the single best overall page hero
-   - "supporting"   → good image worth showing in the photo tour
+   - "hero"         → the single best overall page hero (exactly one image)
+   - "supporting"   → good image worth featuring in the photo tour
    - "gallery_only" → acceptable for full gallery but not photo tour
-   - "exclude"      → blurry, dark, duplicate closeup, or irrelevant — hide completely
-7. For images marked "exclude", set reason briefly (e.g. "blurry", "dark", "duplicate_inferior").
-8. Write a concise, descriptive alt text for every non-excluded image.
-9. In "property", choose the best overall page_hero (exactly one asset_id).
-10. Build photo_tour_sections — use ONLY these section names: {sections}
+   - "exclude"      → blurry, dark, duplicate inferior angle, or irrelevant
+7. For "exclude" images, set reason briefly (e.g. "blurry", "dark", "duplicate_inferior").
+8. Write a concise alt text for every non-excluded image.
+9. Assign curated_section to every non-excluded image. Use exactly one of:
+{sections_list}
+   Key rules:
+   - "Primary Bedroom" = the main suite ONLY. All other sleeping rooms → "Bedrooms".
+   - "Primary Bathroom" = the ensuite directly attached to the primary suite ONLY.
+     All other bathrooms → "Bathrooms".
+   - "Pool" = water features only. Outdoor entertaining without water → "Extras".
+   - Set curated_section to null for excluded images.
+10. In "property", choose the best overall page_hero (exactly one asset_id).
+11. Build photo_tour_sections using ONLY these section names: {section_names}
     Each section: 1 hero + up to 2 supporting. Only include sections with qualifying images.
-11. Set category_order (ordered list of section names, best-first for this property).
-12. Infer vibe (1 sentence: what feeling this property evokes).
-13. Set merchandising_strategy.prioritize (what to lead with) and deprioritize.
+12. Set category_order (section names ordered best-first for this property).
+13. Infer vibe (1 sentence describing the feeling this property evokes).
+14. Set merchandising_strategy.prioritize and deprioritize.
 
-Valid categories: {categories}
+Valid llm_category values: {categories}
 
-Return ONLY this JSON structure (no markdown, no prose):
+Return ONLY valid JSON — no markdown, no prose, no code fences:
 
 {schema_example}
 """
 
 
-def _build_per_image_only_prompt(batch_index: dict[str, str], kb: dict) -> str:
+def _build_per_image_only_prompt(
+    batch_index: dict[str, str],
+    batch_index_display: dict[str, str],
+    kb: dict,
+) -> str:
     """Prompt for batch call — per-image analysis only, no property-level."""
     context = _property_context(kb)
     categories = ", ".join(sorted(_VALID_CATEGORIES))
+    sections_list = "\n".join(
+        f'  - "{s["name"]}": {s["description"]}' for s in CURATED_SECTIONS
+    )
 
     return f"""\
 Property context:
 {context}
 
 Image index (label → asset_id):
-{json.dumps(batch_index, indent=2)}
+{json.dumps(batch_index_display, indent=2)}
 
 Task: For EVERY label in the image_index, produce one entry in "images".
+Use the exact asset_id value (the URL string, not the label).
 Analyse room type, duplicates, quality, and conversion value.
+Assign curated_section to every non-excluded image:
+{sections_list}
+  - "Primary Bedroom" = main suite ONLY. Other sleeping rooms → "Bedrooms".
+  - "Primary Bathroom" = ensuite attached to primary suite ONLY. Others → "Bathrooms".
+  - Set curated_section to null for excluded images.
 
-Valid categories: {categories}
+Valid llm_category values: {categories}
 Valid roles: hero, supporting, gallery_only, exclude
 
 Return ONLY valid JSON:
 {{
   "images": [
     {{
-      "asset_id": "<exact string from image_index>",
+      "asset_id": "<exact URL from image_index>",
       "llm_category": "<category>",
+      "curated_section": "<section name or null>",
       "room_subtype": "<specific subtype or null>",
       "duplicate_group": "<shared string for same room or null>",
       "is_primary_in_group": true,
@@ -641,20 +799,35 @@ Return ONLY valid JSON:
 """
 
 
-def _build_synthesis_prompt(per_image_results: list[dict], kb: dict) -> str:
+def _build_synthesis_prompt(
+    per_image_results: list[dict],
+    kb: dict,
+    source_hero_url: Optional[str] = None,
+    source_hero_label: Optional[str] = None,
+) -> str:
     """Prompt for text-only synthesis call."""
     context = _property_context(kb)
-    sections = ", ".join(f'"{s}"' for s in _PHOTO_TOUR_SECTIONS)
+    section_names = ", ".join(f'"{s["name"]}"' for s in CURATED_SECTIONS)
+
+    hero_instruction = ""
+    if source_hero_url and source_hero_label:
+        hero_instruction = f"""
+Source hero note: The asset_id "{source_hero_url}" (labelled {source_hero_label}* on the \
+contact sheets) is the current listing platform hero. Use it as page_hero unless a clearly \
+superior image exists in the per-image results. If you override it, ensure it still appears \
+as supporting or gallery_only.
+"""
 
     return f"""\
 Property context:
 {context}
-
+{hero_instruction}
 Per-image curation results (already analysed):
 {json.dumps(per_image_results, indent=2)}
 
-Task: Based on the per-image results above, produce property-level recommendations.
-Use ONLY asset_ids from the per-image results. Use ONLY these section names: {sections}
+Task: Based on the per-image results, produce property-level recommendations.
+Use ONLY asset_ids from the per-image results.
+Use ONLY these section names: {section_names}
 
 Return ONLY valid JSON:
 {{
@@ -705,8 +878,9 @@ def _schema_example() -> str:
 {
   "images": [
     {
-      "asset_id": "<exact string from image_index — never invented>",
+      "asset_id": "<exact URL from image_index — never invent>",
       "llm_category": "kitchen",
+      "curated_section": "Kitchen",
       "room_subtype": "island_kitchen",
       "duplicate_group": "dg_kitchen_1",
       "is_primary_in_group": true,
@@ -725,7 +899,7 @@ def _schema_example() -> str:
         "supporting": ["<asset_id>", "<asset_id>"]
       }
     ],
-    "category_order": ["Exterior & Views", "Kitchen", "Bedrooms"],
+    "category_order": ["Exterior", "Pool", "Kitchen", "Primary Bedroom", "Bedrooms"],
     "vibe": "A light-filled coastal retreat with sweeping ocean views.",
     "merchandising_strategy": {
       "prioritize": ["ocean view shots", "pool at golden hour"],
@@ -774,9 +948,18 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
         except (TypeError, ValueError):
             rank = 99
 
+        curated_section = img.get("curated_section") or None
+        if curated_section is not None and curated_section not in _CURATED_SECTION_NAMES_SET:
+            logger.debug(
+                "[LLM Curator] Invalid curated_section %r for %s — clearing",
+                curated_section, asset_id[-30:],
+            )
+            curated_section = None
+
         valid_images.append({
             "asset_id":            asset_id,
             "llm_category":        category,
+            "curated_section":     curated_section,
             "room_subtype":        img.get("room_subtype") or None,
             "duplicate_group":     img.get("duplicate_group") or None,
             "is_primary_in_group": bool(img.get("is_primary_in_group", True)),
@@ -793,6 +976,7 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             valid_images.append({
                 "asset_id":            asset_id,
                 "llm_category":        "uncategorised",
+                "curated_section":     None,   # filled by _derive_curated_section_fallback
                 "room_subtype":        None,
                 "duplicate_group":     None,
                 "is_primary_in_group": True,
@@ -821,7 +1005,10 @@ def _validate_property_recs(raw: dict, valid_asset_ids: set) -> dict:
         if not isinstance(sec, dict):
             continue
         section_name = sec.get("section") or ""
-        if section_name not in _PHOTO_TOUR_SECTIONS:
+        if section_name not in _CURATED_SECTION_NAMES_SET:
+            logger.warning(
+                "[LLM Curator] Unknown photo_tour section name %r — skipped", section_name,
+            )
             continue
         hero_id = sec.get("hero") or ""
         if hero_id not in valid_asset_ids:
@@ -838,7 +1025,7 @@ def _validate_property_recs(raw: dict, valid_asset_ids: set) -> dict:
 
     cat_order = [
         s for s in (raw.get("category_order") or [])
-        if s in _PHOTO_TOUR_SECTIONS
+        if s in _CURATED_SECTION_NAMES_SET
     ]
 
     return {
@@ -851,6 +1038,71 @@ def _validate_property_recs(raw: dict, valid_asset_ids: set) -> dict:
             "deprioritize": [str(x) for x in (raw.get("merchandising_strategy", {}).get("deprioritize") or [])[:5]],
         },
     }
+
+
+def _derive_curated_section_fallback(images: list[dict]) -> list[dict]:
+    """
+    Fill curated_section=None for non-excluded images using CURATED_SECTIONS gcv_categories.
+
+    Limitations (by design):
+      - bathroom → "Bathrooms" (cannot distinguish Primary Bathroom without vision context)
+      - master_bedroom → "Bedrooms" (cannot distinguish Primary Bedroom without vision context)
+      - Images the LLM analysed and explicitly assigned a section are never overwritten.
+      - Excluded images always get curated_section=None.
+    """
+    # Build gcv_category → first matching section name (first-match wins)
+    gcv_to_section: dict[str, str] = {}
+    for sec in CURATED_SECTIONS:
+        for gcv_cat in sec["gcv_categories"]:
+            if gcv_cat not in gcv_to_section:
+                gcv_to_section[gcv_cat] = sec["name"]
+
+    n_filled = 0
+    for img in images:
+        if img.get("role") == "exclude":
+            img["curated_section"] = None
+            continue
+        if img.get("curated_section"):
+            continue   # LLM already assigned — do not overwrite
+        derived = gcv_to_section.get(img.get("llm_category") or "")
+        img["curated_section"] = derived
+        if derived:
+            n_filled += 1
+
+    if n_filled:
+        logger.info(
+            "[LLM Curator] Fallback curated_section derived for %d images", n_filled,
+        )
+    return images
+
+
+def _log_curation_summary(result: dict, source_hero_url: Optional[str]) -> None:
+    """Log role counts, section counts, and source hero preservation."""
+    images = result.get("images") or []
+    by_role: dict[str, int] = {}
+    by_section: dict[str, int] = {}
+    for img in images:
+        role = img.get("role") or "unknown"
+        by_role[role] = by_role.get(role, 0) + 1
+        sec = img.get("curated_section")
+        if sec and role != "exclude":
+            by_section[sec] = by_section.get(sec, 0) + 1
+
+    llm_hero = (result.get("property") or {}).get("page_hero") or ""
+    if source_hero_url:
+        hero_preserved = (llm_hero == source_hero_url)
+        hero_note = f"preserved={hero_preserved}"
+    else:
+        hero_note = "no source hero provided"
+
+    logger.info(
+        "[LLM Curator] Summary — total=%d | roles: %s | sections: %s | "
+        "page_hero: %s",
+        len(images),
+        ", ".join(f"{r}={n}" for r, n in sorted(by_role.items())),
+        ", ".join(f"{s}={n}" for s, n in sorted(by_section.items())),
+        hero_note,
+    )
 
 
 def _extract_json(text: str) -> Optional[dict]:
