@@ -49,7 +49,7 @@ _GRID_COLS          = 3
 _GRID_ROWS          = 4
 _IMAGES_PER_SHEET   = _GRID_COLS * _GRID_ROWS   # 12
 _MAX_IMAGES_TO_CURATE = 120     # hard cap — cost control (raised from 80)
-_SHEETS_PER_CALL    = 6         # max contact-sheet images per API call (within token budget)
+_SHEETS_PER_CALL    = 4         # max contact sheets per API call (4 × 12 = 48 images → ~2 K output tokens)
 _SUPABASE_TABLE     = "property_image_curations"
 _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 
@@ -598,7 +598,7 @@ def _batch_call(
     try:
         resp = client.messages.create(
             model=_MODEL,
-            max_tokens=6000,
+            max_tokens=8192,
             system=system_prompt,
             messages=[{"role": "user", "content": content}],
         )
@@ -620,9 +620,23 @@ def _synthesis_call(
     source_hero_label: Optional[str] = None,
 ) -> dict:
     """Text-only synthesis: produces property-level recommendations from per-image results."""
-    prompt = _build_synthesis_prompt(
-        per_image_results, kb, source_hero_url, source_hero_label,
-    )
+    # Build reverse map: URL → label (stripped of "*")
+    url_to_label = {v: k.rstrip("*") for k, v in index_map.items()}
+    label_to_url = {k.rstrip("*"): v for k, v in index_map.items()}
+
+    # Compact summary for prompt — labels only, non-excluded images
+    compact_summary = [
+        {
+            "label":           url_to_label.get(img["asset_id"], img["asset_id"]),
+            "role":            img.get("role"),
+            "curated_section": img.get("curated_section"),
+            "llm_category":    img.get("llm_category"),
+        }
+        for img in per_image_results
+        if img.get("role") != "exclude"
+    ]
+
+    prompt = _build_synthesis_prompt(compact_summary, kb, source_hero_label)
     try:
         resp = client.messages.create(
             model=_MODEL,
@@ -633,7 +647,22 @@ def _synthesis_call(
         raw = resp.content[0].text
         parsed = _extract_json(raw)
         if parsed and isinstance(parsed, dict):
-            return _validate_property_recs(parsed, {r["asset_id"] for r in per_image_results})
+            # Remap labels → URLs in synthesis output before validation
+            def _resolve_label(val: str) -> str:
+                return label_to_url.get((val or "").rstrip("*"), "")
+
+            parsed["page_hero"] = _resolve_label(parsed.get("page_hero") or "")
+            remapped_sections = []
+            for sec in (parsed.get("photo_tour_sections") or []):
+                if not isinstance(sec, dict):
+                    continue
+                sec["hero"] = _resolve_label(sec.get("hero") or "")
+                sec["supporting"] = [
+                    _resolve_label(s) for s in (sec.get("supporting") or [])
+                ]
+                remapped_sections.append(sec)
+            parsed["photo_tour_sections"] = remapped_sections
+            return _validate_property_recs(parsed, set(index_map.values()))
     except Exception as exc:
         logger.error("[LLM Curator] Synthesis call failed: %s", exc)
     return {}
@@ -668,11 +697,12 @@ room type, group duplicates, select the best images for conversion, and \
 output a structured JSON curation.
 
 Rules:
-- Each contact sheet thumbnail is labelled (e.g. A01, A02, B03).
-- You will be given an "image_index" mapping label → asset_id.
-- Every label in the image_index MUST appear in your output.
+- Each contact sheet thumbnail is labelled with a short code (e.g. A01, A02, B03).
+- You will be given the list of labels to analyse.
+- Use the label (e.g. "A01") as the value for "asset_id" in your output — NOT the full URL.
+- Every label in the list MUST appear exactly once in your output.
 - Output ONLY valid JSON — no markdown, no prose, no code fences.
-- Never invent asset_ids; use only the exact strings from image_index values.
+- Never invent labels; use only the exact codes shown.
 """
 
 
@@ -702,16 +732,18 @@ image elsewhere. If you override it, still include it as "supporting" or "galler
 never exclude it solely because another image is better.
 """
 
+    labels_list = list(index_map_display.keys())
+
     return f"""\
 Property context:
 {context}
 {hero_instruction}
-Image index (label → asset_id):
-{json.dumps(index_map_display, indent=2)}
+Image labels to analyse (use these exact codes as "asset_id" in your output):
+{json.dumps(labels_list)}
 
 Task:
-1. For EVERY label in the image_index, produce one entry in "images".
-   Use the exact asset_id value from the index (the URL string, not the label).
+1. For EVERY label in the list above, produce one entry in "images".
+   Use the label (e.g. "A01") as the value for asset_id — NOT a URL.
 2. Identify the correct room/space category (llm_category).
 3. Group images showing the same room from different angles — assign the same
    duplicate_group string (e.g. "dg_kitchen_1"). Use null if unique.
@@ -733,9 +765,9 @@ Task:
      All other bathrooms → "Bathrooms".
    - "Pool" = water features only. Outdoor entertaining without water → "Extras".
    - Set curated_section to null for excluded images.
-10. In "property", choose the best overall page_hero (exactly one asset_id).
+10. In "property", choose the best overall page_hero (label, e.g. "A01").
 11. Build photo_tour_sections using ONLY these section names: {section_names}
-    Each section: 1 hero + up to 2 supporting. Only include sections with qualifying images.
+    Each section: 1 hero label + up to 2 supporting labels. Only include sections with qualifying images.
 12. Set category_order (section names ordered best-first for this property).
 13. Infer vibe (1 sentence describing the feeling this property evokes).
 14. Set merchandising_strategy.prioritize and deprioritize.
@@ -760,15 +792,17 @@ def _build_per_image_only_prompt(
         f'  - "{s["name"]}": {s["description"]}' for s in CURATED_SECTIONS
     )
 
+    labels_list = list(batch_index_display.keys())
+
     return f"""\
 Property context:
 {context}
 
-Image index (label → asset_id):
-{json.dumps(batch_index_display, indent=2)}
+Image labels to analyse (use these exact codes as "asset_id"):
+{json.dumps(labels_list)}
 
-Task: For EVERY label in the image_index, produce one entry in "images".
-Use the exact asset_id value (the URL string, not the label).
+Task: For EVERY label above, produce one entry in "images".
+Use the label (e.g. "A01") as asset_id — NOT a URL.
 Analyse room type, duplicates, quality, and conversion value.
 Assign curated_section to every non-excluded image:
 {sections_list}
@@ -783,16 +817,16 @@ Return ONLY valid JSON:
 {{
   "images": [
     {{
-      "asset_id": "<exact URL from image_index>",
-      "llm_category": "<category>",
-      "curated_section": "<section name or null>",
-      "room_subtype": "<specific subtype or null>",
-      "duplicate_group": "<shared string for same room or null>",
+      "asset_id": "A01",
+      "llm_category": "kitchen",
+      "curated_section": "Kitchen",
+      "room_subtype": "island_kitchen",
+      "duplicate_group": "dg_kitchen_1",
       "is_primary_in_group": true,
       "rank_within_category": 1,
       "role": "supporting",
-      "reason": "<only if exclude>",
-      "alt": "<descriptive alt text>"
+      "reason": null,
+      "alt": "Open-plan kitchen with marble island"
     }}
   ]
 }}
@@ -800,46 +834,47 @@ Return ONLY valid JSON:
 
 
 def _build_synthesis_prompt(
-    per_image_results: list[dict],
+    compact_summary: list[dict],
     kb: dict,
-    source_hero_url: Optional[str] = None,
     source_hero_label: Optional[str] = None,
 ) -> str:
-    """Prompt for text-only synthesis call."""
+    """
+    Prompt for text-only synthesis call.
+    compact_summary: [{label, role, curated_section, llm_category}, ...] — non-excluded only.
+    """
     context = _property_context(kb)
     section_names = ", ".join(f'"{s["name"]}"' for s in CURATED_SECTIONS)
 
     hero_instruction = ""
-    if source_hero_url and source_hero_label:
+    if source_hero_label:
         hero_instruction = f"""
-Source hero note: The asset_id "{source_hero_url}" (labelled {source_hero_label}* on the \
-contact sheets) is the current listing platform hero. Use it as page_hero unless a clearly \
-superior image exists in the per-image results. If you override it, ensure it still appears \
-as supporting or gallery_only.
+Source hero note: Label {source_hero_label}* is the current listing platform hero. \
+Use it as page_hero unless a clearly superior image exists. If you override it, \
+ensure it still appears as supporting or gallery_only.
 """
 
     return f"""\
 Property context:
 {context}
 {hero_instruction}
-Per-image curation results (already analysed):
-{json.dumps(per_image_results, indent=2)}
+Per-image curation summary (label, role, curated_section for non-excluded images):
+{json.dumps(compact_summary)}
 
-Task: Based on the per-image results, produce property-level recommendations.
-Use ONLY asset_ids from the per-image results.
+Task: Produce property-level recommendations.
+Use ONLY labels from the summary above (e.g. "A01") in page_hero, hero, and supporting.
 Use ONLY these section names: {section_names}
 
 Return ONLY valid JSON:
 {{
-  "page_hero": "<asset_id of best overall hero>",
+  "page_hero": "A01",
   "photo_tour_sections": [
     {{
-      "section": "<section name>",
-      "hero": "<asset_id>",
-      "supporting": ["<asset_id>", "<asset_id>"]
+      "section": "Exterior",
+      "hero": "A01",
+      "supporting": ["A02", "A03"]
     }}
   ],
-  "category_order": ["<section name>", ...],
+  "category_order": ["Exterior", "Pool", "Living Areas"],
   "vibe": "<one sentence>",
   "merchandising_strategy": {{
     "prioritize": ["<what to lead with>"],
@@ -878,7 +913,7 @@ def _schema_example() -> str:
 {
   "images": [
     {
-      "asset_id": "<exact URL from image_index — never invent>",
+      "asset_id": "A01",
       "llm_category": "kitchen",
       "curated_section": "Kitchen",
       "room_subtype": "island_kitchen",
@@ -887,16 +922,16 @@ def _schema_example() -> str:
       "rank_within_category": 1,
       "role": "supporting",
       "reason": null,
-      "alt": "Bright open-plan kitchen with marble island and ocean views"
+      "alt": "Open-plan kitchen with marble island and ocean views"
     }
   ],
   "property": {
-    "page_hero": "<asset_id>",
+    "page_hero": "A01",
     "photo_tour_sections": [
       {
         "section": "Kitchen",
-        "hero": "<asset_id>",
-        "supporting": ["<asset_id>", "<asset_id>"]
+        "hero": "A01",
+        "supporting": ["A02", "A03"]
       }
     ],
     "category_order": ["Exterior", "Pool", "Kitchen", "Primary Bedroom", "Bedrooms"],
@@ -926,15 +961,22 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
         logger.warning("[LLM Curator] LLM response missing 'images' list")
         return None
 
-    known_asset_ids = set(index_map.values())
+    known_asset_ids = set(index_map.values())   # full URLs
+    # Label → URL map (strip "*" from annotated source-hero label)
+    label_to_url: dict[str, str] = {k.rstrip("*"): v for k, v in index_map.items()}
     valid_images: list[dict] = []
 
     for img in images_raw:
         if not isinstance(img, dict):
             continue
-        asset_id = img.get("asset_id") or ""
-        if asset_id not in known_asset_ids:
-            # LLM invented an asset_id — discard this entry
+        asset_id_raw = (img.get("asset_id") or "").rstrip("*")
+        # Accept label (e.g. "A01") or full URL (backward compat)
+        if asset_id_raw in label_to_url:
+            asset_id = label_to_url[asset_id_raw]
+        elif asset_id_raw in known_asset_ids:
+            asset_id = asset_id_raw  # already a URL
+        else:
+            # LLM invented a value — discard
             continue
         category = img.get("llm_category") or "uncategorised"
         if category not in _VALID_CATEGORIES:
@@ -966,7 +1008,7 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "rank_within_category": rank,
             "role":                role,
             "reason":              img.get("reason") or None,
-            "alt":                 str(img.get("alt") or "")[:200],
+            "alt":                 str(img.get("alt") or "")[:80],
         })
 
     # Ensure every asset_id in the index has an entry (fill missing with defaults)
@@ -986,16 +1028,31 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
                 "alt":                 "",
             })
 
-    # Validate property-level
+    # Validate property-level (LLM may have used labels or URLs in page_hero/supporting)
     property_raw = parsed.get("property") or {}
-    property_recs = _validate_property_recs(property_raw, known_asset_ids)
+    property_recs = _validate_property_recs(property_raw, known_asset_ids, label_to_url)
 
     return {"images": valid_images, "property": property_recs}
 
 
-def _validate_property_recs(raw: dict, valid_asset_ids: set) -> dict:
-    """Validate and sanitise property-level recommendations."""
-    page_hero = raw.get("page_hero") or ""
+def _validate_property_recs(
+    raw: dict,
+    valid_asset_ids: set,
+    label_to_url: Optional[dict] = None,
+) -> dict:
+    """
+    Validate and sanitise property-level recommendations.
+    label_to_url: if provided, resolves label strings (e.g. "A01") to full URLs
+                  before validation. Supports both labels and URLs in LLM output.
+    """
+    label_to_url = label_to_url or {}
+
+    def _resolve(val: str) -> str:
+        """Map label → URL, or return val unchanged if already a URL."""
+        v = (val or "").rstrip("*")
+        return label_to_url.get(v, v)
+
+    page_hero = _resolve(raw.get("page_hero") or "")
     if page_hero not in valid_asset_ids:
         page_hero = ""
 
@@ -1010,11 +1067,11 @@ def _validate_property_recs(raw: dict, valid_asset_ids: set) -> dict:
                 "[LLM Curator] Unknown photo_tour section name %r — skipped", section_name,
             )
             continue
-        hero_id = sec.get("hero") or ""
+        hero_id = _resolve(sec.get("hero") or "")
         if hero_id not in valid_asset_ids:
             continue
         supporting = [
-            sid for sid in (sec.get("supporting") or [])
+            sid for sid in (_resolve(s) for s in (sec.get("supporting") or []))
             if sid in valid_asset_ids and sid != hero_id
         ][:2]
         sections.append({
