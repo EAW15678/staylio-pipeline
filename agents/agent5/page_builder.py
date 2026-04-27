@@ -103,6 +103,20 @@ _CATEGORY_MODULES: list[tuple[str, frozenset]] = [
 # All others log a warning when no images are available.
 _OPTIONAL_MODULE_LABELS: frozenset = frozenset({"Amenities & Extras"})
 
+# Ordered section names used when LLM curation provides curated_section per image.
+# Determines gallery sort order and section header insertion when curation is active.
+_CURATION_SECTION_ORDER: list[str] = [
+    "Exterior",
+    "Pool",
+    "Living Areas",
+    "Kitchen",
+    "Primary Bedroom",
+    "Bedrooms",
+    "Primary Bathroom",
+    "Bathrooms",
+    "Extras",
+]
+
 # Per-module label preferences and penalties used by _module_quality_score.
 # Keys must match display labels in _CATEGORY_MODULES exactly.
 _MODULE_PREFERRED_LABELS: dict = {
@@ -255,7 +269,7 @@ def build_landing_page_html(
         # LLM curation is source of truth — Agent 5 is a render engine only
         logger.info("[Agent 5] Using LLM vision curation for gallery and photo tour")
         gallery_items    = _gallery_items_from_curation(image_curation, media_assets, hero_photo, name)
-        category_modules = _modules_from_curation(image_curation, gallery_items, media_assets)
+        category_modules = _modules_from_curation_exact(image_curation, media_assets, name)
         # Use LLM-selected hero if page hero_photo not already set by Agent 3
         if not hero_photo:
             llm_hero_id = (image_curation.get("property") or {}).get("page_hero") or ""
@@ -1065,6 +1079,8 @@ def _gallery_items_from_curation(
                 if labels else f"{property_name} photo"
             )
 
+        gallery_section = result.get("curated_section") or None
+
         items.append({
             "url":               display_url,
             "alt":               alt,
@@ -1078,15 +1094,26 @@ def _gallery_items_from_curation(
             "role":              role,
             "duplicate_group":   result.get("duplicate_group"),
             "is_primary":        True,  # guaranteed by filter above
+            "gallery_section":   gallery_section,
         })
 
-    # Sort: (category_priority_index, rank)
+    # Sort by curated section order when curated_section is present;
+    # fall back to GCV category priority for items without a section assignment.
+    _has_curated_sections = any(i.get("gallery_section") for i in items)
+
     def _sort_key_curation(item: dict) -> tuple:
+        gs = item.get("gallery_section")
+        if gs and _has_curated_sections:
+            try:
+                sec_pri = _CURATION_SECTION_ORDER.index(gs)
+            except ValueError:
+                sec_pri = len(_CURATION_SECTION_ORDER)
+            return (0, sec_pri, item["rank"])
         try:
-            pri = _GALLERY_CATEGORY_ORDER.index(item["category"])
+            cat_pri = _GALLERY_CATEGORY_ORDER.index(item["category"])
         except ValueError:
-            pri = len(_GALLERY_CATEGORY_ORDER)
-        return (pri, item["rank"])
+            cat_pri = len(_GALLERY_CATEGORY_ORDER)
+        return (1, cat_pri, item["rank"])
 
     items.sort(key=_sort_key_curation)
     items = items[:MAX_GALLERY_IMAGES]
@@ -1105,122 +1132,101 @@ def _gallery_items_from_curation(
     return items
 
 
-def _modules_from_curation(
+def _modules_from_curation_exact(
     curation: dict,
-    gallery_items: list,
     media_assets: list,
+    property_name: str,
 ) -> dict:
     """
-    Build category_modules strictly from LLM curation's photo_tour_sections.
+    Build category_modules directly from LLM curation's photo_tour_sections.
 
-    Rules:
-      - Only images with role 'hero' or 'supporting' are eligible for modules.
-      - No synthesised fallbacks: if an asset_id can't be resolved to a
-        qualifying gallery item, the section slot is left empty (not filled
-        from the broader gallery pool).
-      - The 'all' list for each section is drawn from gallery_items (same as
-        the heuristic path) so lightbox navigation remains consistent.
+    This is the authoritative curation render path. Rules:
+      - Accepts ANY section name — no allowlist, no remapping.
+      - Resolves asset_id directly from media_assets (original_lookup).
+        Does NOT require the item to already exist in gallery_items.
+      - No role gate — the LLM already decided what belongs in each section.
+      - Alt text comes from the curation images[] record; falls back to a
+        generated description if missing.
+      - The 'all' list is [hero] + supporting for lightbox consistency.
 
     Output format: {section_label: {hero: item, supporting: [items], all: [items]}}
+    Each item: {url, alt, category, rank, labels_enhanced, composition_score,
+                has_enhanced, source, subject_category}
     """
     original_lookup: dict = {
         a.get("asset_url_original"): a
         for a in media_assets
         if a.get("asset_url_original")
     }
-    # URL-to-gallery-item lookup (gallery_items already filtered/sorted)
-    url_to_item: dict = {item["url"]: item for item in gallery_items}
 
-    # Build role lookup from curation: asset_id → role
-    curation_roles: dict[str, str] = {
-        r["asset_id"]: r.get("role") or "gallery_only"
+    # alt text lookup: asset_id → alt string from curation
+    curation_alt: dict[str, str] = {
+        r["asset_id"]: (r.get("alt") or "").strip()
         for r in (curation.get("images") or [])
         if r.get("asset_id")
     }
 
-    def _resolve_module_item(asset_id: str) -> Optional[dict]:
-        """
-        Resolve asset_id to a gallery item ONLY if:
-          1. Its role is 'hero' or 'supporting' per curation data.
-          2. It maps to a known media asset with a display URL.
-          3. It is present in gallery_items (not excluded or hero-only).
-        Returns None if any condition fails — no synthesised fallbacks.
-        """
-        role = curation_roles.get(asset_id, "")
-        if role not in _PHOTO_TOUR_ROLES:
-            logger.debug(
-                "[Agent 5] Module: skipped %s — role=%r not in photo-tour roles",
-                asset_id[-30:], role,
-            )
+    def _resolve(asset_id: str) -> Optional[dict]:
+        """Resolve asset_id → gallery item dict; returns None if unresolvable."""
+        if not asset_id:
             return None
-
         asset = original_lookup.get(asset_id)
         if not asset:
+            logger.debug("[Agent 5] Module: asset_id not in media_assets: %s", asset_id[-40:])
             return None
-
-        display_url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
-        if not display_url:
+        url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
+        if not url:
             return None
+        cat = (asset.get("subject_category") or "uncategorised").lower()
+        alt = curation_alt.get(asset_id) or f"{property_name} — {cat.replace('_', ' ')}"
+        return {
+            "url":               url,
+            "alt":               alt,
+            "category":          cat,
+            "rank":              asset.get("category_rank") or 1,
+            "labels_enhanced":   asset.get("labels_enhanced") or [],
+            "composition_score": asset.get("composition_score") or 0.0,
+            "has_enhanced":      bool(asset.get("asset_url_enhanced")),
+            "source":            asset.get("source") or "unknown",
+            "subject_category":  cat,
+        }
 
-        item = url_to_item.get(display_url)
-        if item is None:
-            logger.debug(
-                "[Agent 5] Module: skipped %s — not in gallery_items (excluded or hero-only)",
-                asset_id[-30:],
-            )
-        return item
-
-    # Build per-section 'all' list from gallery_items
-    by_section_label: dict[str, list] = {}
-    for item in gallery_items:
-        cat = item.get("category") or "uncategorised"
-        for lbl, cats in _CATEGORY_MODULES:
-            if cat in cats:
-                by_section_label.setdefault(lbl, []).append(item)
-                break
-
-    property_recs = curation.get("property") or {}
-    sections_raw  = property_recs.get("photo_tour_sections") or []
-    valid_section_names = {lbl for lbl, _ in _CATEGORY_MODULES}
-
+    sections_raw = (curation.get("property") or {}).get("photo_tour_sections") or []
     result: dict = {}
-    n_skipped_sections = 0
+    n_skipped = 0
 
     for sec in sections_raw:
-        section_name = sec.get("section") or ""
-        if section_name not in valid_section_names:
+        section_name = (sec.get("section") or "").strip()
+        if not section_name:
             continue
 
-        hero_id   = sec.get("hero") or ""
-        hero_item = _resolve_module_item(hero_id)
+        hero_item = _resolve(sec.get("hero") or "")
         if not hero_item:
-            n_skipped_sections += 1
-            logger.info(
-                "[Agent 5] Module '%s' skipped — hero asset_id unresolvable or wrong role",
-                section_name,
-            )
+            n_skipped += 1
+            logger.info("[Agent 5] Module '%s' skipped — hero unresolvable", section_name)
             continue
 
         supporting_items: list = []
         for sid in (sec.get("supporting") or [])[:2]:
-            sitem = _resolve_module_item(sid)
+            sitem = _resolve(sid)
             if sitem and sitem["url"] != hero_item["url"]:
                 supporting_items.append(sitem)
 
+        all_items = [hero_item] + supporting_items
         result[section_name] = {
             "hero":       hero_item,
             "supporting": supporting_items,
-            "all":        by_section_label.get(section_name, []),
+            "all":        all_items,
         }
 
     logger.info(
-        "[Agent 5] Photo tour from LLM curation: %d sections built (%s); %d skipped",
+        "[Agent 5] Photo tour from LLM curation (exact): %d sections built (%s); %d skipped",
         len(result),
         ", ".join(
             f"{lbl}={1 + len(mod['supporting'])}img"
             for lbl, mod in result.items()
         ) or "none",
-        n_skipped_sections,
+        n_skipped,
     )
     return result
 
@@ -1605,12 +1611,19 @@ def _build_gallery_section(items: list, property_name: str) -> str:
         len(visible_items), total, MAX_VISIBLE_ALL_PHOTOS,
     )
 
-    # Map each item to its section label (for header insertion)
-    def _section_for(cat: str) -> Optional[str]:
+    # Map each item to its section label (for header insertion).
+    # Prefer curated gallery_section when present (curation path);
+    # fall back to legacy _GALLERY_SECTIONS mapping for GCV path.
+    _use_curated_sections = any(item.get("gallery_section") for item in items)
+
+    def _section_for(item: dict) -> Optional[str]:
+        gs = item.get("gallery_section")
+        if gs and _use_curated_sections:
+            return gs
         for label, cats in _GALLERY_SECTIONS:
-            if cat in cats:
+            if item.get("category") in cats:
                 return label
-        return None  # no header for local_area / uncategorised
+        return None
 
     grid_html = ""
     last_section: Optional[str] = None
@@ -1619,7 +1632,7 @@ def _build_gallery_section(items: list, property_name: str) -> str:
     for item in visible_items:
         url = item["url"]
         alt = item["alt"]
-        section = _section_for(item["category"])
+        section = _section_for(item)
 
         # Insert section header when crossing into a new labelled section
         if section and section != last_section:
