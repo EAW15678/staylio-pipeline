@@ -100,7 +100,15 @@ def agent3_node(state: dict) -> dict:
 
     # ── Step 2: Collect all photo URLs ────────────────────────────────────
     photo_entries = kb.get("photos") or []
-    photo_urls    = [p["url"] for p in photo_entries if p.get("url")]
+
+    # Build lookup: source URL → caption (populated by VRBO scraper; None for other sources)
+    _source_meta: dict[str, dict] = {
+        p["url"]: {"caption": p.get("caption")}
+        for p in photo_entries
+        if p.get("url")
+    }
+
+    photo_urls = [p["url"] for p in photo_entries if p.get("url")]
 
     if not photo_urls:
         logger.warning(f"[Agent 3] No photos found for property {property_id}")
@@ -142,10 +150,12 @@ def agent3_node(state: dict) -> dict:
             pkg.processing_errors.append(f"Original R2 upload failed for photo {i}: {exc}")
             original_r2_url = url   # Fall back to source URL
 
+        _meta = _source_meta.get(url, {})
         asset = MediaAsset(
             property_id=property_id,
             asset_url_original=original_r2_url,
             source=source_label,
+            source_caption=_meta.get("caption"),
         )
 
         # Baseline Vision API labels for provenance check (send bytes directly)

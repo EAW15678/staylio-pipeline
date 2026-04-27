@@ -111,6 +111,7 @@ class MediaAsset:
 
     # Source tracking
     source: str = ""                 # "intake_upload" | "airbnb_scraped" | "vrbo_scraped" etc.
+    source_caption: Optional[str] = None  # Caption from source listing (e.g. VRBO image name)
 
     def to_db_record(self) -> dict:
         """Serialise for Supabase upsert."""
@@ -131,6 +132,7 @@ class MediaAsset:
             "hero_rank": self.hero_rank,
             "social_crop_queued": self.social_crop_queued,
             "source": self.source,
+            "source_caption": self.source_caption,
         }
 
 

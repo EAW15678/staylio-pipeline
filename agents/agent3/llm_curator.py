@@ -241,6 +241,18 @@ def run_llm_vision_curation(
                 source_hero_label,
             )
 
+        # ── Build label → caption map ─────────────────────────────────────
+        # Maps clean label (e.g. "A01") → source caption from the listing.
+        # VRBO populates captions (e.g. "Master bedroom with king bed").
+        # Airbnb and PMC entries are None and are excluded from the prompt.
+        url_to_asset = {a.asset_url_original: a for a in candidate_assets}
+        caption_map: dict[str, str] = {}
+        for label, orig_url in index_map.items():
+            asset = url_to_asset.get(orig_url)
+            caption = getattr(asset, "source_caption", None) if asset else None
+            if caption:
+                caption_map[label.rstrip("*")] = caption
+
         # ── Call LLM ──────────────────────────────────────────────────────
         result = _run_curation_call(
             sheet_jpeg_list=sheet_jpeg_list,
@@ -250,6 +262,7 @@ def run_llm_vision_curation(
             property_id=property_id,
             source_hero_url=source_hero_url,
             source_hero_label=source_hero_label,
+            caption_map=caption_map,
         )
 
         if result is None:
@@ -469,12 +482,15 @@ def _run_curation_call(
     property_id: str,
     source_hero_url: Optional[str] = None,
     source_hero_label: Optional[str] = None,
+    caption_map: Optional[dict] = None,
 ) -> Optional[dict]:
     """
     Send all contact sheets to Claude in one or two API calls.
     Parses and validates the JSON response.
     Returns {images: [...], property: {...}} or None on failure.
     """
+    caption_map = caption_map or {}
+
     try:
         client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     except Exception as exc:
@@ -488,7 +504,7 @@ def _run_curation_call(
     if len(sheet_jpeg_list) <= _SHEETS_PER_CALL:
         result = _single_call(
             client, system_prompt, sheet_jpeg_list, index_map, index_map_display,
-            kb, source_hero_url, source_hero_label,
+            kb, source_hero_url, source_hero_label, caption_map,
         )
         if result is None:
             return None
@@ -509,8 +525,14 @@ def _run_curation_call(
                     batch_start, min(batch_start + _SHEETS_PER_CALL, len(sheet_jpeg_list))
                 )
             }
+            # Filter caption_map to labels in this batch
+            batch_caption_map = {
+                k: v for k, v in caption_map.items()
+                if k in {lbl.rstrip("*") for lbl in batch_index_display}
+            }
             partial = _batch_call(
                 client, system_prompt, batch, batch_index, batch_index_display, kb,
+                batch_caption_map,
             )
             if partial:
                 partial_results.extend(partial)
@@ -536,6 +558,7 @@ def _single_call(
     kb: dict,
     source_hero_url: Optional[str] = None,
     source_hero_label: Optional[str] = None,
+    caption_map: Optional[dict] = None,
 ) -> Optional[dict]:
     """Single API call: all sheets + full JSON response including property-level."""
     content: list[dict] = []
@@ -554,6 +577,7 @@ def _single_call(
         "type": "text",
         "text": _build_full_prompt(
             index_map, index_map_display, kb, source_hero_url, source_hero_label,
+            caption_map or {},
         ),
     })
 
@@ -579,6 +603,7 @@ def _batch_call(
     batch_index: dict[str, str],
     batch_index_display: dict[str, str],
     kb: dict,
+    caption_map: Optional[dict] = None,
 ) -> list[dict]:
     """Batch call: returns only per-image results (no property-level)."""
     content: list[dict] = []
@@ -593,7 +618,7 @@ def _batch_call(
         })
     content.append({
         "type": "text",
-        "text": _build_per_image_only_prompt(batch_index, batch_index_display, kb),
+        "text": _build_per_image_only_prompt(batch_index, batch_index_display, kb, caption_map or {}),
     })
     try:
         resp = client.messages.create(
@@ -706,12 +731,34 @@ Rules:
 """
 
 
+def _build_captions_block(caption_map: Optional[dict]) -> str:
+    """
+    Build the source-captions section for LLM prompts.
+    Returns an empty string when no captions are available (Airbnb / PMC properties).
+    Only labels with non-empty captions are included.
+    """
+    if not caption_map:
+        return ""
+    lines = [
+        f'  {label}: "{caption}"'
+        for label, caption in sorted(caption_map.items())
+        if caption
+    ]
+    if not lines:
+        return ""
+    return (
+        "\nSource captions from listing (use these to identify room type "
+        "and primary/secondary designation):\n" + "\n".join(lines) + "\n"
+    )
+
+
 def _build_full_prompt(
     index_map: dict[str, str],
     index_map_display: dict[str, str],
     kb: dict,
     source_hero_url: Optional[str] = None,
     source_hero_label: Optional[str] = None,
+    caption_map: Optional[dict] = None,
 ) -> str:
     """Full prompt: per-image analysis + property-level recommendations."""
     context = _property_context(kb)
@@ -732,6 +779,7 @@ image elsewhere. If you override it, still include it as "supporting" or "galler
 never exclude it solely because another image is better.
 """
 
+    captions_block = _build_captions_block(caption_map)
     labels_list = list(index_map_display.keys())
 
     return f"""\
@@ -740,7 +788,7 @@ Property context:
 {hero_instruction}
 Image labels to analyse (use these exact codes as "asset_id" in your output):
 {json.dumps(labels_list)}
-
+{captions_block}
 Task:
 1. For EVERY label in the list above, produce one entry in "images".
    Use the label (e.g. "A01") as the value for asset_id — NOT a URL.
@@ -784,6 +832,7 @@ def _build_per_image_only_prompt(
     batch_index: dict[str, str],
     batch_index_display: dict[str, str],
     kb: dict,
+    caption_map: Optional[dict] = None,
 ) -> str:
     """Prompt for batch call — per-image analysis only, no property-level."""
     context = _property_context(kb)
@@ -792,6 +841,7 @@ def _build_per_image_only_prompt(
         f'  - "{s["name"]}": {s["description"]}' for s in CURATED_SECTIONS
     )
 
+    captions_block = _build_captions_block(caption_map)
     labels_list = list(batch_index_display.keys())
 
     return f"""\
@@ -800,6 +850,7 @@ Property context:
 
 Image labels to analyse (use these exact codes as "asset_id"):
 {json.dumps(labels_list)}
+{captions_block}
 
 Task: For EVERY label above, produce one entry in "images".
 Use the label (e.g. "A01") as asset_id — NOT a URL.
