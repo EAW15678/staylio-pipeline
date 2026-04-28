@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v3_strict_classification_rules"
+_CURATION_VERSION = "curation_v4_two_stage_selector"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -113,125 +113,27 @@ _VALID_ROLES = frozenset({"hero", "supporting", "gallery_only", "exclude"})
 
 _SHEET_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-# ── Classification rules injected into every LLM prompt ──────────────────────
-# Shared by _build_full_prompt and _build_per_image_only_prompt.
-# Edit here; both prompts update automatically.
-_CLASSIFICATION_RULES = """\
-HARD CLASSIFICATION RULES — apply BEFORE assigning any curated_section:
+# ── Deterministic selector constants ─────────────────────────────────────────
+# Maximum images selected per section for the Photo Tour.
+_SECTION_MAX_IMAGES: dict[str, int] = {
+    "Exterior":     3,
+    "Pool":         2,
+    "Living Areas": 3,
+    "Kitchen":      2,
+    "Bedrooms":     4,
+    "Bathrooms":    3,
+    "Extras":       2,
+}
 
-  Bedrooms
-    MUST contain a clearly visible bed.
-    Reject: living rooms, lounges, rooms without a bed.
-
-  Bathrooms
-    MUST contain at least one of: sink/vanity, toilet, shower, bathtub.
-    Reject: wet bars, kitchens, closets.
-
-  Pool
-    MUST contain a visible swimming pool.
-    Reject: patios or decks without a pool, hot-tub-only shots (assign those to Extras).
-
-  Kitchen
-    MUST clearly show a stove, kitchen island, or kitchen cabinetry.
-    Reject: dining-area-only shots (unless the kitchen is also clearly visible), living rooms.
-
-  Living Areas
-    Must show couches, seating, TV, fireplace, or a gathering/lounge space.
-    Reject: bedrooms, kitchens.
-
-  Exterior
-    Must show the outside structure of the home or strong exterior elements.
-    Reject: interior shots, pool-only shots (pool shots → Pool section).
-
-  Extras
-    Use ONLY when the image does not clearly belong to another section.
-    Examples: outdoor fireplace, outdoor grilling area, elevator, parking,
-    baby crib/gate, beach supplies, golf cart/LSV, hot tub (without pool),
-    children's play space, activity/event images.
-
-OPEN-CONCEPT RULE:
-  If an image shows both kitchen and living areas, assign based on the PRIMARY
-  visual focus of the image. Do NOT assign the same image to both sections.
-
-DUPLICATE SUPPRESSION — within EACH section:
-  Do NOT select multiple images that show:
-  * the same angle
-  * minor variations of the same shot
-  If two images are very similar in orientation, keep only the best one.
-  Assign the inferior one role="exclude" with reason="duplicate_inferior".
-
-DIVERSITY REQUIREMENT — within EACH section:
-  Prioritise different spaces over different angles of the same space.
-  - Bedrooms: prefer distinct bedrooms over multiple shots of the same bed.
-  - Bathrooms: prefer one vanity shot + one shower + one tub rather than
-    three angles of the same fixture.
-  - Living Areas: show different areas (living room, dining, lounge, sitting room).
-
-CROSS-SECTION UNIQUENESS:
-  Each image belongs to EXACTLY ONE section. An image MUST NOT appear in
-  multiple sections. If an image is borderline, assign it to the single
-  best-matching section and leave it out of all others.
-
-PRIORITY ORDER within each section:
-  1. Correct classification (must pass hard rules above)
-  2. Unique space representation (different room/area)
-  3. Visual quality and aesthetic appeal
-
-SELF-CHECK before finalising output:
-  Verify that every image assigned to Bedrooms shows a bed.
-  Verify that every image assigned to Bathrooms shows bathroom fixtures.
-  Verify that every image assigned to Pool shows a pool.
-  If any image fails its hard rule → reassign to the correct section or exclude.
-"""
-
-# ── Final validation step injected immediately before JSON output ─────────────
-# Placed at the end of both prompts so it fires AFTER section assignment.
-# Distinct from _CLASSIFICATION_RULES (which governs initial assignment);
-# this step forces active correction of any violations before returning output.
-_FINAL_VALIDATION_STEP = """\
-FINAL VALIDATION STEP (MANDATORY — execute before returning output):
-
-After assigning all images to sections, scan every section and validate:
-
-  Bedrooms:
-    Every image MUST contain a clearly visible bed.
-    If any image does not contain a bed:
-      → Change its curated_section to null and role to "exclude", reason="failed_bedroom_validation".
-      → REPLACE it with the next-best unassigned image that does show a bed, if one exists.
-      → If no valid replacement exists, return fewer images for this section.
-
-  Bathrooms:
-    Every image MUST contain a bathroom fixture: sink/vanity, toilet, shower, or bathtub.
-    A standalone sink in a wet bar, kitchenette, or kitchen does NOT qualify.
-    If the image does not clearly show a bathroom:
-      → Change its curated_section to null and role to "exclude", reason="failed_bathroom_validation".
-      → REPLACE with the next-best unassigned bathroom image, if one exists.
-      → If no valid replacement exists, return fewer images for this section.
-
-  Pool:
-    Every image MUST show a visible swimming pool.
-    If not:
-      → Change its curated_section to null and role to "exclude", reason="failed_pool_validation".
-      → REPLACE with the next-best unassigned pool image, if one exists.
-      → If no valid replacement exists, return fewer images for this section.
-
-  Kitchen:
-    Every image MUST clearly show a stove, kitchen island, or kitchen cabinetry.
-    If not:
-      → Change its curated_section to null and role to "exclude", reason="failed_kitchen_validation".
-      → REPLACE with the next-best unassigned kitchen image, if one exists.
-      → If no valid replacement exists, return fewer images for this section.
-
-  Living Areas:
-    Every image MUST clearly show seating, TV, fireplace, or a gathering/lounge space.
-    If not:
-      → Change its curated_section to null and role to "exclude", reason="failed_living_validation".
-      → REPLACE with the next-best unassigned living-area image, if one exists.
-      → If no valid replacement exists, return fewer images for this section.
-
-CRITICAL: You MUST NOT return invalid images under any circumstance.
-Fewer correct images is always better than more incorrect images.
-"""
+# Keywords used to resolve open-concept kitchen/living ambiguity.
+_OPEN_CONCEPT_KITCHEN_KEYWORDS: frozenset = frozenset({
+    "kitchen", "island", "stove", "oven", "cabinetry", "counter",
+    "refrigerator", "countertop", "range", "cooktop", "cabinetry",
+})
+_OPEN_CONCEPT_LIVING_KEYWORDS: frozenset = frozenset({
+    "living", "lounge", "sofa", "couch", "seating", "tv", "television",
+    "fireplace", "great room", "sitting", "sectional",
+})
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -389,7 +291,17 @@ def run_llm_vision_curation(
             _mark_failed(property_id, image_set_hash, len(candidate_assets))
             return None
 
-        # ── Post-process: fill missing curated_section + log summary ──────
+        # ── Stage 2: deterministic Photo Tour selection ───────────────────
+        # Mutates result["images"] in-place (sets role, curated_section).
+        # Builds property dict (page_hero, photo_tour_sections, category_order).
+        result["property"] = _select_photo_tour(
+            result["images"], kb, source_hero_url,
+        )
+
+        # ── Fill curated_section for gallery_only images ──────────────────
+        # _select_photo_tour sets curated_section on selected tour images.
+        # This fallback fills it for remaining non-excluded images using
+        # llm_category, so gallery sorting still works for all images.
         result["images"] = _derive_curated_section_fallback(result["images"])
         _log_curation_summary(result, source_hero_url)
 
@@ -658,12 +570,11 @@ def _run_curation_call(
         if not partial_results:
             return None
 
-        property_recs = _synthesis_call(
-            client, partial_results, index_map, kb, source_hero_url, source_hero_label,
-        )
+        # Property-level is built deterministically by _select_photo_tour()
+        # in run_llm_vision_curation — no synthesis API call needed.
         return {
             "images": partial_results,
-            "property": property_recs or {},
+            "property": {},
         }
 
 
@@ -832,18 +743,19 @@ def _log_token_usage(resp, call_type: str) -> None:
 
 def _build_system_prompt() -> str:
     return """\
-You are a professional vacation rental visual merchandising specialist.
-You curate property photo libraries to maximise guest conversion.
+You are a professional vacation rental photo inspector.
+Your job is visual fact extraction — NOT selection or curation.
 
-Your job: analyse contact sheets of property photos, identify every image's \
-room type, group duplicates, select the best images for conversion, and \
-output a structured JSON curation.
+For each image on the contact sheets, report what you physically observe.
+Do NOT assign Photo Tour sections, roles, or make selection decisions.
+A separate system will handle selection using your factual output.
 
 Rules:
 - Each contact sheet thumbnail is labelled with a short code (e.g. A01, A02, B03).
-- You will be given the list of labels to analyse.
-- Use the label (e.g. "A01") as the value for "asset_id" in your output — NOT the full URL.
+- You will be given the list of labels to inspect.
+- Use the label (e.g. "A01") as the value for "asset_id" in your output — NOT a URL.
 - Every label in the list MUST appear exactly once in your output.
+- Report only what you can clearly see. Default ambiguous booleans to false.
 - Output ONLY valid JSON — no markdown, no prose, no code fences.
 - Never invent labels; use only the exact codes shown.
 """
@@ -878,73 +790,8 @@ def _build_full_prompt(
     source_hero_label: Optional[str] = None,
     caption_map: Optional[dict] = None,
 ) -> str:
-    """Full prompt: per-image analysis + property-level recommendations."""
-    context = _property_context(kb)
-    schema_example = _schema_example()
-    categories = ", ".join(sorted(_VALID_CATEGORIES))
-    sections_list = "\n".join(
-        f'  - "{s["name"]}": {s["description"]}' for s in CURATED_SECTIONS
-    )
-    section_names = ", ".join(f'"{s["name"]}"' for s in CURATED_SECTIONS)
-
-    hero_instruction = ""
-    if source_hero_url and source_hero_label:
-        hero_instruction = f"""
-Source hero note:
-The image labelled {source_hero_label}* is the current property hero selected by the \
-listing platform. Treat it as the default page_hero unless you identify a clearly superior \
-image elsewhere. If you override it, still include it as "supporting" or "gallery_only" — \
-never exclude it solely because another image is better.
-"""
-
-    captions_block = _build_captions_block(caption_map)
-    labels_list = list(index_map_display.keys())
-
-    return f"""\
-Property context:
-{context}
-{hero_instruction}
-Image labels to analyse (use these exact codes as "asset_id" in your output):
-{json.dumps(labels_list)}
-{captions_block}
-Task:
-1. For EVERY label in the list above, produce one entry in "images".
-   Use the label (e.g. "A01") as the value for asset_id — NOT a URL.
-2. Identify the correct room/space category (llm_category).
-3. Group images showing the same room from different angles — assign the same
-   duplicate_group string (e.g. "dg_kitchen_1"). Use null if unique.
-4. Within each duplicate group, mark exactly one image is_primary_in_group=true
-   (best angle/quality). All others: false.
-5. Assign rank_within_category: 1 = best in that category, 2 = second best, etc.
-6. Assign role:
-   - "hero"         → the single best overall page hero (exactly one image)
-   - "supporting"   → good image worth featuring in the photo tour
-   - "gallery_only" → acceptable for full gallery but not photo tour
-   - "exclude"      → blurry, dark, duplicate inferior angle, or irrelevant
-7. For "exclude" images, set reason briefly (e.g. "blurry", "dark", "duplicate_inferior").
-8. Write a concise alt text for every non-excluded image.
-9. Assign curated_section to every non-excluded image. Available sections:
-{sections_list}
-   Set curated_section to null for excluded images.
-   If bedroom_count is in the layout, aim to represent up to that many distinct bedrooms.
-   If bathroom_count is in the layout, aim to represent up to that many distinct bathrooms.
-
-{_CLASSIFICATION_RULES}
-10. In "property", choose the best overall page_hero (label, e.g. "A01").
-11. Build photo_tour_sections using ONLY these section names: {section_names}
-    Each section: 1 hero label + up to 2 supporting labels. Only include sections with qualifying images.
-    For Bedrooms and Bathrooms: choose supporting images from DIFFERENT rooms/angles.
-12. Set category_order (section names ordered best-first for this property).
-13. Infer vibe (1 sentence describing the feeling this property evokes).
-14. Set merchandising_strategy.prioritize and deprioritize.
-
-Valid llm_category values: {categories}
-
-{_FINAL_VALIDATION_STEP}
-Return ONLY valid JSON — no markdown, no prose, no code fences:
-
-{schema_example}
-"""
+    """Inspection prompt: visual fact extraction only. No role/section selection."""
+    return _build_inspection_prompt(index_map_display, kb, source_hero_label, caption_map)
 
 
 def _build_per_image_only_prompt(
@@ -953,105 +800,73 @@ def _build_per_image_only_prompt(
     kb: dict,
     caption_map: Optional[dict] = None,
 ) -> str:
-    """Prompt for batch call — per-image analysis only, no property-level."""
-    context = _property_context(kb)
-    categories = ", ".join(sorted(_VALID_CATEGORIES))
-    sections_list = "\n".join(
-        f'  - "{s["name"]}": {s["description"]}' for s in CURATED_SECTIONS
-    )
-
-    captions_block = _build_captions_block(caption_map)
-    labels_list = list(batch_index_display.keys())
-
-    return f"""\
-Property context:
-{context}
-
-Image labels to analyse (use these exact codes as "asset_id"):
-{json.dumps(labels_list)}
-{captions_block}
-
-Task: For EVERY label above, produce one entry in "images".
-Use the label (e.g. "A01") as asset_id — NOT a URL.
-Analyse room type, duplicates, quality, and conversion value.
-Assign curated_section to every non-excluded image. Available sections:
-{sections_list}
-Set curated_section to null for excluded images.
-
-{_CLASSIFICATION_RULES}
-
-Valid llm_category values: {categories}
-Valid roles: hero, supporting, gallery_only, exclude
-
-{_FINAL_VALIDATION_STEP}
-Return ONLY valid JSON:
-{{
-  "images": [
-    {{
-      "asset_id": "A01",
-      "llm_category": "kitchen",
-      "curated_section": "Kitchen",
-      "room_subtype": "island_kitchen",
-      "duplicate_group": "dg_kitchen_1",
-      "is_primary_in_group": true,
-      "rank_within_category": 1,
-      "role": "supporting",
-      "reason": null,
-      "alt": "Open-plan kitchen with marble island"
-    }}
-  ]
-}}
-"""
+    """Inspection prompt for batch call — identical task to _build_full_prompt."""
+    return _build_inspection_prompt(batch_index_display, kb, None, caption_map)
 
 
-def _build_synthesis_prompt(
-    compact_summary: list[dict],
+def _build_inspection_prompt(
+    index_map_display: dict[str, str],
     kb: dict,
-    source_hero_label: Optional[str] = None,
+    source_hero_label: Optional[str],
+    caption_map: Optional[dict],
 ) -> str:
     """
-    Prompt for text-only synthesis call.
-    compact_summary: [{label, role, curated_section, llm_category}, ...] — non-excluded only.
+    Shared inspection-only prompt used by both single and batch call paths.
+
+    Asks the LLM for factual visual attributes per image — no role, no section
+    assignment, no Photo Tour selection. Those are handled deterministically
+    by _select_photo_tour() after this call returns.
     """
     context = _property_context(kb)
-    section_names = ", ".join(f'"{s["name"]}"' for s in CURATED_SECTIONS)
+    categories = ", ".join(sorted(_VALID_CATEGORIES))
+    captions_block = _build_captions_block(caption_map)
+    labels_list = list(index_map_display.keys())
+    schema_example = _schema_example()
 
-    hero_instruction = ""
+    hero_note = ""
     if source_hero_label:
-        hero_instruction = f"""
-Source hero note: Label {source_hero_label}* is the current listing platform hero. \
-Use it as page_hero unless a clearly superior image exists. If you override it, \
-ensure it still appears as supporting or gallery_only.
-"""
+        hero_note = (
+            f"\nContext: image {source_hero_label}* is the current listing platform hero. "
+            "Note this when reporting quality_score and visual_summary.\n"
+        )
 
     return f"""\
 Property context:
 {context}
-{hero_instruction}
-Per-image curation summary (label, role, curated_section for non-excluded images):
-{json.dumps(compact_summary)}
+{hero_note}
+Image labels to inspect (use these exact codes as "asset_id"):
+{json.dumps(labels_list)}
+{captions_block}
+Task: For EVERY label above, produce one entry in "images".
+Use the label (e.g. "A01") as asset_id — NOT a URL.
 
-Task: Produce property-level recommendations.
-Use ONLY labels from the summary above (e.g. "A01") in page_hero, hero, and supporting.
-Use ONLY these section names: {section_names}
+For each image report the following factual attributes:
 
-Return ONLY valid JSON:
-{{
-  "page_hero": "A01",
-  "photo_tour_sections": [
-    {{
-      "section": "Exterior",
-      "hero": "A01",
-      "supporting": ["A02", "A03"]
-    }}
-  ],
-  "category_order": ["Exterior", "Pool", "Living Areas"],
-  "vibe": "<one sentence>",
-  "merchandising_strategy": {{
-    "prioritize": ["<what to lead with>"],
-    "deprioritize": ["<what to minimise>"]
-  }}
-}}
+  asset_id            — the label code (e.g. "A01")
+  has_bed             — true if a clearly visible bed is present
+  has_bathroom_fixture — true if sink/vanity, toilet, shower, or bathtub is visible
+  has_pool            — true if a swimming pool is visible (not just a hot tub)
+  has_kitchen         — true if stove, kitchen island, or kitchen cabinetry is visible
+  has_living_area     — true if couches, seating, TV, fireplace, or lounge is visible
+  has_exterior        — true if the outside structure of the home is the primary subject
+  has_hot_tub         — true if a standalone hot tub/spa is visible (without a pool)
+  has_outdoor_lounge  — true if outdoor seating area is the primary subject (no pool)
+  has_outdoor_kitchen_grill — true if outdoor grill or outdoor kitchen is visible
+  likely_room_type    — single best guess (e.g. "master_bedroom", "kitchen", "pool_deck")
+  visual_summary      — one sentence describing what is physically in the image
+  quality_score       — 0.0–1.0 (technical quality: sharpness, exposure, composition)
+  exclude             — true if blurry, dark, thumbnail, irrelevant, or utility shot
+  exclude_reason      — brief string if exclude=true (e.g. "blurry", "dark"), else null
+  duplicate_group     — same string for images showing the same space from similar angles
+                        (e.g. "dg_bedroom_1"); null if unique
+  is_best_in_duplicate_group — true for the best image within its duplicate group
+  alt                 — concise descriptive alt text (≤80 chars); empty string if excluded
+  llm_category        — GCV-compatible category: {categories}
+  rank_within_category — rough quality rank within llm_category (1=best); 99 if excluded
+
+Return ONLY valid JSON — no markdown, no prose, no code fences:
+
+{schema_example}
 """
 
 
@@ -1089,33 +904,27 @@ def _schema_example() -> str:
   "images": [
     {
       "asset_id": "A01",
-      "llm_category": "kitchen",
-      "curated_section": "Kitchen",
-      "room_subtype": "island_kitchen",
+      "has_bed": false,
+      "has_bathroom_fixture": false,
+      "has_pool": false,
+      "has_kitchen": true,
+      "has_living_area": false,
+      "has_exterior": false,
+      "has_hot_tub": false,
+      "has_outdoor_lounge": false,
+      "has_outdoor_kitchen_grill": false,
+      "likely_room_type": "kitchen",
+      "visual_summary": "Open-plan kitchen with marble island and bar stools",
+      "quality_score": 0.88,
+      "exclude": false,
+      "exclude_reason": null,
       "duplicate_group": "dg_kitchen_1",
-      "is_primary_in_group": true,
-      "rank_within_category": 1,
-      "role": "supporting",
-      "reason": null,
-      "alt": "Open-plan kitchen with marble island and ocean views"
+      "is_best_in_duplicate_group": true,
+      "alt": "Open-plan kitchen with marble island and ocean views",
+      "llm_category": "kitchen",
+      "rank_within_category": 1
     }
-  ],
-  "property": {
-    "page_hero": "A01",
-    "photo_tour_sections": [
-      {
-        "section": "Kitchen",
-        "hero": "A01",
-        "supporting": ["A02", "A03"]
-      }
-    ],
-    "category_order": ["Exterior", "Pool", "Living Areas", "Kitchen", "Bedrooms", "Bathrooms"],
-    "vibe": "A light-filled coastal retreat with sweeping ocean views.",
-    "merchandising_strategy": {
-      "prioritize": ["ocean view shots", "pool at golden hour"],
-      "deprioritize": ["bathroom closeups", "utility areas"]
-    }
-  }
+  ]
 }"""
 
 
@@ -1123,8 +932,11 @@ def _schema_example() -> str:
 
 def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
     """
-    Extract JSON from raw LLM output, validate structure, fill defaults
-    for invalid/missing fields. Returns {images, property} or None.
+    Extract and validate Stage 1 inspection JSON from LLM output.
+
+    Parses boolean has_* flags, clamps quality_score, remaps labels → URLs.
+    Does NOT parse role or curated_section — those are set by _select_photo_tour().
+    Returns {images: [...], property: {}} or None on structural failure.
     """
     parsed = _extract_json(raw)
     if not parsed or not isinstance(parsed, dict):
@@ -1141,6 +953,23 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
     label_to_url: dict[str, str] = {k.rstrip("*"): v for k, v in index_map.items()}
     valid_images: list[dict] = []
 
+    def _bool(val, default: bool = False) -> bool:
+        """Coerce LLM boolean output safely — handles True, "true", "yes", 1, etc."""
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (int, float)):
+            return bool(val)
+        if isinstance(val, str):
+            return val.strip().lower() in ("true", "yes", "1")
+        return default
+
+    def _clamp_score(val) -> float:
+        """Clamp quality_score to [0.0, 1.0]."""
+        try:
+            return max(0.0, min(1.0, float(val)))
+        except (TypeError, ValueError):
+            return 0.5   # neutral default
+
     for img in images_raw:
         if not isinstance(img, dict):
             continue
@@ -1149,65 +978,71 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
         if asset_id_raw in label_to_url:
             asset_id = label_to_url[asset_id_raw]
         elif asset_id_raw in known_asset_ids:
-            asset_id = asset_id_raw  # already a URL
+            asset_id = asset_id_raw
         else:
-            # LLM invented a value — discard
-            continue
+            continue   # LLM invented a value — discard
+
         category = img.get("llm_category") or "uncategorised"
         if category not in _VALID_CATEGORIES:
             category = "uncategorised"
-        role = img.get("role") or "gallery_only"
-        if role not in _VALID_ROLES:
-            role = "gallery_only"
+
         rank = img.get("rank_within_category")
         try:
             rank = max(1, int(rank)) if rank is not None else 99
         except (TypeError, ValueError):
             rank = 99
 
-        curated_section = img.get("curated_section") or None
-        if curated_section is not None and curated_section not in _CURATED_SECTION_NAMES_SET:
-            logger.debug(
-                "[LLM Curator] Invalid curated_section %r for %s — clearing",
-                curated_section, asset_id[-30:],
-            )
-            curated_section = None
+        is_best = _bool(img.get("is_best_in_duplicate_group"), default=True)
 
         valid_images.append({
-            "asset_id":            asset_id,
-            "llm_category":        category,
-            "curated_section":     curated_section,
-            "room_subtype":        img.get("room_subtype") or None,
-            "duplicate_group":     img.get("duplicate_group") or None,
-            "is_primary_in_group": bool(img.get("is_primary_in_group", True)),
-            "rank_within_category": rank,
-            "role":                role,
-            "reason":              img.get("reason") or None,
-            "alt":                 str(img.get("alt") or "")[:80],
+            # ── Inspection facts (LLM-authored) ──────────────────────────
+            "has_bed":                  _bool(img.get("has_bed")),
+            "has_bathroom_fixture":     _bool(img.get("has_bathroom_fixture")),
+            "has_pool":                 _bool(img.get("has_pool")),
+            "has_kitchen":              _bool(img.get("has_kitchen")),
+            "has_living_area":          _bool(img.get("has_living_area")),
+            "has_exterior":             _bool(img.get("has_exterior")),
+            "has_hot_tub":              _bool(img.get("has_hot_tub")),
+            "has_outdoor_lounge":       _bool(img.get("has_outdoor_lounge")),
+            "has_outdoor_kitchen_grill": _bool(img.get("has_outdoor_kitchen_grill")),
+            "likely_room_type":         str(img.get("likely_room_type") or "")[:60],
+            "visual_summary":           str(img.get("visual_summary") or "")[:200],
+            "quality_score":            _clamp_score(img.get("quality_score", 0.5)),
+            "exclude":                  _bool(img.get("exclude")),
+            "exclude_reason":           str(img.get("exclude_reason") or "") or None,
+            "duplicate_group":          img.get("duplicate_group") or None,
+            "is_best_in_duplicate_group": is_best,
+            # ── Compatibility fields (LLM-authored, selector may overwrite) ──
+            "asset_id":                 asset_id,
+            "alt":                      str(img.get("alt") or "")[:80],
+            "llm_category":             category,
+            "rank_within_category":     rank,
+            # ── Backward-compat alias ─────────────────────────────────────
+            "is_primary_in_group":      is_best,
+            # ── Set by _select_photo_tour() — placeholders only ───────────
+            "role":                     "gallery_only",
+            "curated_section":          None,
         })
 
-    # Ensure every asset_id in the index has an entry (fill missing with defaults)
+    # Fill missing assets with conservative defaults
     seen_ids = {img["asset_id"] for img in valid_images}
     for label, asset_id in index_map.items():
         if asset_id not in seen_ids:
             valid_images.append({
-                "asset_id":            asset_id,
-                "llm_category":        "uncategorised",
-                "curated_section":     None,   # filled by _derive_curated_section_fallback
-                "room_subtype":        None,
-                "duplicate_group":     None,
-                "is_primary_in_group": True,
-                "rank_within_category": 99,
-                "role":                "gallery_only",
-                "reason":              "not_analysed",
-                "alt":                 "",
+                "has_bed": False, "has_bathroom_fixture": False, "has_pool": False,
+                "has_kitchen": False, "has_living_area": False, "has_exterior": False,
+                "has_hot_tub": False, "has_outdoor_lounge": False,
+                "has_outdoor_kitchen_grill": False,
+                "likely_room_type": "", "visual_summary": "",
+                "quality_score": 0.5, "exclude": False, "exclude_reason": None,
+                "duplicate_group": None, "is_best_in_duplicate_group": True,
+                "asset_id": asset_id, "alt": "", "llm_category": "uncategorised",
+                "rank_within_category": 99, "is_primary_in_group": True,
+                "role": "gallery_only", "curated_section": None,
             })
 
-    # Validate property-level (LLM may have used labels or URLs in page_hero/supporting)
-    property_raw = parsed.get("property") or {}
-    property_recs = _validate_property_recs(property_raw, known_asset_ids, label_to_url)
-
-    return {"images": valid_images, "property": property_recs}
+    # Property dict is empty — built deterministically by _select_photo_tour()
+    return {"images": valid_images, "property": {}}
 
 
 def _validate_property_recs(
@@ -1272,15 +1107,207 @@ def _validate_property_recs(
     }
 
 
+# ── Stage 2: deterministic Photo Tour selector ────────────────────────────────
+
+def _open_concept_primary(img: dict) -> str:
+    """
+    For open-concept images with both has_kitchen and has_living_area true,
+    determine the primary section by keyword scoring across text fields.
+    """
+    text = " ".join([
+        str(img.get("likely_room_type") or ""),
+        str(img.get("llm_category") or ""),
+        str(img.get("visual_summary") or ""),
+    ]).lower()
+    kitchen_score = sum(1 for kw in _OPEN_CONCEPT_KITCHEN_KEYWORDS if kw in text)
+    living_score  = sum(1 for kw in _OPEN_CONCEPT_LIVING_KEYWORDS  if kw in text)
+    return "Kitchen" if kitchen_score > living_score else "Living Areas"
+
+
+def _is_eligible(img: dict, section: str) -> bool:
+    """Return True if img passes the hard eligibility rule for section."""
+    if section == "Exterior":
+        return bool(img.get("has_exterior")) and not img.get("has_pool")
+    if section == "Pool":
+        return bool(img.get("has_pool"))
+    if section == "Living Areas":
+        if img.get("has_living_area") and img.get("has_kitchen"):
+            return _open_concept_primary(img) == "Living Areas"
+        return bool(img.get("has_living_area"))
+    if section == "Kitchen":
+        if img.get("has_kitchen") and img.get("has_living_area"):
+            return _open_concept_primary(img) == "Kitchen"
+        return bool(img.get("has_kitchen"))
+    if section == "Bedrooms":
+        return bool(img.get("has_bed"))
+    if section == "Bathrooms":
+        return bool(img.get("has_bathroom_fixture"))
+    if section == "Extras":
+        return (
+            bool(img.get("has_hot_tub")) or
+            bool(img.get("has_outdoor_lounge")) or
+            bool(img.get("has_outdoor_kitchen_grill"))
+        )
+    return False
+
+
+def _select_photo_tour(
+    images: list[dict],
+    kb: dict,
+    source_hero_url: Optional[str] = None,
+) -> dict:
+    """
+    Stage 2: deterministic Photo Tour selector.
+
+    Mutates each image dict in-place, setting:
+      - role: "exclude" | "hero" | "supporting" | "gallery_only"
+      - curated_section: section name or None
+      - rank_within_category: re-ranked within selected section
+
+    Returns property dict: {page_hero, photo_tour_sections, category_order}.
+    Agent 5 consumes this dict unchanged.
+    """
+    # ── Step 1: mark LLM-excluded images ─────────────────────────────────
+    for img in images:
+        if img.get("exclude"):
+            img["role"] = "exclude"
+            img["curated_section"] = None
+
+    candidates = [img for img in images if img.get("role") != "exclude"]
+
+    # Default all candidates to gallery_only; selector upgrades to supporting/hero
+    for img in candidates:
+        img["role"] = "gallery_only"
+        img["curated_section"] = None
+
+    # ── Step 2: section selection loop ───────────────────────────────────
+    used_ids: set = set()
+    photo_tour_sections: list[dict] = []
+    tour_ids: set = set()   # all ids selected into any section
+
+    for section_name in CURATED_SECTION_NAMES:
+        eligible = [
+            img for img in candidates
+            if img["asset_id"] not in used_ids
+            and _is_eligible(img, section_name)
+        ]
+        # Sort: group winner first, then quality desc, then rank asc
+        eligible.sort(key=lambda i: (
+            0 if i.get("is_best_in_duplicate_group") else 1,
+            -(i.get("quality_score") or 0.0),
+            i.get("rank_within_category") or 99,
+        ))
+
+        selected: list[dict] = []
+        seen_groups: set = set()
+        for img in eligible:
+            dg = img.get("duplicate_group")
+            if dg and dg in seen_groups:
+                continue   # one representative per duplicate group per section
+            selected.append(img)
+            if dg:
+                seen_groups.add(dg)
+            if len(selected) == _SECTION_MAX_IMAGES.get(section_name, 3):
+                break
+
+        if not selected:
+            continue   # omit sections with no valid images
+
+        for img in selected:
+            used_ids.add(img["asset_id"])
+            tour_ids.add(img["asset_id"])
+            img["curated_section"] = section_name
+
+        photo_tour_sections.append({
+            "section":    section_name,
+            "hero":       selected[0]["asset_id"],
+            "supporting": [i["asset_id"] for i in selected[1:3]],
+        })
+
+    # ── Step 3: pick page_hero ────────────────────────────────────────────
+    # Prefer exterior/pool tour images with high quality; fall back to best overall.
+    hero_pool = [
+        img for img in candidates
+        if img["asset_id"] in tour_ids
+        and (img.get("has_exterior") or img.get("has_pool"))
+        and (img.get("quality_score") or 0) >= 0.6
+    ]
+    if not hero_pool:
+        hero_pool = [img for img in candidates if img["asset_id"] in tour_ids]
+    hero_pool.sort(key=lambda i: (
+        0 if i.get("is_best_in_duplicate_group") else 1,
+        -(i.get("quality_score") or 0.0),
+    ))
+
+    page_hero_id = ""
+    if hero_pool:
+        page_hero_id = hero_pool[0]["asset_id"]
+
+    # Source hero preference: if GCV hero is a tour image with reasonable quality,
+    # prefer it over the algorithmically chosen hero (platform knows the property).
+    if source_hero_url and source_hero_url in tour_ids:
+        src = next((i for i in candidates if i["asset_id"] == source_hero_url), None)
+        chosen = next((i for i in candidates if i["asset_id"] == page_hero_id), None)
+        if src and chosen:
+            src_q = src.get("quality_score") or 0
+            chosen_q = chosen.get("quality_score") or 0
+            if src_q >= chosen_q * 0.8:   # within 20% of chosen — prefer platform hero
+                page_hero_id = source_hero_url
+
+    # ── Step 4: assign final roles ────────────────────────────────────────
+    for img in candidates:
+        aid = img["asset_id"]
+        if aid == page_hero_id:
+            img["role"] = "hero"
+        elif aid in tour_ids:
+            img["role"] = "supporting"
+        # else remains "gallery_only"
+
+    # ── Step 5: re-rank within each section ───────────────────────────────
+    by_section: dict[str, list] = {}
+    for img in candidates:
+        sec = img.get("curated_section")
+        if sec:
+            by_section.setdefault(sec, []).append(img)
+    for sec_images in by_section.values():
+        sec_images.sort(key=lambda i: (
+            0 if i["role"] == "hero" else 1 if i["role"] == "supporting" else 2,
+            -(i.get("quality_score") or 0.0),
+        ))
+        for rank, img in enumerate(sec_images, start=1):
+            img["rank_within_category"] = rank
+            img["is_primary_in_group"] = img.get("is_best_in_duplicate_group", True)
+
+    category_order = [s["section"] for s in photo_tour_sections]
+
+    # ── Logging ───────────────────────────────────────────────────────────
+    logger.info(
+        "[LLM Curator] Stage 2 selector: %d sections built, %d tour images, "
+        "page_hero=%s",
+        len(photo_tour_sections), len(tour_ids),
+        page_hero_id[-40:] if page_hero_id else "none",
+    )
+    for sec in photo_tour_sections:
+        n_supporting = len(sec["supporting"])
+        logger.info(
+            "[LLM Curator]   %-14s hero + %d supporting",
+            sec["section"] + ":", n_supporting,
+        )
+
+    return {
+        "page_hero":           page_hero_id,
+        "photo_tour_sections": photo_tour_sections,
+        "category_order":      category_order,
+    }
+
+
 def _derive_curated_section_fallback(images: list[dict]) -> list[dict]:
     """
-    Fill curated_section=None for non-excluded images using CURATED_SECTIONS gcv_categories.
+    Fill curated_section for gallery_only images not selected by _select_photo_tour.
 
-    Limitations (by design):
-      - bathroom → "Bathrooms" (cannot distinguish Primary Bathroom without vision context)
-      - master_bedroom → "Bedrooms" (cannot distinguish Primary Bedroom without vision context)
-      - Images the LLM analysed and explicitly assigned a section are never overwritten.
-      - Excluded images always get curated_section=None.
+    Uses llm_category → CURATED_SECTIONS gcv_categories mapping so these images
+    sort correctly in the flat gallery grid. Images already assigned a section
+    (photo tour selections) are never overwritten. Excluded images always get None.
     """
     # Build gcv_category → first matching section name (first-match wins)
     gcv_to_section: dict[str, str] = {}
@@ -1295,7 +1322,7 @@ def _derive_curated_section_fallback(images: list[dict]) -> list[dict]:
             img["curated_section"] = None
             continue
         if img.get("curated_section"):
-            continue   # LLM already assigned — do not overwrite
+            continue   # already assigned by _select_photo_tour — do not overwrite
         derived = gcv_to_section.get(img.get("llm_category") or "")
         img["curated_section"] = derived
         if derived:
