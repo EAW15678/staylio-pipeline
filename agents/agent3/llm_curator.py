@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v2_no_primary_flat_gallery"
+_CURATION_VERSION = "curation_v3_strict_classification_rules"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -182,6 +182,55 @@ SELF-CHECK before finalising output:
   Verify that every image assigned to Bathrooms shows bathroom fixtures.
   Verify that every image assigned to Pool shows a pool.
   If any image fails its hard rule → reassign to the correct section or exclude.
+"""
+
+# ── Final validation step injected immediately before JSON output ─────────────
+# Placed at the end of both prompts so it fires AFTER section assignment.
+# Distinct from _CLASSIFICATION_RULES (which governs initial assignment);
+# this step forces active correction of any violations before returning output.
+_FINAL_VALIDATION_STEP = """\
+FINAL VALIDATION STEP (MANDATORY — execute before returning output):
+
+After assigning all images to sections, scan every section and validate:
+
+  Bedrooms:
+    Every image MUST contain a clearly visible bed.
+    If any image does not contain a bed:
+      → Change its curated_section to null and role to "exclude", reason="failed_bedroom_validation".
+      → REPLACE it with the next-best unassigned image that does show a bed, if one exists.
+      → If no valid replacement exists, return fewer images for this section.
+
+  Bathrooms:
+    Every image MUST contain a bathroom fixture: sink/vanity, toilet, shower, or bathtub.
+    A standalone sink in a wet bar, kitchenette, or kitchen does NOT qualify.
+    If the image does not clearly show a bathroom:
+      → Change its curated_section to null and role to "exclude", reason="failed_bathroom_validation".
+      → REPLACE with the next-best unassigned bathroom image, if one exists.
+      → If no valid replacement exists, return fewer images for this section.
+
+  Pool:
+    Every image MUST show a visible swimming pool.
+    If not:
+      → Change its curated_section to null and role to "exclude", reason="failed_pool_validation".
+      → REPLACE with the next-best unassigned pool image, if one exists.
+      → If no valid replacement exists, return fewer images for this section.
+
+  Kitchen:
+    Every image MUST clearly show a stove, kitchen island, or kitchen cabinetry.
+    If not:
+      → Change its curated_section to null and role to "exclude", reason="failed_kitchen_validation".
+      → REPLACE with the next-best unassigned kitchen image, if one exists.
+      → If no valid replacement exists, return fewer images for this section.
+
+  Living Areas:
+    Every image MUST clearly show seating, TV, fireplace, or a gathering/lounge space.
+    If not:
+      → Change its curated_section to null and role to "exclude", reason="failed_living_validation".
+      → REPLACE with the next-best unassigned living-area image, if one exists.
+      → If no valid replacement exists, return fewer images for this section.
+
+CRITICAL: You MUST NOT return invalid images under any circumstance.
+Fewer correct images is always better than more incorrect images.
 """
 
 
@@ -891,6 +940,7 @@ Task:
 
 Valid llm_category values: {categories}
 
+{_FINAL_VALIDATION_STEP}
 Return ONLY valid JSON — no markdown, no prose, no code fences:
 
 {schema_example}
@@ -933,6 +983,7 @@ Set curated_section to null for excluded images.
 Valid llm_category values: {categories}
 Valid roles: hero, supporting, gallery_only, exclude
 
+{_FINAL_VALIDATION_STEP}
 Return ONLY valid JSON:
 {{
   "images": [
