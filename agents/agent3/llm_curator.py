@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v5_inspection_12img_batches"
+_CURATION_VERSION = "curation_v6_sprint1_visibility_scoring"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -123,6 +123,65 @@ _SECTION_MAX_IMAGES: dict[str, int] = {
     "Bedrooms":     4,
     "Bathrooms":    3,
     "Extras":       2,
+}
+
+# Section selection thresholds.
+# Score is in [0.0, 1.0] — see _section_score() for weighting.
+_SECTION_PRIMARY_THRESHOLD  = 0.50   # first pass: strong flag or keyword evidence
+_SECTION_FALLBACK_THRESHOLD = 0.25   # second pass: text-only evidence (underfilled sections)
+_SECTION_MIN_SCORE          = 0.10   # absolute floor — zero-score images never selected
+
+# Per-section scoring signals.
+# flags (weight 0.50): any has_* boolean hit.
+# type_kw (weight 0.25): keyword in likely_room_type or llm_category.
+# text_kw (weight 0.25): keyword in visual_summary or llm_category.
+_SECTION_SCORE_SIGNALS: dict[str, dict] = {
+    "Exterior": {
+        "flags":   ["has_exterior"],
+        "type_kw": frozenset({"exterior", "front", "rear", "facade", "entrance",
+                               "driveway", "landscaping", "view", "yard", "porch"}),
+        "text_kw": frozenset({"exterior", "facade", "front", "rear", "driveway",
+                               "entrance", "yard", "porch", "balcony", "rooftop"}),
+    },
+    "Pool": {
+        "flags":   ["has_pool"],
+        "type_kw": frozenset({"pool", "swimming pool", "lap pool"}),
+        "text_kw": frozenset({"pool", "swimming pool", "lap pool", "infinity pool"}),
+    },
+    "Living Areas": {
+        "flags":   ["has_living_area"],
+        "type_kw": frozenset({"living", "lounge", "sitting", "great room", "family room",
+                               "game", "entertainment", "den"}),
+        "text_kw": frozenset({"sofa", "couch", "tv", "television", "fireplace", "seating",
+                               "sectional", "living room", "lounge", "sitting area"}),
+    },
+    "Kitchen": {
+        "flags":   ["has_kitchen"],
+        "type_kw": frozenset({"kitchen", "dining", "kitchenette"}),
+        "text_kw": frozenset({"island", "stove", "oven", "range", "cabinetry", "refrigerator",
+                               "countertop", "cooktop", "kitchen", "dining table"}),
+    },
+    "Bedrooms": {
+        "flags":   ["has_bed"],
+        "type_kw": frozenset({"bedroom", "master", "bunk", "suite", "sleeping", "guest room",
+                               "primary bedroom", "loft"}),
+        "text_kw": frozenset({"bed", "bunk", "king", "queen", "twin", "headboard",
+                               "pillow", "nightstand", "mattress", "sleeping"}),
+    },
+    "Bathrooms": {
+        "flags":   ["has_bathroom_fixture"],
+        "type_kw": frozenset({"bathroom", "bath", "vanity", "powder room", "ensuite"}),
+        "text_kw": frozenset({"shower", "tub", "toilet", "vanity", "sink",
+                               "soaking", "bathtub", "freestanding tub"}),
+    },
+    "Extras": {
+        "flags":   ["has_hot_tub", "has_outdoor_lounge", "has_outdoor_kitchen_grill"],
+        "type_kw": frozenset({"hot tub", "spa", "deck", "patio", "game room", "gym",
+                               "office", "garage", "laundry", "balcony", "outdoor"}),
+        "text_kw": frozenset({"hot tub", "deck", "balcony", "grill", "elevator",
+                               "beach gear", "game", "parking", "gym", "office", "bbq",
+                               "fire pit", "sauna"}),
+    },
 }
 
 # Keywords used to resolve open-concept kitchen/living ambiguity.
@@ -1009,6 +1068,7 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
 
         is_best = _bool(img.get("is_best_in_duplicate_group"), default=True)
 
+        llm_exclude = _bool(img.get("exclude"))
         valid_images.append({
             # ── Inspection facts (LLM-authored) ──────────────────────────
             "has_bed":                  _bool(img.get("has_bed")),
@@ -1023,10 +1083,18 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "likely_room_type":         str(img.get("likely_room_type") or "")[:30],
             "visual_summary":           str(img.get("visual_summary") or "")[:60],
             "quality_score":            _clamp_score(img.get("quality_score", 0.5)),
-            "exclude":                  _bool(img.get("exclude")),
+            "exclude":                  llm_exclude,
             "exclude_reason":           str(img["exclude_reason"])[:100] if img.get("exclude_reason") else None,
             "duplicate_group":          img.get("duplicate_group") or None,
             "is_best_in_duplicate_group": is_best,
+            # ── Visibility / eligibility (Sprint 1) ──────────────────────
+            # gallery_visible: always True from LLM path — LLM exclude does NOT
+            #   hide images from All Photos.  Only deterministic checks (e.g. missing
+            #   URL, corrupt file) set this False.
+            "gallery_visible":          True,
+            # tour_eligible: False when LLM marks image as technically unusable.
+            #   Gallery still includes the image; Photo Tour selector skips it.
+            "tour_eligible":            not llm_exclude,
             # ── Compatibility fields (LLM-authored, selector may overwrite) ──
             "asset_id":                 asset_id,
             "alt":                      str(img.get("alt") or "")[:80],
@@ -1051,6 +1119,7 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
                 "likely_room_type": "", "visual_summary": "",
                 "quality_score": 0.5, "exclude": False, "exclude_reason": None,
                 "duplicate_group": None, "is_best_in_duplicate_group": True,
+                "gallery_visible": True, "tour_eligible": True,
                 "asset_id": asset_id, "alt": "", "llm_category": "uncategorised",
                 "rank_within_category": 99, "is_primary_in_group": True,
                 "role": "gallery_only", "curated_section": None,
@@ -1139,31 +1208,60 @@ def _open_concept_primary(img: dict) -> str:
     return "Kitchen" if kitchen_score > living_score else "Living Areas"
 
 
-def _is_eligible(img: dict, section: str) -> bool:
-    """Return True if img passes the hard eligibility rule for section."""
-    if section == "Exterior":
-        return bool(img.get("has_exterior")) and not img.get("has_pool")
-    if section == "Pool":
-        return bool(img.get("has_pool"))
-    if section == "Living Areas":
-        if img.get("has_living_area") and img.get("has_kitchen"):
-            return _open_concept_primary(img) == "Living Areas"
-        return bool(img.get("has_living_area"))
-    if section == "Kitchen":
+def _section_score(img: dict, section: str) -> float:
+    """
+    Confidence score [0.0–1.0] that img belongs in the given Photo Tour section.
+
+    Three weighted components (any subset can contribute):
+      flags   (0.50) — any has_* boolean signal for this section
+      type_kw (0.25) — keyword match in likely_room_type or llm_category
+      text_kw (0.25) — keyword match in visual_summary or llm_category
+
+    Score = 0.0 only when no signals are present — these images are never selected.
+
+    Special rules:
+      - Exterior: penalised when has_pool=True (pool images belong in Pool).
+      - Kitchen/Living Areas: open-concept disambiguation applies a heavy penalty
+        to the non-primary side when both has_kitchen and has_living_area are True.
+    """
+    signals = _SECTION_SCORE_SIGNALS.get(section)
+    if not signals:
+        return 0.0
+
+    # Flag component: any of the section's boolean flags is True
+    flag_hit = any(img.get(f) for f in signals["flags"])
+
+    # Text fields
+    type_text = (
+        str(img.get("likely_room_type") or "") + " " +
+        str(img.get("llm_category") or "")
+    ).lower()
+    body_text = (
+        str(img.get("visual_summary") or "") + " " +
+        str(img.get("llm_category") or "")
+    ).lower()
+
+    type_hit = any(kw in type_text for kw in signals["type_kw"])
+    text_hit = any(kw in body_text for kw in signals["text_kw"])
+
+    score = (
+        (0.50 if flag_hit else 0.0) +
+        (0.25 if type_hit else 0.0) +
+        (0.25 if text_hit else 0.0)
+    )
+
+    # Exterior: heavily penalise images where the pool is the primary subject
+    if section == "Exterior" and img.get("has_pool"):
+        score *= 0.3
+
+    # Kitchen / Living Areas: open-concept disambiguation
+    if section in ("Kitchen", "Living Areas"):
         if img.get("has_kitchen") and img.get("has_living_area"):
-            return _open_concept_primary(img) == "Kitchen"
-        return bool(img.get("has_kitchen"))
-    if section == "Bedrooms":
-        return bool(img.get("has_bed"))
-    if section == "Bathrooms":
-        return bool(img.get("has_bathroom_fixture"))
-    if section == "Extras":
-        return (
-            bool(img.get("has_hot_tub")) or
-            bool(img.get("has_outdoor_lounge")) or
-            bool(img.get("has_outdoor_kitchen_grill"))
-        )
-    return False
+            primary = _open_concept_primary(img)
+            if primary != section:
+                score *= 0.2   # still possible but strongly deprioritised
+
+    return round(min(1.0, score), 3)
 
 
 def _select_photo_tour(
@@ -1172,61 +1270,118 @@ def _select_photo_tour(
     source_hero_url: Optional[str] = None,
 ) -> dict:
     """
-    Stage 2: deterministic Photo Tour selector.
+    Stage 2: deterministic Photo Tour selector — confidence-score edition.
 
-    Mutates each image dict in-place, setting:
-      - role: "exclude" | "hero" | "supporting" | "gallery_only"
-      - curated_section: section name or None
-      - rank_within_category: re-ranked within selected section
+    Visibility model (Sprint 1):
+      gallery_visible  — always True from LLM path; False only for corrupt/missing images.
+      tour_eligible    — False when LLM marked exclude=True.  These images stay in gallery.
+
+    Selection uses _section_score() instead of hard boolean gates.
+    Threshold cascade: primary (0.50) → fallback (0.25) → emergency (0.10).
+    Zero-score images are never selected for any section.
+
+    Mutates each image dict in-place:
+      role             — "hero" | "supporting" | "gallery_only" | "exclude"
+      curated_section  — section name or None
+      rank_within_category — rank within selected section
 
     Returns property dict: {page_hero, photo_tour_sections, category_order}.
-    Agent 5 consumes this dict unchanged.
     """
-    # ── Step 1: mark LLM-excluded images ─────────────────────────────────
+    # ── Step 1: initialise roles ──────────────────────────────────────────
+    # gallery_visible=False → role="exclude" (true exclusion from everything).
+    # tour_eligible=False   → stays "gallery_only" (visible in All Photos, skipped by tour).
     for img in images:
-        if img.get("exclude"):
+        if not img.get("gallery_visible", True):
             img["role"] = "exclude"
             img["curated_section"] = None
+        else:
+            img["role"] = "gallery_only"
+            img["curated_section"] = None
 
-    candidates = [img for img in images if img.get("role") != "exclude"]
+    # Tour candidates: gallery-visible AND tour-eligible
+    candidates = [
+        img for img in images
+        if img.get("gallery_visible", True) and img.get("tour_eligible", True)
+    ]
 
-    # Default all candidates to gallery_only; selector upgrades to supporting/hero
-    for img in candidates:
-        img["role"] = "gallery_only"
-        img["curated_section"] = None
+    n_gallery_visible = sum(1 for i in images if i.get("gallery_visible", True))
+    n_tour_eligible   = len(candidates)
+    n_excluded_hard   = len(images) - n_gallery_visible
 
-    # ── Step 2: section selection loop ───────────────────────────────────
+    logger.info(
+        "[LLM Curator] Stage 2 input: total=%d, gallery_visible=%d, "
+        "tour_eligible=%d, hard_excluded=%d",
+        len(images), n_gallery_visible, n_tour_eligible, n_excluded_hard,
+    )
+
+    # ── Step 2: section scoring loop ─────────────────────────────────────
     used_ids: set = set()
     photo_tour_sections: list[dict] = []
-    tour_ids: set = set()   # all ids selected into any section
+    tour_ids: set = set()
 
-    for section_name in CURATED_SECTION_NAMES:
-        eligible = [
-            img for img in candidates
-            if img["asset_id"] not in used_ids
-            and _is_eligible(img, section_name)
-        ]
-        # Sort: group winner first, then quality desc, then rank asc
-        eligible.sort(key=lambda i: (
-            0 if i.get("is_best_in_duplicate_group") else 1,
-            -(i.get("quality_score") or 0.0),
-            i.get("rank_within_category") or 99,
-        ))
-
+    def _pick_for_section(scored: list[tuple], threshold: float, section_max: int) -> list[dict]:
+        """Select up to section_max images above threshold, one per duplicate_group."""
         selected: list[dict] = []
         seen_groups: set = set()
-        for img in eligible:
+        for sc, img in scored:
+            if sc < threshold:
+                break
             dg = img.get("duplicate_group")
             if dg and dg in seen_groups:
-                continue   # one representative per duplicate group per section
+                continue
             selected.append(img)
             if dg:
                 seen_groups.add(dg)
-            if len(selected) == _SECTION_MAX_IMAGES.get(section_name, 3):
+            if len(selected) == section_max:
                 break
+        return selected
+
+    for section_name in CURATED_SECTION_NAMES:
+        section_max = _SECTION_MAX_IMAGES.get(section_name, 3)
+
+        # Score every unused tour-eligible candidate
+        scored: list[tuple] = []   # (score, img)
+        n_zero = 0
+        for img in candidates:
+            if img["asset_id"] in used_ids:
+                continue
+            sc = _section_score(img, section_name)
+            if sc == 0.0:
+                n_zero += 1
+            else:
+                scored.append((sc, img))
+
+        # Sort: highest section score first, then duplicate-group winner, then quality
+        scored.sort(key=lambda t: (
+            -t[0],
+            0 if t[1].get("is_best_in_duplicate_group") else 1,
+            -(t[1].get("quality_score") or 0.0),
+        ))
+
+        logger.info(
+            "[LLM Curator] Section '%s': %d scored >0, %d zero-score, target=%d",
+            section_name, len(scored), n_zero, section_max,
+        )
+
+        # Three-pass threshold cascade
+        selected = _pick_for_section(scored, _SECTION_PRIMARY_THRESHOLD, section_max)
+        if len(selected) < section_max and len(scored) > len(selected):
+            selected = _pick_for_section(scored, _SECTION_FALLBACK_THRESHOLD, section_max)
+        if not selected and scored:
+            selected = _pick_for_section(scored, _SECTION_MIN_SCORE, section_max)
 
         if not selected:
-            continue   # omit sections with no valid images
+            logger.info(
+                "[LLM Curator] Section '%s': no eligible images — omitted from tour",
+                section_name,
+            )
+            continue
+
+        top_scores = [round(_section_score(i, section_name), 2) for i in selected]
+        logger.info(
+            "[LLM Curator] Section '%s': selected %d (scores: %s)",
+            section_name, len(selected), top_scores,
+        )
 
         for img in selected:
             used_ids.add(img["asset_id"])
@@ -1236,11 +1391,10 @@ def _select_photo_tour(
         photo_tour_sections.append({
             "section":    section_name,
             "hero":       selected[0]["asset_id"],
-            "supporting": [i["asset_id"] for i in selected[1:3]],
+            "supporting": [i["asset_id"] for i in selected[1:]],
         })
 
     # ── Step 3: pick page_hero ────────────────────────────────────────────
-    # Prefer exterior/pool tour images with high quality; fall back to best overall.
     hero_pool = [
         img for img in candidates
         if img["asset_id"] in tour_ids
@@ -1254,33 +1408,34 @@ def _select_photo_tour(
         -(i.get("quality_score") or 0.0),
     ))
 
-    page_hero_id = ""
-    if hero_pool:
-        page_hero_id = hero_pool[0]["asset_id"]
+    page_hero_id = hero_pool[0]["asset_id"] if hero_pool else ""
 
-    # Source hero preference: if GCV hero is a tour image with reasonable quality,
-    # prefer it over the algorithmically chosen hero (platform knows the property).
+    # Source hero preference: prefer platform hero if quality is within 20% of chosen
     if source_hero_url and source_hero_url in tour_ids:
-        src = next((i for i in candidates if i["asset_id"] == source_hero_url), None)
+        src    = next((i for i in candidates if i["asset_id"] == source_hero_url), None)
         chosen = next((i for i in candidates if i["asset_id"] == page_hero_id), None)
         if src and chosen:
-            src_q = src.get("quality_score") or 0
+            src_q    = src.get("quality_score") or 0
             chosen_q = chosen.get("quality_score") or 0
-            if src_q >= chosen_q * 0.8:   # within 20% of chosen — prefer platform hero
+            if src_q >= chosen_q * 0.8:
                 page_hero_id = source_hero_url
 
     # ── Step 4: assign final roles ────────────────────────────────────────
-    for img in candidates:
+    # gallery_visible=False images already have role="exclude" from Step 1.
+    # All others: hero/supporting/gallery_only based on tour selection.
+    for img in images:
+        if not img.get("gallery_visible", True):
+            continue  # already "exclude"
         aid = img["asset_id"]
         if aid == page_hero_id:
             img["role"] = "hero"
         elif aid in tour_ids:
             img["role"] = "supporting"
-        # else remains "gallery_only"
+        # else remains "gallery_only" — visible in All Photos, not in Photo Tour
 
-    # ── Step 5: re-rank within each section ───────────────────────────────
+    # ── Step 5: re-rank within each selected section ──────────────────────
     by_section: dict[str, list] = {}
-    for img in candidates:
+    for img in images:
         sec = img.get("curated_section")
         if sec:
             by_section.setdefault(sec, []).append(img)
@@ -1291,22 +1446,29 @@ def _select_photo_tour(
         ))
         for rank, img in enumerate(sec_images, start=1):
             img["rank_within_category"] = rank
-            img["is_primary_in_group"] = img.get("is_best_in_duplicate_group", True)
+            img["is_primary_in_group"]  = img.get("is_best_in_duplicate_group", True)
 
     category_order = [s["section"] for s in photo_tour_sections]
 
-    # ── Logging ───────────────────────────────────────────────────────────
+    # ── Final observability summary ───────────────────────────────────────
+    role_counts: dict[str, int] = {}
+    for img in images:
+        r = img.get("role") or "unknown"
+        role_counts[r] = role_counts.get(r, 0) + 1
+
     logger.info(
-        "[LLM Curator] Stage 2 selector: %d sections built, %d tour images, "
-        "page_hero=%s",
+        "[LLM Curator] Stage 2 complete: %d sections, %d tour images, "
+        "roles=(%s), page_hero=%s",
         len(photo_tour_sections), len(tour_ids),
+        ", ".join(f"{r}={n}" for r, n in sorted(role_counts.items())),
         page_hero_id[-40:] if page_hero_id else "none",
     )
     for sec in photo_tour_sections:
-        n_supporting = len(sec["supporting"])
         logger.info(
-            "[LLM Curator]   %-14s hero + %d supporting",
-            sec["section"] + ":", n_supporting,
+            "[LLM Curator]   %-14s hero + %d supporting (ids: %s...)",
+            sec["section"] + ":",
+            len(sec["supporting"]),
+            sec["hero"][-20:],
         )
 
     return {
@@ -1351,28 +1513,37 @@ def _derive_curated_section_fallback(images: list[dict]) -> list[dict]:
 
 
 def _log_curation_summary(result: dict, source_hero_url: Optional[str]) -> None:
-    """Log role counts, section counts, and source hero preservation."""
+    """Log role/visibility/eligibility counts, section counts, and hero preservation."""
     images = result.get("images") or []
     by_role: dict[str, int] = {}
     by_section: dict[str, int] = {}
+    n_gallery_visible = 0
+    n_tour_eligible   = 0
     for img in images:
         role = img.get("role") or "unknown"
         by_role[role] = by_role.get(role, 0) + 1
+        if img.get("gallery_visible", True):
+            n_gallery_visible += 1
+        if img.get("tour_eligible", True):
+            n_tour_eligible += 1
         sec = img.get("curated_section")
         if sec and role != "exclude":
             by_section[sec] = by_section.get(sec, 0) + 1
 
     llm_hero = (result.get("property") or {}).get("page_hero") or ""
-    if source_hero_url:
-        hero_preserved = (llm_hero == source_hero_url)
-        hero_note = f"preserved={hero_preserved}"
-    else:
-        hero_note = "no source hero provided"
+    hero_note = (
+        f"preserved={llm_hero == source_hero_url}"
+        if source_hero_url else "no source hero provided"
+    )
+    n_all_photos = by_role.get("hero", 0) + by_role.get("supporting", 0) + by_role.get("gallery_only", 0)
+    n_tour       = by_role.get("hero", 0) + by_role.get("supporting", 0)
 
     logger.info(
-        "[LLM Curator] Summary — total=%d | roles: %s | sections: %s | "
-        "page_hero: %s",
-        len(images),
+        "[LLM Curator] Final summary — total=%d | gallery_visible=%d | "
+        "tour_eligible=%d | all_photos=%d | tour=%d | "
+        "roles: %s | sections: %s | page_hero: %s",
+        len(images), n_gallery_visible, n_tour_eligible,
+        n_all_photos, n_tour,
         ", ".join(f"{r}={n}" for r, n in sorted(by_role.items())),
         ", ".join(f"{s}={n}" for s, n in sorted(by_section.items())),
         hero_note,

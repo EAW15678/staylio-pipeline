@@ -976,7 +976,8 @@ def _gallery_items_from_curation(
     Build the gallery_items list from LLM curation results.
 
     Filtering rules (in order):
-      1. role == 'exclude'          → always dropped
+      1. gallery_visible == False   → dropped (corrupt/missing; never LLM tour-reject)
+         Legacy fallback: gallery_visible missing AND role=='exclude' → dropped
       2. llm_category invalid       → fall back to GCV subject_category
       3. asset_id not in media_assets → skipped (unresolvable)
       4. display_url empty          → skipped
@@ -1003,8 +1004,16 @@ def _gallery_items_from_curation(
         role = result.get("role") or "gallery_only"
         role_counts[role] = role_counts.get(role, 0) + 1
 
-        # 1. Excluded by LLM
-        if role == "exclude":
+        # 1. Visibility gate.
+        # gallery_visible=False → truly hidden (corrupt, missing, unresolvable).
+        # Legacy curation records lack gallery_visible; fall back to role=="exclude"
+        # only for backward compat — new records never reach here via role alone.
+        gallery_visible = result.get("gallery_visible")
+        if gallery_visible is False:
+            n_excluded += 1
+            continue
+        if gallery_visible is None and role == "exclude":
+            # Old-style record — preserve previous behaviour
             n_excluded += 1
             continue
 
