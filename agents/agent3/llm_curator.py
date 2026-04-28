@@ -49,7 +49,7 @@ _GRID_COLS          = 3
 _GRID_ROWS          = 4
 _IMAGES_PER_SHEET   = _GRID_COLS * _GRID_ROWS   # 12
 _MAX_IMAGES_TO_CURATE = 120     # hard cap — cost control (raised from 80)
-_SHEETS_PER_CALL    = 3         # max contact sheets per API call (3 × 12 = 36 images)
+_SHEETS_PER_CALL    = 1         # 1 contact sheet per API call (12 images) — reliability-first to avoid JSON truncation
 _SUPABASE_TABLE     = "property_image_curations"
 _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 
@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v4_compact_inspection"
+_CURATION_VERSION = "curation_v5_inspection_12img_batches"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -541,8 +541,10 @@ def _run_curation_call(
         return result
     else:
         partial_results: list[dict] = []
+        n_batches = math.ceil(len(sheet_jpeg_list) / _SHEETS_PER_CALL)
         for batch_start in range(0, len(sheet_jpeg_list), _SHEETS_PER_CALL):
             batch = sheet_jpeg_list[batch_start: batch_start + _SHEETS_PER_CALL]
+            batch_num = batch_start // _SHEETS_PER_CALL + 1
             batch_index = {
                 k: v for k, v in index_map.items()
                 if ord(k[0]) - ord("A") in range(
@@ -560,6 +562,11 @@ def _run_curation_call(
                 k: v for k, v in caption_map.items()
                 if k in {lbl.rstrip("*") for lbl in batch_index_display}
             }
+            logger.info(
+                "[LLM Curator] Batch %d/%d — %d sheets, %d images (labels: %s)",
+                batch_num, n_batches, len(batch), len(batch_index),
+                ", ".join(sorted(batch_index.keys())),
+            )
             partial = _batch_call(
                 client, system_prompt, batch, batch_index, batch_index_display, kb,
                 batch_caption_map,
@@ -730,12 +737,12 @@ def _log_token_usage(resp, call_type: str) -> None:
         output_tokens = getattr(usage, "output_tokens", 0) or 0
         # Sonnet 4.6: $3/M input, $15/M output
         cost_usd = (input_tokens * 3 + output_tokens * 15) / 1_000_000
+        stop_reason = getattr(resp, "stop_reason", None)
         logger.info(
             "[LLM Curator] %s call — input_tokens=%d, output_tokens=%d, "
-            "estimated_cost=USD %.4f",
-            call_type, input_tokens, output_tokens, cost_usd,
+            "stop_reason=%s, estimated_cost=USD %.4f",
+            call_type, input_tokens, output_tokens, stop_reason, cost_usd,
         )
-        stop_reason = getattr(resp, "stop_reason", None)
         if stop_reason == "max_tokens":
             logger.warning(
                 "[LLM Curator] WARNING: %s response truncated at token limit "
