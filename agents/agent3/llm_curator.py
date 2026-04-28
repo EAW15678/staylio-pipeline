@@ -49,7 +49,7 @@ _GRID_COLS          = 3
 _GRID_ROWS          = 4
 _IMAGES_PER_SHEET   = _GRID_COLS * _GRID_ROWS   # 12
 _MAX_IMAGES_TO_CURATE = 120     # hard cap — cost control (raised from 80)
-_SHEETS_PER_CALL    = 4         # max contact sheets per API call (4 × 12 = 48 images → ~2 K output tokens)
+_SHEETS_PER_CALL    = 3         # max contact sheets per API call (3 × 12 = 36 images)
 _SUPABASE_TABLE     = "property_image_curations"
 _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 
@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v4_two_stage_selector"
+_CURATION_VERSION = "curation_v4_compact_inspection"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -735,6 +735,13 @@ def _log_token_usage(resp, call_type: str) -> None:
             "estimated_cost=USD %.4f",
             call_type, input_tokens, output_tokens, cost_usd,
         )
+        stop_reason = getattr(resp, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            logger.warning(
+                "[LLM Curator] WARNING: %s response truncated at token limit "
+                "(output_tokens=%d hit max_tokens) — reduce batch size or field count",
+                call_type, output_tokens,
+            )
     except Exception:
         pass   # non-fatal
 
@@ -852,17 +859,16 @@ For each image report the following factual attributes:
   has_hot_tub         — true if a standalone hot tub/spa is visible (without a pool)
   has_outdoor_lounge  — true if outdoor seating area is the primary subject (no pool)
   has_outdoor_kitchen_grill — true if outdoor grill or outdoor kitchen is visible
-  likely_room_type    — single best guess (e.g. "master_bedroom", "kitchen", "pool_deck")
-  visual_summary      — one sentence describing what is physically in the image
+  likely_room_type    — one or two words only (e.g. "bedroom", "kitchen", "pool_deck")
+  visual_summary      — ≤40 chars factual noun phrase (e.g. "king bed, wood headboard")
   quality_score       — 0.0–1.0 (technical quality: sharpness, exposure, composition)
   exclude             — true if blurry, dark, thumbnail, irrelevant, or utility shot
-  exclude_reason      — brief string if exclude=true (e.g. "blurry", "dark"), else null
+  exclude_reason      — brief string if exclude=true (e.g. "blurry", "dark"); OMIT this field entirely if exclude=false
   duplicate_group     — same string for images showing the same space from similar angles
                         (e.g. "dg_bedroom_1"); null if unique
   is_best_in_duplicate_group — true for the best image within its duplicate group
   alt                 — concise descriptive alt text (≤80 chars); empty string if excluded
   llm_category        — GCV-compatible category: {categories}
-  rank_within_category — rough quality rank within llm_category (1=best); 99 if excluded
 
 Return ONLY valid JSON — no markdown, no prose, no code fences:
 
@@ -914,15 +920,13 @@ def _schema_example() -> str:
       "has_outdoor_lounge": false,
       "has_outdoor_kitchen_grill": false,
       "likely_room_type": "kitchen",
-      "visual_summary": "Open-plan kitchen with marble island and bar stools",
+      "visual_summary": "marble island, bar stools, open plan",
       "quality_score": 0.88,
       "exclude": false,
-      "exclude_reason": null,
       "duplicate_group": "dg_kitchen_1",
       "is_best_in_duplicate_group": true,
       "alt": "Open-plan kitchen with marble island and ocean views",
-      "llm_category": "kitchen",
-      "rank_within_category": 1
+      "llm_category": "kitchen"
     }
   ]
 }"""
@@ -940,7 +944,11 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
     """
     parsed = _extract_json(raw)
     if not parsed or not isinstance(parsed, dict):
-        logger.warning("[LLM Curator] Could not extract valid JSON from LLM response")
+        logger.warning(
+            "[LLM Curator] Could not extract valid JSON from LLM response "
+            "(raw_len=%d, head=%r, tail=%r)",
+            len(raw), raw[:200], raw[-200:],
+        )
         return None
 
     images_raw = parsed.get("images")
@@ -1005,11 +1013,11 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "has_hot_tub":              _bool(img.get("has_hot_tub")),
             "has_outdoor_lounge":       _bool(img.get("has_outdoor_lounge")),
             "has_outdoor_kitchen_grill": _bool(img.get("has_outdoor_kitchen_grill")),
-            "likely_room_type":         str(img.get("likely_room_type") or "")[:60],
-            "visual_summary":           str(img.get("visual_summary") or "")[:200],
+            "likely_room_type":         str(img.get("likely_room_type") or "")[:30],
+            "visual_summary":           str(img.get("visual_summary") or "")[:60],
             "quality_score":            _clamp_score(img.get("quality_score", 0.5)),
             "exclude":                  _bool(img.get("exclude")),
-            "exclude_reason":           str(img.get("exclude_reason") or "") or None,
+            "exclude_reason":           str(img["exclude_reason"])[:100] if img.get("exclude_reason") else None,
             "duplicate_group":          img.get("duplicate_group") or None,
             "is_best_in_duplicate_group": is_best,
             # ── Compatibility fields (LLM-authored, selector may overwrite) ──
