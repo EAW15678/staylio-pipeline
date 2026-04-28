@@ -73,17 +73,6 @@ _GALLERY_CATEGORY_ORDER: list[str] = [
     "uncategorised",
 ]
 
-# Section headers: label → set of categories that fall under it.
-# Ordering here determines header insertion order in the gallery.
-_GALLERY_SECTIONS: list[tuple[str, frozenset]] = [
-    ("Exterior & Views",  frozenset({"exterior", "view"})),
-    ("Outdoor & Pool",    frozenset({"pool_hot_tub", "outdoor_entertaining"})),
-    ("Living & Kitchen",  frozenset({"living_room", "kitchen", "game_entertainment"})),
-    ("Bedrooms",          frozenset({"master_bedroom", "standard_bedroom"})),
-    ("Bathrooms",         frozenset({"bathroom"})),
-    # local_area and uncategorised: no header — appended silently at end
-]
-
 # ── Category modules (Photo Tour section) ─────────────────────────────────
 #
 # Ordered list of (display_label, frozenset of subject_categories).
@@ -183,10 +172,6 @@ SIMILARITY_PENALTY_WEIGHT = 0.3
 MODULE_MAX_SIMILARITY = 0.35
 
 # Maximum thumbnails rendered inline in the All Photos grid.
-# The full dataset (up to MAX_GALLERY_IMAGES=50) is preserved for lightbox use.
-MAX_VISIBLE_ALL_PHOTOS = 30
-
-
 def build_landing_page_html(
     kb: dict,
     content_package: dict,
@@ -992,10 +977,9 @@ def _gallery_items_from_curation(
 
     Filtering rules (in order):
       1. role == 'exclude'          → always dropped
-      2. is_primary_in_group==False → duplicate suppressed (non-best angle)
-      3. llm_category invalid       → fall back to GCV subject_category
-      4. asset_id not in media_assets → skipped (unresolvable)
-      5. display_url == hero_photo  → skipped (hero shown separately)
+      2. llm_category invalid       → fall back to GCV subject_category
+      3. asset_id not in media_assets → skipped (unresolvable)
+      4. display_url empty          → skipped
 
     Returns same dict shape as _prepare_gallery_items.
     """
@@ -1010,7 +994,6 @@ def _gallery_items_from_curation(
 
     # Counters for debug logging
     n_excluded      = 0
-    n_dupe_removed  = 0
     n_unresolvable  = 0
     n_hero_skipped  = 0
     n_cat_corrected = 0
@@ -1025,16 +1008,6 @@ def _gallery_items_from_curation(
             n_excluded += 1
             continue
 
-        # 2. Duplicate suppression — keep only the primary image in each group
-        if not result.get("is_primary_in_group", True):
-            n_dupe_removed += 1
-            logger.debug(
-                "[Agent 5] Curation: suppressed duplicate %s (group=%s)",
-                result.get("asset_id", "")[-30:],
-                result.get("duplicate_group"),
-            )
-            continue
-
         asset_id = result.get("asset_id") or ""
         asset = original_lookup.get(asset_id)
         if not asset:
@@ -1042,7 +1015,7 @@ def _gallery_items_from_curation(
             continue
 
         display_url = asset.get("asset_url_enhanced") or asset.get("asset_url_original") or ""
-        if not display_url or display_url == hero_photo:
+        if not display_url:
             n_hero_skipped += 1
             continue
 
@@ -1105,16 +1078,15 @@ def _gallery_items_from_curation(
         return (1, cat_pri, item["rank"])
 
     items.sort(key=_sort_key_curation)
-    items = items[:MAX_GALLERY_IMAGES]
 
     # ── Debug logging ──────────────────────────────────────────────────────
     role_summary = ", ".join(f"{r}={n}" for r, n in sorted(role_counts.items()))
     logger.info(
         "[Agent 5] Curation gallery: total=%d candidates, roles=(%s), "
-        "excluded=%d, dupes_removed=%d, unresolvable=%d, hero_skipped=%d, "
+        "excluded=%d, unresolvable=%d, no_url=%d, "
         "cat_corrected=%d → %d items in gallery (%d categories)",
         len(per_image), role_summary,
-        n_excluded, n_dupe_removed, n_unresolvable, n_hero_skipped,
+        n_excluded, n_unresolvable, n_hero_skipped,
         n_cat_corrected, len(items), len({i["category"] for i in items}),
     )
 
@@ -1579,76 +1551,27 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
 
 def _build_gallery_section(items: list, property_name: str) -> str:
     """
-    Render the All Photos section with category-ordered thumbnails and section headers.
-
-    Only the first MAX_VISIBLE_ALL_PHOTOS thumbnails are rendered inline.
-    The full dataset (up to MAX_GALLERY_IMAGES) is preserved in gallery_items
-    for lightbox index consistency — indices here match those in the Photo Tour.
-
-    Section headers span the full grid width (grid-column: 1 / -1).
-    Lightbox indices (0-based) track photo position, not including headers.
+    Render the All Photos section as a flat, complete visual inventory.
+    No section headers. All non-excluded images are rendered.
+    Lightbox indices (0-based) match gallery_items order.
     """
     if not items:
         return ""
 
-    total = len(items)
-    visible_items = items[:MAX_VISIBLE_ALL_PHOTOS]
-    hidden_count = max(0, total - MAX_VISIBLE_ALL_PHOTOS)
-
-    logger.info(
-        "[Agent 5] All Photos grid: rendering %d of %d total (MAX_VISIBLE=%d)",
-        len(visible_items), total, MAX_VISIBLE_ALL_PHOTOS,
-    )
-
-    # Map each item to its section label (for header insertion).
-    # Prefer curated gallery_section when present (curation path);
-    # fall back to legacy _GALLERY_SECTIONS mapping for GCV path.
-    _use_curated_sections = any(item.get("gallery_section") for item in items)
-
-    def _section_for(item: dict) -> Optional[str]:
-        gs = item.get("gallery_section")
-        if gs and _use_curated_sections:
-            return gs
-        for label, cats in _GALLERY_SECTIONS:
-            if item.get("category") in cats:
-                return label
-        return None
+    logger.info("[Agent 5] All Photos grid: rendering %d images (flat, no headers)", len(items))
 
     grid_html = ""
-    last_section: Optional[str] = None
-    photo_index = 0  # lightbox index (headers don't count; indices match gallery_items)
-
-    for item in visible_items:
-        url = item["url"]
-        alt = item["alt"]
-        section = _section_for(item)
-
-        # Insert section header when crossing into a new labelled section
-        if section and section != last_section:
-            grid_html += (
-                f'<p class="gallery-section-label" '
-                f'style="grid-column: 1 / -1">{_esc(section)}</p>\n'
-            )
-            last_section = section
-
+    for photo_index, item in enumerate(items):
         grid_html += (
-            f'<img src="{_esc(url)}" alt="{_esc(alt)}" loading="lazy" '
+            f'<img src="{_esc(item["url"])}" alt="{_esc(item["alt"])}" loading="lazy" '
             f'class="gallery-thumb" onclick="openLightbox({photo_index})">\n'
         )
-        photo_index += 1
-
-    hidden_note = (
-        f'<p class="gallery-hidden-note" style="grid-column: 1 / -1; '
-        f'font-size: .85rem; color: var(--color-muted); margin-top: .5rem;">'
-        f'Showing {len(visible_items)} of {total} photos</p>\n'
-        if hidden_count > 0 else ""
-    )
 
     return f"""
   <section class="gallery" id="gallery">
     <div class="container">
       <h2>All Photos</h2>
-      <div class="gallery-grid">{grid_html}{hidden_note}</div>
+      <div class="gallery-grid">{grid_html}</div>
     </div>
   </section>"""
 

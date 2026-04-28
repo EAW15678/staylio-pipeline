@@ -53,13 +53,19 @@ _SHEETS_PER_CALL    = 4         # max contact sheets per API call (4 × 12 = 48 
 _SUPABASE_TABLE     = "property_image_curations"
 _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 
+# ── Curation version ──────────────────────────────────────────────────────────
+# Bump this string whenever the taxonomy or curation rules change.
+# It is prepended to the URL list before hashing, so existing cached curations
+# (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
+_CURATION_VERSION = "curation_v2_no_primary_flat_gallery"
+
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
 # gcv_categories drives _derive_curated_section_fallback for uncapped/unanalysed images.
 CURATED_SECTIONS: list[dict] = [
     {
         "name":           "Exterior",
-        "description":    "Building exterior, facade, driveway, landscaping, entrance",
+        "description":    "Building exterior, facade, driveway, landscaping, entrance, views",
         "gcv_categories": ["exterior", "view"],
     },
     {
@@ -78,28 +84,18 @@ CURATED_SECTIONS: list[dict] = [
         "gcv_categories": ["kitchen"],
     },
     {
-        "name":           "Primary Bedroom",
-        "description":    "Main suite or master bedroom only — not secondary bedrooms",
-        "gcv_categories": [],   # ambiguous with Bedrooms; fallback defaults to Bedrooms
-    },
-    {
         "name":           "Bedrooms",
-        "description":    "Secondary bedrooms, bunk rooms, twin rooms, guest rooms",
+        "description":    "All sleeping rooms — beds, bunk rooms, guest rooms, suites. Prioritise diverse coverage across distinct rooms.",
         "gcv_categories": ["master_bedroom", "standard_bedroom"],
     },
     {
-        "name":           "Primary Bathroom",
-        "description":    "Ensuite directly attached to the primary suite only",
-        "gcv_categories": [],   # ambiguous with Bathrooms; fallback defaults to Bathrooms
-    },
-    {
         "name":           "Bathrooms",
-        "description":    "Other bathrooms, guest bathrooms, powder rooms",
+        "description":    "All bathrooms — vanity, shower, tub, toilet. Prioritise diverse coverage across distinct bathrooms.",
         "gcv_categories": ["bathroom"],
     },
     {
         "name":           "Extras",
-        "description":    "Gym, office, laundry, garage, utility, outdoor entertaining",
+        "description":    "Gym, office, laundry, garage, outdoor entertaining areas",
         "gcv_categories": ["outdoor_entertaining", "local_area", "uncategorised"],
     },
 ]
@@ -319,9 +315,11 @@ def run_llm_vision_curation(
 # ── Hash ──────────────────────────────────────────────────────────────────────
 
 def _compute_image_set_hash(assets: list) -> str:
-    """SHA-256 of sorted R2 original URLs. Stable across runs for same image set."""
+    """SHA-256 of curation version + sorted R2 original URLs.
+    Bumping _CURATION_VERSION invalidates all existing cached curations."""
     urls = sorted(a.asset_url_original for a in assets if a.asset_url_original)
-    digest = hashlib.sha256("\n".join(urls).encode()).hexdigest()
+    payload = _CURATION_VERSION + "\n" + "\n".join(urls)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
     return digest
 
 
@@ -808,14 +806,18 @@ Task:
 9. Assign curated_section to every non-excluded image. Use exactly one of:
 {sections_list}
    Key rules:
-   - "Primary Bedroom" = the main suite ONLY. All other sleeping rooms → "Bedrooms".
-   - "Primary Bathroom" = the ensuite directly attached to the primary suite ONLY.
-     All other bathrooms → "Bathrooms".
+   - "Bedrooms" = ALL sleeping rooms. Select diverse images covering different beds/rooms.
+     If bedroom_count is provided in the layout, aim to represent up to that many distinct rooms.
+     Avoid assigning multiple near-duplicate angles of the same bed.
+   - "Bathrooms" = ALL bathrooms. Select diverse images covering different bathrooms.
+     If bathroom_count is provided in the layout, aim to represent up to that many distinct bathrooms.
+     Avoid assigning multiple near-duplicate angles of the same bathroom.
    - "Pool" = water features only. Outdoor entertaining without water → "Extras".
    - Set curated_section to null for excluded images.
 10. In "property", choose the best overall page_hero (label, e.g. "A01").
 11. Build photo_tour_sections using ONLY these section names: {section_names}
     Each section: 1 hero label + up to 2 supporting labels. Only include sections with qualifying images.
+    For Bedrooms and Bathrooms: choose supporting images from DIFFERENT rooms/angles.
 12. Set category_order (section names ordered best-first for this property).
 13. Infer vibe (1 sentence describing the feeling this property evokes).
 14. Set merchandising_strategy.prioritize and deprioritize.
@@ -857,8 +859,8 @@ Use the label (e.g. "A01") as asset_id — NOT a URL.
 Analyse room type, duplicates, quality, and conversion value.
 Assign curated_section to every non-excluded image:
 {sections_list}
-  - "Primary Bedroom" = main suite ONLY. Other sleeping rooms → "Bedrooms".
-  - "Primary Bathroom" = ensuite attached to primary suite ONLY. Others → "Bathrooms".
+  - "Bedrooms" = ALL sleeping rooms. Prioritise diverse coverage of distinct rooms.
+  - "Bathrooms" = ALL bathrooms. Prioritise diverse coverage of distinct bathrooms.
   - Set curated_section to null for excluded images.
 
 Valid llm_category values: {categories}
@@ -948,6 +950,10 @@ def _property_context(kb: dict) -> str:
         f"- Property name: {_val('name')}",
         f"- Location: {_val('city')}, {_val('state')}",
     ]
+    beds  = _val("bedrooms")
+    baths = _val("bathrooms")
+    if beds or baths:
+        lines.append(f"- Layout: {beds} bedrooms, {baths} bathrooms")
     if kb.get("owner_story"):
         lines.append(f"- Owner story: {str(kb['owner_story'])[:300]}")
     wow = kb.get("wow_factor") or kb.get("unique_selling_points")
@@ -985,7 +991,7 @@ def _schema_example() -> str:
         "supporting": ["A02", "A03"]
       }
     ],
-    "category_order": ["Exterior", "Pool", "Kitchen", "Primary Bedroom", "Bedrooms"],
+    "category_order": ["Exterior", "Pool", "Living Areas", "Kitchen", "Bedrooms", "Bathrooms"],
     "vibe": "A light-filled coastal retreat with sweeping ocean views.",
     "merchandising_strategy": {
       "prioritize": ["ocean view shots", "pool at golden hour"],
