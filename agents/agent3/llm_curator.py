@@ -113,6 +113,77 @@ _VALID_ROLES = frozenset({"hero", "supporting", "gallery_only", "exclude"})
 
 _SHEET_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
+# ── Classification rules injected into every LLM prompt ──────────────────────
+# Shared by _build_full_prompt and _build_per_image_only_prompt.
+# Edit here; both prompts update automatically.
+_CLASSIFICATION_RULES = """\
+HARD CLASSIFICATION RULES — apply BEFORE assigning any curated_section:
+
+  Bedrooms
+    MUST contain a clearly visible bed.
+    Reject: living rooms, lounges, rooms without a bed.
+
+  Bathrooms
+    MUST contain at least one of: sink/vanity, toilet, shower, bathtub.
+    Reject: wet bars, kitchens, closets.
+
+  Pool
+    MUST contain a visible swimming pool.
+    Reject: patios or decks without a pool, hot-tub-only shots (assign those to Extras).
+
+  Kitchen
+    MUST clearly show a stove, kitchen island, or kitchen cabinetry.
+    Reject: dining-area-only shots (unless the kitchen is also clearly visible), living rooms.
+
+  Living Areas
+    Must show couches, seating, TV, fireplace, or a gathering/lounge space.
+    Reject: bedrooms, kitchens.
+
+  Exterior
+    Must show the outside structure of the home or strong exterior elements.
+    Reject: interior shots, pool-only shots (pool shots → Pool section).
+
+  Extras
+    Use ONLY when the image does not clearly belong to another section.
+    Examples: outdoor fireplace, outdoor grilling area, elevator, parking,
+    baby crib/gate, beach supplies, golf cart/LSV, hot tub (without pool),
+    children's play space, activity/event images.
+
+OPEN-CONCEPT RULE:
+  If an image shows both kitchen and living areas, assign based on the PRIMARY
+  visual focus of the image. Do NOT assign the same image to both sections.
+
+DUPLICATE SUPPRESSION — within EACH section:
+  Do NOT select multiple images that show:
+  * the same angle
+  * minor variations of the same shot
+  If two images are very similar in orientation, keep only the best one.
+  Assign the inferior one role="exclude" with reason="duplicate_inferior".
+
+DIVERSITY REQUIREMENT — within EACH section:
+  Prioritise different spaces over different angles of the same space.
+  - Bedrooms: prefer distinct bedrooms over multiple shots of the same bed.
+  - Bathrooms: prefer one vanity shot + one shower + one tub rather than
+    three angles of the same fixture.
+  - Living Areas: show different areas (living room, dining, lounge, sitting room).
+
+CROSS-SECTION UNIQUENESS:
+  Each image belongs to EXACTLY ONE section. An image MUST NOT appear in
+  multiple sections. If an image is borderline, assign it to the single
+  best-matching section and leave it out of all others.
+
+PRIORITY ORDER within each section:
+  1. Correct classification (must pass hard rules above)
+  2. Unique space representation (different room/area)
+  3. Visual quality and aesthetic appeal
+
+SELF-CHECK before finalising output:
+  Verify that every image assigned to Bedrooms shows a bed.
+  Verify that every image assigned to Bathrooms shows bathroom fixtures.
+  Verify that every image assigned to Pool shows a pool.
+  If any image fails its hard rule → reassign to the correct section or exclude.
+"""
+
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
@@ -803,17 +874,13 @@ Task:
    - "exclude"      → blurry, dark, duplicate inferior angle, or irrelevant
 7. For "exclude" images, set reason briefly (e.g. "blurry", "dark", "duplicate_inferior").
 8. Write a concise alt text for every non-excluded image.
-9. Assign curated_section to every non-excluded image. Use exactly one of:
+9. Assign curated_section to every non-excluded image. Available sections:
 {sections_list}
-   Key rules:
-   - "Bedrooms" = ALL sleeping rooms. Select diverse images covering different beds/rooms.
-     If bedroom_count is provided in the layout, aim to represent up to that many distinct rooms.
-     Avoid assigning multiple near-duplicate angles of the same bed.
-   - "Bathrooms" = ALL bathrooms. Select diverse images covering different bathrooms.
-     If bathroom_count is provided in the layout, aim to represent up to that many distinct bathrooms.
-     Avoid assigning multiple near-duplicate angles of the same bathroom.
-   - "Pool" = water features only. Outdoor entertaining without water → "Extras".
-   - Set curated_section to null for excluded images.
+   Set curated_section to null for excluded images.
+   If bedroom_count is in the layout, aim to represent up to that many distinct bedrooms.
+   If bathroom_count is in the layout, aim to represent up to that many distinct bathrooms.
+
+{_CLASSIFICATION_RULES}
 10. In "property", choose the best overall page_hero (label, e.g. "A01").
 11. Build photo_tour_sections using ONLY these section names: {section_names}
     Each section: 1 hero label + up to 2 supporting labels. Only include sections with qualifying images.
@@ -857,11 +924,11 @@ Image labels to analyse (use these exact codes as "asset_id"):
 Task: For EVERY label above, produce one entry in "images".
 Use the label (e.g. "A01") as asset_id — NOT a URL.
 Analyse room type, duplicates, quality, and conversion value.
-Assign curated_section to every non-excluded image:
+Assign curated_section to every non-excluded image. Available sections:
 {sections_list}
-  - "Bedrooms" = ALL sleeping rooms. Prioritise diverse coverage of distinct rooms.
-  - "Bathrooms" = ALL bathrooms. Prioritise diverse coverage of distinct bathrooms.
-  - Set curated_section to null for excluded images.
+Set curated_section to null for excluded images.
+
+{_CLASSIFICATION_RULES}
 
 Valid llm_category values: {categories}
 Valid roles: hero, supporting, gallery_only, exclude
