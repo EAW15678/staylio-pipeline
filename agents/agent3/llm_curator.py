@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v6_sprint1_visibility_scoring"
+_CURATION_VERSION = "curation_v8_observable_full_batch_recovery"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -596,7 +596,7 @@ def _run_curation_call(
     system_prompt = _build_system_prompt()
 
     # If sheets fit in one call, do everything in one request.
-    # If not, do per-image analysis in batches then a text-only synthesis pass.
+    # If not, batch across sheets (1 sheet = 12 images per call at current settings).
     if len(sheet_jpeg_list) <= _SHEETS_PER_CALL:
         result = _single_call(
             client, system_prompt, sheet_jpeg_list, index_map, index_map_display,
@@ -607,7 +607,11 @@ def _run_curation_call(
         return result
     else:
         partial_results: list[dict] = []
-        n_batches = math.ceil(len(sheet_jpeg_list) / _SHEETS_PER_CALL)
+        n_batches      = math.ceil(len(sheet_jpeg_list) / _SHEETS_PER_CALL)
+        n_successful   = 0
+        n_empty        = 0
+        expected_total = len(index_map)   # every image must appear in output
+
         for batch_start in range(0, len(sheet_jpeg_list), _SHEETS_PER_CALL):
             batch = sheet_jpeg_list[batch_start: batch_start + _SHEETS_PER_CALL]
             batch_num = batch_start // _SHEETS_PER_CALL + 1
@@ -639,6 +643,36 @@ def _run_curation_call(
             )
             if partial:
                 partial_results.extend(partial)
+                n_successful += 1
+            else:
+                n_empty += 1
+                logger.warning(
+                    "[LLM Curator] Batch %d/%d returned no results — "
+                    "JSON parse failure or empty response",
+                    batch_num, n_batches,
+                )
+
+        # ── Batch completeness check ──────────────────────────────────────
+        classified = len(partial_results)
+        pct = (classified / expected_total * 100) if expected_total else 0
+        logger.info(
+            "[LLM Curator] Batch collection complete: %d expected, %d classified "
+            "across %d batches (%d successful, %d empty, %.0f%%)",
+            expected_total, classified, n_batches, n_successful, n_empty, pct,
+        )
+
+        # Guardrail: reject partial results below completeness threshold.
+        # A curation covering fewer than 80% of images would produce a truncated
+        # gallery and missing Photo Tour sections — worse than the GCV fallback.
+        _COMPLETENESS_THRESHOLD = 0.80
+        if expected_total > 0 and classified < _COMPLETENESS_THRESHOLD * expected_total:
+            logger.error(
+                "[LLM Curator] INCOMPLETE CURATION — only %d/%d images classified "
+                "(%.0f%% < %.0f%% threshold). "
+                "Result NOT cached or saved. Pipeline will use GCV fallback.",
+                classified, expected_total, pct, _COMPLETENESS_THRESHOLD * 100,
+            )
+            return None
 
         if not partial_results:
             return None
