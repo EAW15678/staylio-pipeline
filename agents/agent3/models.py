@@ -113,6 +113,10 @@ class MediaAsset:
     source: str = ""                 # "intake_upload" | "airbnb_scraped" | "vrbo_scraped" etc.
     source_caption: Optional[str] = None  # Caption from source listing (e.g. VRBO image name)
 
+    # pHash cache fields
+    source_phash: Optional[str] = None            # Canonical pHash of the source cluster
+    asset_url_original_cdn: Optional[str] = None  # Original CDN URL (informational, not stored)
+
     def to_db_record(self) -> dict:
         """Serialise for Supabase upsert."""
         return {
@@ -133,6 +137,8 @@ class MediaAsset:
             "social_crop_queued": self.social_crop_queued,
             "source": self.source,
             "source_caption": self.source_caption,
+            "source_phash": self.source_phash,
+            # asset_url_original_cdn is informational only — not written to DB
         }
 
 

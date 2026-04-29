@@ -47,6 +47,7 @@ from agents.agent3.r2_storage import (
     upload_photo_original,
 )
 from agents.agent3.llm_curator import run_llm_vision_curation
+from agents.agent3.phash_resolver import resolve_canonical_phashes, backfill_media_assets_phash
 from agents.agent3.video_generator import generate_all_videos
 from agents.agent3.vision_tagger import (
     tag_and_score_photos,
@@ -154,6 +155,7 @@ def agent3_node(state: dict) -> dict:
         asset = MediaAsset(
             property_id=property_id,
             asset_url_original=original_r2_url,
+            asset_url_original_cdn=url,
             source=source_label,
             source_caption=_meta.get("caption"),
         )
@@ -163,31 +165,73 @@ def agent3_node(state: dict) -> dict:
         assets.append(asset)
 
     # ── Step 4: Claid.ai enhancement (TS-07) ─────────────────────────────
-    # Check Supabase for previously enhanced photos — skip Claid for those
-    cached_enhancements = _fetch_cached_enhancements(property_id)
 
-    # Log per-source breakdown before cap decision
+    # Backfill source_phash on existing media_assets rows for this property.
+    # One-time per property after deploy; subsequent runs skip (count = 0).
+    backfill_count = 0
+    try:
+        from core.supabase_store import get_supabase as _get_sb
+        _null_check = (
+            _get_sb().table("media_assets")
+            .select("asset_id", count="exact")
+            .eq("property_id", property_id)
+            .is_("source_phash", "null")
+            .execute()
+        )
+        if (_null_check.count or 0) > 0:
+            _bf = backfill_media_assets_phash(property_id)
+            backfill_count = _bf.get("updated", 0)
+    except Exception as _bf_exc:
+        logger.warning("[Agent 3] pHash backfill check failed (non-fatal): %s", _bf_exc)
+
+    # Resolve canonical pHash for each asset's CDN URL (single property batch)
+    cdn_urls = [a.asset_url_original_cdn for a in assets if a.asset_url_original_cdn]
+    url_to_canonical_phash = resolve_canonical_phashes(property_id, cdn_urls)
+
+    # Load pHash-keyed enhancement cache from Supabase
+    phash_to_enhanced = _fetch_cached_enhancements_by_phash(property_id)
+
+    # Assign source_phash to each asset and identify pHash cache hits
+    cache_hit_r2_urls: set[str] = set()
+    for asset in assets:
+        cdn_url = asset.asset_url_original_cdn
+        canonical_phash = url_to_canonical_phash.get(cdn_url) if cdn_url else None
+        asset.source_phash = canonical_phash
+        if canonical_phash and canonical_phash in phash_to_enhanced:
+            asset.asset_url_enhanced = phash_to_enhanced[canonical_phash]
+            cache_hit_r2_urls.add(asset.asset_url_original)
+            logger.info(
+                "[Agent 3] pHash cache hit — skipping Claid: "
+                "canonical_phash=%s... url=%s",
+                canonical_phash[:8], (cdn_url or "")[-60:],
+            )
+
+    # Per-source breakdown + pHash cache summary
     source_counts: dict[str, int] = {}
     for a in assets:
         source_counts[a.source] = source_counts.get(a.source, 0) + 1
     logger.info(
-        f"[Agent 3] Photos by source: "
+        "[Agent 3] Photos by source: "
         + ", ".join(f"{s}={n}" for s, n in sorted(source_counts.items()))
-        + f" | Supabase cache hits: {len(cached_enhancements)}"
+        + f" | pHash cache hits: {len(cache_hit_r2_urls)}"
+    )
+    logger.info(
+        "[Agent 3] pHash cache: total_assets=%d cache_hits=%d cache_misses=%d backfilled=%d",
+        len(assets), len(cache_hit_r2_urls),
+        len(assets) - len(cache_hit_r2_urls), backfill_count,
     )
 
-    uncached_assets = [a for a in assets if a.asset_url_original not in cached_enhancements]
+    uncached_assets = [a for a in assets if a.asset_url_original not in cache_hit_r2_urls]
 
     # Apply source-priority cap before sending to Claid
     selected_for_enhancement, skipped_cap = _select_for_enhancement(
         uncached_assets, cap=ENHANCEMENT_CAP
     )
     logger.info(
-        f"[Agent 3] Enhancement cap={ENHANCEMENT_CAP}: "
-        f"{len(selected_for_enhancement)} selected, "
-        f"{len(cached_enhancements)} from cache, "
-        f"{len(skipped_cap)} skipped (over cap), "
-        f"total assets={len(assets)}"
+        "[Agent 3] Enhancement cap=%d: %d selected, %d from pHash cache, "
+        "%d skipped (over cap), total assets=%d",
+        ENHANCEMENT_CAP, len(selected_for_enhancement),
+        len(cache_hit_r2_urls), len(skipped_cap), len(assets),
     )
 
     uncached_urls = [a.asset_url_original for a in selected_for_enhancement]
@@ -205,12 +249,8 @@ def agent3_node(state: dict) -> dict:
     for asset in assets:
         original_url = asset.asset_url_original
 
-        # Reuse cached enhanced URL — no Claid call, no R2 re-upload
-        if original_url in cached_enhancements:
-            asset.asset_url_enhanced = cached_enhancements[original_url]
-            logger.info(
-                f"[Agent 3] Reusing cached enhanced URL — skipping Claid: {original_url}"
-            )
+        # pHash cache hit — enhanced URL already assigned above; no Claid call
+        if original_url in cache_hit_r2_urls:
             continue
 
         # Process Claid result for this asset
@@ -456,29 +496,42 @@ def _select_for_enhancement(
     return selected, skipped
 
 
-def _fetch_cached_enhancements(property_id: str) -> dict[str, str]:
+def _fetch_cached_enhancements_by_phash(property_id: str) -> dict[str, str]:
     """
-    Query Supabase for previously enhanced photos for this property.
-    Returns {asset_url_original: asset_url_enhanced} for records where
-    asset_url_enhanced is not null — used to skip redundant Claid.ai calls.
+    Query Supabase for previously enhanced photos for this property, keyed by
+    canonical pHash.  Returns {source_phash: asset_url_enhanced} for all rows
+    where both source_phash and asset_url_enhanced are non-null.
+
+    This enables pHash-keyed cache lookups: any photo in the same pHash cluster
+    as a previously enhanced photo gets the cached enhanced URL, regardless of
+    CDN URL changes or cross-source matches.
     """
     try:
         from core.supabase_store import get_supabase
         result = (
             get_supabase()
             .table("media_assets")
-            .select("asset_url_original,asset_url_enhanced")
+            .select("source_phash,asset_url_enhanced")
             .eq("property_id", property_id)
+            .not_.is_("source_phash", "null")
             .not_.is_("asset_url_enhanced", "null")
             .execute()
         )
-        return {
-            row["asset_url_original"]: row["asset_url_enhanced"]
+        cache = {
+            row["source_phash"]: row["asset_url_enhanced"]
             for row in (result.data or [])
-            if row.get("asset_url_original") and row.get("asset_url_enhanced")
+            if row.get("source_phash") and row.get("asset_url_enhanced")
         }
+        logger.info(
+            "[Agent 3] pHash enhancement cache loaded: %d entries for property %s",
+            len(cache), property_id,
+        )
+        return cache
     except Exception as exc:
-        logger.warning(f"[Agent 3] Could not fetch cached enhancements: {exc} — proceeding without cache")
+        logger.warning(
+            "[Agent 3] Could not fetch pHash cached enhancements: %s — proceeding without cache",
+            exc,
+        )
         return {}
 
 
