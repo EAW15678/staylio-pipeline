@@ -114,22 +114,63 @@ _VALID_ROLES = frozenset({"hero", "supporting", "gallery_only", "exclude"})
 _SHEET_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 # ── Deterministic selector constants ─────────────────────────────────────────
-# Maximum images selected per section for the Photo Tour.
-_SECTION_MAX_IMAGES: dict[str, int] = {
-    "Exterior":     3,
-    "Pool":         2,
-    "Living Areas": 3,
-    "Kitchen":      2,
-    "Bedrooms":     4,
-    "Bathrooms":    3,
-    "Extras":       2,
-}
+# _SECTION_MAX_IMAGES removed — replaced by _section_target() below.
+# Exterior and Extras retain hardcoded caps; all other sections are
+# property-driven (Bedrooms/Bathrooms) or unlimited (Kitchen/Pool/Living Areas).
 
 # Section selection thresholds.
 # Score is in [0.0, 1.0] — see _section_score() for weighting.
 _SECTION_PRIMARY_THRESHOLD  = 0.50   # first pass: strong flag or keyword evidence
 _SECTION_FALLBACK_THRESHOLD = 0.25   # second pass: text-only evidence (underfilled sections)
 _SECTION_MIN_SCORE          = 0.10   # absolute floor — zero-score images never selected
+
+
+def _extract_kb_count(kb_field) -> Optional[int]:
+    """
+    Extract an integer count from a PropertyField, dict, or bare value.
+    Returns None if missing, zero, or invalid.
+    """
+    if kb_field is None:
+        return None
+    if isinstance(kb_field, dict):
+        v = kb_field.get("value")
+    elif hasattr(kb_field, "value"):
+        v = kb_field.value
+    elif isinstance(kb_field, (int, float)):
+        return int(kb_field) if kb_field > 0 else None
+    else:
+        return None
+    if isinstance(v, (int, float)) and v > 0:
+        return int(v)
+    return None
+
+
+def _section_target(
+    section_name: str,
+    unique_eligible: int,
+    bedroom_count: Optional[int],
+    bathroom_count: Optional[int],
+) -> tuple[int, str]:
+    """
+    Returns (target, property_cap_label) for a section.
+    target = images to select (hero + supporting combined).
+    property_cap_label = string for logging ("unlimited" or numeric cap).
+    """
+    if section_name == "Bedrooms":
+        cap = bedroom_count if bedroom_count else 4
+        return min(unique_eligible, cap), str(cap)
+    if section_name == "Bathrooms":
+        cap = bathroom_count if bathroom_count else 3
+        return min(unique_eligible, cap), str(cap)
+    if section_name in ("Kitchen", "Pool", "Living Areas"):
+        return unique_eligible, "unlimited"
+    if section_name == "Exterior":
+        return min(unique_eligible, 3), "3"
+    if section_name == "Extras":
+        return min(unique_eligible, 2), "2"
+    # Unknown section — preserve prior default
+    return min(unique_eligible, 3), "3"
+
 
 # Per-section scoring signals.
 # flags (weight 0.50): any has_* boolean hit.
@@ -1391,9 +1432,10 @@ def _select_photo_tour(
                 break
         return selected
 
-    for section_name in CURATED_SECTION_NAMES:
-        section_max = _SECTION_MAX_IMAGES.get(section_name, 3)
+    bedroom_count  = _extract_kb_count((kb or {}).get("bedrooms"))
+    bathroom_count = _extract_kb_count((kb or {}).get("bathrooms"))
 
+    for section_name in CURATED_SECTION_NAMES:
         # Score every unused tour-eligible candidate
         scored: list[tuple] = []   # (score, img)
         n_zero = 0
@@ -1413,9 +1455,13 @@ def _select_photo_tour(
             -(t[1].get("quality_score") or 0.0),
         ))
 
-        logger.info(
-            "[LLM Curator] Section '%s': %d scored >0, %d zero-score, target=%d",
-            section_name, len(scored), n_zero, section_max,
+        # unique_eligible: dupe-winners + standalones (is_best_in_duplicate_group defaults True)
+        unique_eligible = sum(
+            1 for _s, img in scored
+            if img.get("is_best_in_duplicate_group", True)
+        )
+        section_max, property_cap_label = _section_target(
+            section_name, unique_eligible, bedroom_count, bathroom_count,
         )
 
         # Three-pass threshold cascade
@@ -1432,10 +1478,11 @@ def _select_photo_tour(
             )
             continue
 
-        top_scores = [round(_section_score(i, section_name), 2) for i in selected]
         logger.info(
-            "[LLM Curator] Section '%s': selected %d (scores: %s)",
-            section_name, len(selected), top_scores,
+            "[Stage 2] Section '%s': scored>0=%d zero=%d unique_eligible=%d "
+            "property_cap=%s target=%d selected=%d",
+            section_name, len(scored), n_zero, unique_eligible,
+            property_cap_label, section_max, len(selected),
         )
 
         for img in selected:
