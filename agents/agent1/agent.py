@@ -39,6 +39,11 @@ from agents.agent1.claude_parser import (
     normalise_and_fill_gaps,
 )
 from agents.agent1.firecrawl_scraper import scrape_pmc_website
+from agents.agent1.phash_dedupe import (
+    compute_phash_and_dimensions,
+    compute_quality_tier,
+    cluster_and_assign_canonical,
+)
 from core.pipeline_status import (
     PipelineStepStatus,
     cache_knowledge_base,
@@ -106,6 +111,17 @@ def agent1_node(state: PipelineState) -> PipelineState:
 
     # ── Step 3.5: SHA-256 photo source deduplication ──────────────────────
     kb = _dedupe_photos(kb)
+
+    # ── Step 3.6: pHash visual cluster assignment ──────────────────────────
+    try:
+        cluster_and_assign_canonical(property_id)
+    except Exception as exc:
+        logger.error(
+            "[Agent 1] pHash cluster_and_assign failed: %s. "
+            "source_assets canonical mapping based on SHA-256 only — "
+            "no pHash dedup applied this run. Pipeline continues.",
+            exc,
+        )
 
     # ── Step 4: Normalisation pass ────────────────────────────────────────
     try:
@@ -506,6 +522,15 @@ def _dedupe_photos(kb) -> object:
                         continue
 
                     content_hash = hashlib.sha256(resp.content).hexdigest()
+                    phash_hex, img_w, img_h = compute_phash_and_dimensions(resp.content)
+                    phash_computed_at = (
+                        datetime.now(timezone.utc).isoformat() if phash_hex else None
+                    )
+                    source_system = (
+                        photo.source if isinstance(photo.source, str) else photo.source.value
+                    )
+                    quality_tier  = compute_quality_tier(img_w, img_h) if img_w and img_h else None
+                    host_priority = (source_system == "intake_portal")
 
                     if content_hash in canonical_hashes:
                         # Duplicate of a photo seen this run — record and drop
@@ -516,8 +541,14 @@ def _dedupe_photos(kb) -> object:
                             "content_hash":       content_hash,
                             "is_canonical":       False,
                             "canonical_asset_id": canonical_id,
-                            "source_system":      photo.source if isinstance(photo.source, str) else photo.source.value,
+                            "source_system":      source_system,
                             "source_url":         photo.url,
+                            "phash":              phash_hex,
+                            "phash_computed_at":  phash_computed_at,
+                            "image_width":        img_w,
+                            "image_height":       img_h,
+                            "quality_tier":       quality_tier,
+                            "host_priority":      host_priority,
                         }).execute()
                         byte_dupe_count += 1
                         logger.debug(f"[Agent 1] Byte-dedup: duplicate skipped: {photo.url}")
@@ -530,8 +561,15 @@ def _dedupe_photos(kb) -> object:
                             "content_hash":       content_hash,
                             "is_canonical":       True,
                             "canonical_asset_id": None,
-                            "source_system":      photo.source if isinstance(photo.source, str) else photo.source.value,
+                            "source_system":      source_system,
                             "source_url":         photo.url,
+                            "phash":              phash_hex,
+                            "phash_computed_at":  phash_computed_at,
+                            "image_width":        img_w,
+                            "image_height":       img_h,
+                            "quality_tier":       quality_tier,
+                            "host_priority":      host_priority,
+                            "source_origins":     [source_system],
                         }).execute()
                         canonical_hashes[content_hash] = asset_id
                         canonical_photos.append(photo)

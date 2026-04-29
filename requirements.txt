@@ -28,6 +28,7 @@ upstash-redis>=1.0.0
 
 # ── Photo Enhancement (Agent 3) ──────────────────────────
 Pillow>=10.0.0
+imagehash>=4.3.1
 requests>=2.31.0
 
 # ── Google Cloud (Agent 3 + Agent 4) ────────────────────
