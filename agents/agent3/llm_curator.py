@@ -57,7 +57,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v8_observable_full_batch_recovery"
+_CURATION_VERSION = "curation_v9_property_driven_caps"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
