@@ -1045,9 +1045,11 @@ def _gallery_items_from_curation(
     Filtering rules (in order):
       1. gallery_visible == False   → dropped (corrupt/missing; never LLM tour-reject)
          Legacy fallback: gallery_visible missing AND role=='exclude' → dropped
-      2. llm_category invalid       → fall back to GCV subject_category
-      3. asset_id not in media_assets → skipped (unresolvable)
-      4. display_url empty          → skipped
+      2. asset_id not in media_assets → skipped (unresolvable)
+      3. display_url empty          → skipped
+      4. display_url == hero_photo  → skipped (hero rendered separately in banner)
+      5. duplicate_group non-winner → dropped (keep only is_best_in_duplicate_group)
+      6. llm_category invalid       → fall back to GCV subject_category
 
     Returns same dict shape as _prepare_gallery_items.
     """
@@ -1095,7 +1097,20 @@ def _gallery_items_from_curation(
             n_hero_skipped += 1
             continue
 
-        # 3. Category validation — fall back to GCV category if LLM gave invalid value
+        # 3. Hero exclusion — hero is shown in the full-width banner; skip it from All Photos.
+        if display_url == hero_photo:
+            n_hero_skipped += 1
+            continue
+
+        # 4. Duplicate-group suppression — include only the group winner in All Photos.
+        # Non-winners still appear in Photo Tour sections if selected there.
+        # Images without a duplicate_group (None) are always included.
+        dg = result.get("duplicate_group")
+        if dg and not result.get("is_best_in_duplicate_group", True):
+            n_excluded += 1
+            continue
+
+        # 5. Category validation — fall back to GCV category if LLM gave invalid value
         llm_cat = result.get("llm_category") or ""
         if llm_cat in _CURATION_VALID_CATEGORIES:
             category = llm_cat
@@ -1159,7 +1174,7 @@ def _gallery_items_from_curation(
     role_summary = ", ".join(f"{r}={n}" for r, n in sorted(role_counts.items()))
     logger.info(
         "[Agent 5] Curation gallery: total=%d candidates, roles=(%s), "
-        "excluded=%d, unresolvable=%d, no_url=%d, "
+        "excluded=%d (visibility+dupe_group), unresolvable=%d, hero_skipped=%d, "
         "cat_corrected=%d → %d items in gallery (%d categories)",
         len(per_image), role_summary,
         n_excluded, n_unresolvable, n_hero_skipped,
