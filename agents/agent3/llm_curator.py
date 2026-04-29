@@ -364,15 +364,6 @@ def run_llm_vision_curation(
         result["images"] = _derive_curated_section_fallback(result["images"])
         _log_curation_summary(result, source_hero_url)
 
-        # ── Persist to Supabase ───────────────────────────────────────────
-        _save_curation(
-            property_id=property_id,
-            image_set_hash=image_set_hash,
-            per_image_results=result["images"],
-            property_recommendations=result["property"],
-            asset_count=len(candidate_assets),
-        )
-
         # ── Cache in Redis ────────────────────────────────────────────────
         cache_payload = {
             "status": "complete",
@@ -385,6 +376,29 @@ def run_llm_vision_curation(
             cache_payload,
             ttl_seconds=_REDIS_TTL,
         )
+
+        # ── Persist to Postgres (Phase 1 write — nothing reads this yet) ──
+        # Redis is still the authoritative read source for Agent 5.
+        # persist_curation() is non-fatal: any failure is logged and the
+        # pipeline continues with Redis as source of truth.
+        try:
+            selector_decisions = _build_selector_decisions(result["images"])
+            persist_curation(
+                property_id=property_id,
+                image_set_hash=image_set_hash,
+                curation_model=_MODEL,
+                status="complete",
+                asset_count=len(result["images"]),
+                per_image_results=result["images"],
+                property_recommendations=result["property"],
+                selector_decisions=selector_decisions,
+            )
+        except Exception as exc:
+            logger.error(
+                "[Agent 3] curation persistence to Postgres failed: %s. "
+                "Pipeline continues — Redis remains source of truth.",
+                exc,
+            )
 
         logger.info(
             "[LLM Curator] Curation complete for property %s — "
@@ -1620,6 +1634,126 @@ def _extract_json(text: str) -> Optional[dict]:
 
 # ── Persistence ───────────────────────────────────────────────────────────────
 
+_VALID_STATUSES: frozenset = frozenset({
+    "complete",
+    "partial",
+    "failed",
+    "deterministic_fallback",
+})
+
+
+def _build_selector_decisions(images: list[dict]) -> dict:
+    """
+    Build a per-image selector ledger from the output of _select_photo_tour.
+
+    Fields captured from existing selector output:
+      final_role         — role assigned by _select_photo_tour
+      final_section      — curated_section (None for gallery_only/exclude)
+      gallery_visible    — always True on the LLM path; False = corrupt/missing
+      drop_reason        — exclude_reason when tour_eligible=False, else None
+      tier_used          — not tracked by current selector; always None
+      fallback_signals_matched — not tracked by current selector; always []
+
+    Example entry:
+      {
+        "https://r2.staylio.ai/.../photo_001.jpg": {
+          "tier_used":                None,
+          "final_role":               "supporting",
+          "final_section":            "Pool",
+          "gallery_visible":          True,
+          "drop_reason":              None,
+          "fallback_signals_matched": [],
+        }
+      }
+    """
+    decisions: dict = {}
+    for img in images:
+        asset_id = img.get("asset_id") or ""
+        if not asset_id:
+            continue
+        tour_eligible = img.get("tour_eligible", True)
+        decisions[asset_id] = {
+            "tier_used":                None,  # not tracked by current selector
+            "final_role":               img.get("role") or "gallery_only",
+            "final_section":            img.get("curated_section"),
+            "gallery_visible":          img.get("gallery_visible", True),
+            "drop_reason":              img.get("exclude_reason") if not tour_eligible else None,
+            "fallback_signals_matched": [],    # not tracked by current selector
+        }
+    return decisions
+
+
+def persist_curation(
+    *,
+    property_id: str,
+    image_set_hash: str,
+    curation_model: str,
+    status: str,
+    asset_count: int,
+    per_image_results: list[dict],
+    property_recommendations: dict,
+    selector_decisions: Optional[dict],
+) -> Optional[str]:
+    """
+    Persist curation to public.property_image_curations via atomic Postgres RPC.
+
+    Atomicity: calls supersede_and_insert_curation() which executes UPDATE +
+    INSERT in a single plpgsql transaction.  supabase-py is a REST client and
+    cannot issue multi-statement transactions natively — RPC is the correct path.
+    No new DB driver is introduced.
+
+    Note: implemented as sync to match the rest of the codebase (no asyncpg/
+    psycopg pool exists in Agent 3).  The task signature suggested `async def`
+    but that would require asyncio.run() wrapping which adds noise without benefit.
+
+    Raises ValueError on invalid status or non-JSON-serializable payload.
+    Raises on Supabase/network errors — caller wraps in try/except.
+
+    Returns the new row UUID string on success.
+    """
+    import json
+
+    if status not in _VALID_STATUSES:
+        raise ValueError(
+            f"persist_curation: invalid status {status!r}. "
+            f"Must be one of {sorted(_VALID_STATUSES)}"
+        )
+
+    # Validate JSON-serializability before sending to Supabase
+    try:
+        json.dumps(per_image_results)
+        json.dumps(property_recommendations)
+        if selector_decisions is not None:
+            json.dumps(selector_decisions)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"persist_curation: payload not JSON-serializable: {exc}"
+        ) from exc
+
+    from core.supabase_store import get_supabase
+    resp = get_supabase().rpc(
+        "supersede_and_insert_curation",
+        {
+            "p_property_id":        property_id,
+            "p_image_set_hash":     image_set_hash,
+            "p_curation_model":     curation_model,
+            "p_status":             status,
+            "p_asset_count":        asset_count,
+            "p_per_image_results":  per_image_results,
+            "p_property_recs":      property_recommendations,
+            "p_selector_decisions": selector_decisions,
+        },
+    ).execute()
+
+    new_id = resp.data
+    logger.info(
+        "[LLM Curator] Curation persisted to Postgres "
+        "(property=%s, hash=%s, status=%s, id=%s)",
+        property_id, image_set_hash[:12], status, new_id,
+    )
+    return str(new_id) if new_id else None
+
+
 def _save_curation(
     property_id: str,
     image_set_hash: str,
@@ -1653,18 +1787,21 @@ def _save_curation(
 
 
 def _mark_failed(property_id: str, image_set_hash: str, asset_count: int) -> None:
-    """Mark a curation attempt as failed so it can be retried next run."""
+    """Mark a curation attempt as failed in Postgres. Fire-and-forget."""
     try:
-        from core.supabase_store import get_supabase
-        get_supabase().table(_SUPABASE_TABLE).upsert(
-            {
-                "property_id":    property_id,
-                "image_set_hash": image_set_hash,
-                "status":         "failed",
-                "asset_count":    asset_count,
-                "curation_model": _MODEL,
-            },
-            on_conflict="property_id,image_set_hash",
-        ).execute()
-    except Exception:
-        pass  # Non-fatal — failure mode is already logged above
+        persist_curation(
+            property_id=property_id,
+            image_set_hash=image_set_hash,
+            curation_model=_MODEL,
+            status="failed",
+            asset_count=asset_count,
+            per_image_results=[],
+            property_recommendations={},
+            selector_decisions=None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[Agent 3] _mark_failed persistence to Postgres failed: %s. "
+            "Underlying LLM failure was already logged above.",
+            exc,
+        )
