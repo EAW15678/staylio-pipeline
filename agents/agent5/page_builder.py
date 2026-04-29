@@ -1258,12 +1258,25 @@ def _modules_from_curation_exact(
             logger.info("[Agent 5] Module '%s' skipped — hero unresolvable", section_name)
             continue
 
+        raw_supporting = sec.get("supporting") or []
+        emitted_supporting = len(raw_supporting)
         supporting_items: list = []
-        for sid in (sec.get("supporting") or [])[:2]:
+        skip_reasons: list[str] = []
+        for sid in raw_supporting:
             sitem = _resolve(sid)
-            if sitem and sitem["url"] != hero_item["url"]:
+            if sitem is None:
+                skip_reasons.append("unresolvable_url")
+            elif sitem["url"] == hero_item["url"]:
+                skip_reasons.append("matches_hero")
+            else:
                 supporting_items.append(sitem)
 
+        rendered_supporting = len(supporting_items)
+        skipped = emitted_supporting - rendered_supporting
+        logger.info(
+            "[Agent 5] Module section=%s emitted_supporting=%d rendered_supporting=%d skipped=%d reasons=%s",
+            section_name, emitted_supporting, rendered_supporting, skipped, skip_reasons,
+        )
         all_items = [hero_item] + supporting_items
         result[section_name] = {
             "hero":       hero_item,
