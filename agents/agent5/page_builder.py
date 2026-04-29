@@ -233,6 +233,14 @@ def build_landing_page_html(
     # Photos — gallery items and category modules
     media_assets   = visual_media.get("media_assets", [])
     image_curation = visual_media.get("image_curation")
+
+    # Supabase fallback: Redis cache may have expired or Agent 3 ran before this
+    # instance of Agent 5 was deployed. Load from Supabase when not in visual_media.
+    if image_curation is None:
+        _property_id = kb.get("property_id") or ""
+        if _property_id:
+            image_curation = _load_curation_from_supabase(_property_id)
+
     _curation_active = (
         image_curation is not None
         and image_curation.get("status") == "complete"
@@ -241,7 +249,14 @@ def build_landing_page_html(
 
     if _curation_active:
         # LLM curation is source of truth — Agent 5 is a render engine only
-        logger.info("[Agent 5] Using LLM vision curation for gallery and photo tour")
+        _source = image_curation.get("_source", "redis/state")
+        logger.info(
+            "[Agent 5] Using LLM vision curation (source=%s) — "
+            "%d images, %d tour sections",
+            _source,
+            len(image_curation.get("images") or []),
+            len((image_curation.get("property") or {}).get("photo_tour_sections") or []),
+        )
         gallery_items    = _gallery_items_from_curation(image_curation, media_assets, hero_photo, name)
         category_modules = _modules_from_curation_exact(image_curation, media_assets, name)
         # Use LLM-selected hero if page hero_photo not already set by Agent 3
@@ -253,8 +268,11 @@ def build_landing_page_html(
                         hero_photo = a.get("asset_url_enhanced") or a.get("asset_url_original") or ""
                         break
     else:
-        # Fallback: heuristic GCV-based path (original behavior)
-        logger.info("[Agent 5] No LLM curation — using GCV heuristic gallery selection")
+        # Fallback: heuristic GCV-based path (no LLM curation in Redis, state, or Supabase)
+        logger.info(
+            "[Agent 5] No LLM curation available (redis miss, supabase miss) — "
+            "using GCV heuristic gallery selection"
+        )
         gallery_items    = _prepare_gallery_items(
             media_assets=media_assets,
             hero_photo=hero_photo,
@@ -961,6 +979,55 @@ def _suppress_near_dupes(assets):
 
 
 # ── LLM curation-aware gallery builders ──────────────────────────────────────
+def _load_curation_from_supabase(property_id: str) -> Optional[dict]:
+    """
+    Load the latest complete LLM curation record from Supabase.
+
+    Called by build_landing_page_html when image_curation is absent from
+    visual_media (Redis cache expired or Agent 3 ran in a previous deploy).
+
+    Returns the curation dict {status, image_set_hash, images, property}
+    with _source="supabase" added for logging, or None on any failure.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("property_image_curations")
+            .select("per_image_results,property_recommendations,image_set_hash")
+            .eq("property_id", property_id)
+            .eq("status", "complete")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            row = result.data[0]
+            images   = row.get("per_image_results") or []
+            prop     = row.get("property_recommendations") or {}
+            n_tour   = len(prop.get("photo_tour_sections") or [])
+            logger.info(
+                "[Agent 5] Supabase curation load: property=%s, "
+                "%d images, %d tour sections (hash=%s...)",
+                property_id, len(images), n_tour,
+                (row.get("image_set_hash") or "")[:12],
+            )
+            return {
+                "status":         "complete",
+                "image_set_hash": row.get("image_set_hash"),
+                "images":         images,
+                "property":       prop,
+                "_source":        "supabase",
+            }
+        logger.info(
+            "[Agent 5] Supabase curation: no complete record for property=%s",
+            property_id,
+        )
+    except Exception as exc:
+        logger.warning("[Agent 5] Supabase curation load failed: %s", exc)
+    return None
+
+
 # These replace _prepare_gallery_items / _build_category_modules when Agent 3
 # has run LLM vision curation and embedded results in the visual_media payload.
 # Downstream rendering functions (_build_gallery_section, _build_category_modules_section)

@@ -449,6 +449,13 @@ def _load_cached_curation(property_id: str, image_set_hash: str) -> Optional[dic
                 "images": row.get("per_image_results") or [],
                 "property": row.get("property_recommendations") or {},
             }
+            logger.info(
+                "[LLM Curator] Supabase cache hit — property=%s hash=%s "
+                "(%d images, %d tour sections) — backfilling Redis",
+                property_id, image_set_hash[:12],
+                len(payload["images"]),
+                len((payload.get("property") or {}).get("photo_tour_sections") or []),
+            )
             # Backfill Redis
             cache_knowledge_base(redis_key, payload, ttl_seconds=_REDIS_TTL)
             return payload
