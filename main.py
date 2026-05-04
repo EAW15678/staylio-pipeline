@@ -403,6 +403,10 @@ ALLOWED_EVENT_NAMES = {
     "faq_expanded",
     "map_interacted",
     "owner_story_expanded",
+    "marketing_page_viewed",
+    "marketing_cta_clicked",
+    "marketing_solutions_nav_clicked",
+    "marketing_external_link_clicked",
 }
 
 @app.post("/public/events", status_code=202)
