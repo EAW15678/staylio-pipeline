@@ -43,13 +43,24 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        # ── staylio.ai origins (kept — transition window) ─────────────────
         "https://staylio.ai",
         "https://intake.staylio.ai",
         "https://vista-azule.staylio.ai",
+        # ── upliftstays.com / upliftstays.ai (DOMAIN-1B) ──────────────────
+        "https://upliftstays.com",
+        "https://www.upliftstays.com",
+        "https://vista-azule.upliftstays.com",
+        "https://upliftstays.ai",
+        "https://www.upliftstays.ai",
+        # ── Dev / tooling ─────────────────────────────────────────────────
         "null",
         "http://localhost:8080",
         "http://localhost:3000",
     ],
+    # Regex covers all property subdomains on both domains so future
+    # properties need no pipeline change (matches staylio-web middleware design).
+    allow_origin_regex=r"https://[a-z0-9-]+\.(staylio\.ai|upliftstays\.com)",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
