@@ -143,6 +143,11 @@ class IntakeSubmissionRequest(BaseModel):
     Railway writes all records to Supabase server-side using SERVICE_ROLE_KEY,
     so no database credentials are ever exposed in the portal HTML.
     """
+    # Existing-property mode (portal launch path): when the portal
+    # creates the property row at first questionnaire answer, Launch
+    # passes its property_id here to avoid creating a duplicate.
+    property_id: Optional[str] = None
+
     # Owner / PMC identity
     owner_name: str
     owner_email: str
@@ -213,11 +218,26 @@ async def intake_submission(
 ):
     """
     Receives the full intake portal submission from the browser.
-    Writes pmc_clients, properties, and intake_submissions to Supabase
-    using the SERVICE_ROLE_KEY (never exposed to the browser).
-    Then triggers the pipeline in the background.
 
-    Returns property_id and client_id so the portal can poll /status.
+    Two modes, selected by the presence of `property_id` in the request:
+
+    1. **Legacy / standalone mode** (property_id absent):
+       Mints new client_id + property_id, generates slug, inserts
+       pmc_clients + properties + intake_submissions, then fires the
+       pipeline. This is the original path used by the standalone HTML
+       intake form.
+
+    2. **Portal launch mode** (property_id provided):
+       The portal onboarding flow creates the properties row when the
+       user answers their first questionnaire question. By Launch time
+       the property already exists. This mode looks up that existing
+       row, skips pmc_clients/properties inserts, enforces a one-time
+       launch guard (no duplicate pipeline runs), inserts
+       intake_submissions, and fires the pipeline.
+
+    Both modes write to Supabase using the SERVICE_ROLE_KEY (never
+    exposed to the browser) and return property_id + client_id so the
+    portal can poll /status.
     """
     from core.supabase_store import get_supabase
     from pipeline.graph import run_intake_pipeline as execute_pipeline
@@ -225,36 +245,70 @@ async def intake_submission(
     try:
         sb = get_supabase()
 
-        client_id   = str(uuid4())
-        property_id = str(uuid4())
+        if request.property_id:
+            # ── Portal launch mode: property already exists ───────────
+            prop_resp = (
+                sb.table("properties")
+                .select("id, client_id, slug")
+                .eq("id", request.property_id)
+                .limit(1)
+                .execute()
+            )
+            if not prop_resp.data:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Property {request.property_id} not found.",
+                )
 
-        # ── Generate slug ──────────────────────────────────────────────
-        slug = _make_slug(request.property_name)
+            prop_row    = prop_resp.data[0]
+            property_id = prop_row["id"]
+            client_id   = prop_row["client_id"]
 
-        # ── Step 1: Insert PMC client ──────────────────────────────────
-        sb.table("pmc_clients").insert({
-            "client_id":    client_id,
-            "company_name": request.property_name,
-            "contact_name": request.owner_name,
-            "contact_email": request.owner_email,
-            "pms_type":     request.pms_type,
-            "created_at":   datetime.now(timezone.utc).isoformat(),
-        }).execute()
+            # Duplicate-launch guard: if pipeline_status rows already
+            # exist for this property, the pipeline has already been
+            # triggered. Reject to enforce one-time launch.
+            ps_resp = (
+                sb.table("pipeline_status")
+                .select("id", count="exact")
+                .eq("property_id", property_id)
+                .execute()
+            )
+            if ps_resp.count and ps_resp.count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Pipeline already launched for property {property_id}.",
+                )
 
-        # ── Step 2: Insert property ────────────────────────────────────
-        sb.table("properties").insert({
-            "property_id":  property_id,
-            "client_id":    client_id,
-            "client_type":  "pmc",
-            "name":         request.property_name,
-            "slug":         slug,
-            "city":         request.city,
-            "state":        request.state,
-            "zip_code":     request.zip_code,
-            "vibe_profile": request.vibe_profile,
-        }).execute()
+            # No pmc_clients insert — account already exists.
+            # No properties insert — row already exists.
+        else:
+            # ── Legacy standalone mode: mint everything fresh ─────────
+            client_id   = str(uuid4())
+            property_id = str(uuid4())
+            slug = _make_slug(request.property_name)
 
-        # ── Step 3: Insert intake submission ───────────────────────────
+            sb.table("pmc_clients").insert({
+                "client_id":    client_id,
+                "company_name": request.property_name,
+                "contact_name": request.owner_name,
+                "contact_email": request.owner_email,
+                "pms_type":     request.pms_type,
+                "created_at":   datetime.now(timezone.utc).isoformat(),
+            }).execute()
+
+            sb.table("properties").insert({
+                "property_id":  property_id,
+                "client_id":    client_id,
+                "client_type":  "pmc",
+                "name":         request.property_name,
+                "slug":         slug,
+                "city":         request.city,
+                "state":        request.state,
+                "zip_code":     request.zip_code,
+                "vibe_profile": request.vibe_profile,
+            }).execute()
+
+        # ── Insert intake submission (both modes) ─────────────────────
         sb.table("intake_submissions").insert({
             "property_id":       property_id,
             "client_id":         client_id,
@@ -302,7 +356,7 @@ async def intake_submission(
             },
         }).execute()
 
-        # ── Step 4: Trigger pipeline in background ─────────────────────
+        # ── Trigger pipeline in background ────────────────────────────
         background_tasks.add_task(
             execute_pipeline,
             property_id=property_id,
@@ -322,6 +376,8 @@ async def intake_submission(
             "message":     "Intake saved. Pipeline is running. Poll /status/{property_id} for updates.",
         }
 
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error(f"Intake submission failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
