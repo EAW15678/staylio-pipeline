@@ -471,6 +471,16 @@ def _detect_source(url: str) -> str:
         return "vrbo_scraped"
     if "getbooked" in url or "r2.cloudflarestorage" in url:
         return "intake_upload"
+    # Supabase Storage: owner/PMC photos uploaded via the Step 7 onboarding
+    # UI land here (bucket: property-photos, path {property_id}/{ts}-{file}).
+    # These MUST classify as intake_upload — that value drives enhancement
+    # priority 0 in _ENHANCEMENT_SOURCE_PRIORITY and source score 0.3 in
+    # Agent 5 _asset_score(). Falling through to "unknown" silently inverts
+    # the intended promotion (worst instead of best). host_priority is NOT
+    # the promotion mechanism — it is written by Agent 1 but read only for
+    # pHash dedupe tie-breaks.
+    if "supabase.co/storage" in url:
+        return "intake_upload"
     return "unknown"
 
 
