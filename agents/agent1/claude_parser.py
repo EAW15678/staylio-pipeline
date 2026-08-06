@@ -284,3 +284,40 @@ def _apply_extraction(
         knowledge_base.ingestion_sources.append(source)
 
     return knowledge_base
+
+
+# ── Standalone text-only extraction (PREVIEW-1) ─────────────────────────
+# Public wrapper for the /preview endpoint. Calls _claude_extract but
+# strips photo_urls from the result — preview is text confirmation only.
+
+def extract_text_from_page(url: str) -> Optional[dict]:
+    """
+    Fetch a URL, extract structured TEXT fields via Claude. No photos.
+    Used by the /preview endpoint for PMC/unknown URLs.
+    """
+    page_text = _fetch_page_text(url)
+    if not page_text:
+        return None
+
+    extraction = _claude_extract(page_text, url)
+    if not extraction:
+        return None
+
+    description = extraction.get("description") or ""
+    city = extraction.get("city")
+    state = extraction.get("state")
+    zip_code = extraction.get("zip_code")
+
+    return {
+        "property_name": extraction.get("property_name"),
+        "address_hint": ", ".join(filter(None, [city, state, zip_code])) or None,
+        "bedrooms": extraction.get("bedrooms"),
+        "bathrooms": extraction.get("bathrooms"),
+        "max_occupancy": extraction.get("max_occupancy"),
+        "property_type": extraction.get("property_type"),
+        "amenities": extraction.get("amenities", []),
+        "description_lead": description[:200] if description else None,
+        "rating": None,
+        "avg_nightly_rate": extraction.get("avg_nightly_rate"),
+        "source_platform": "pmc",
+    }

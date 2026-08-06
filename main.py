@@ -12,7 +12,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, Header
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr
@@ -207,8 +207,126 @@ def root():
         "service": "Staylio.ai Pipeline",
         "version": "2.0.0",
         "status": "running",
-        "endpoints": ["/health", "/intake", "/run", "/status/{property_id}"],
+        "endpoints": ["/health", "/intake", "/run", "/preview", "/status/{property_id}"],
     }
+
+
+# ── Preview rate limiter (in-memory, per IP, 10 calls/hour) ──────────────
+# No auth on this endpoint yet (matches /intake's current pattern).
+# Known gap: add auth before wide use. Rate limit is a cost guardrail only.
+_preview_rate: dict[str, list[float]] = {}
+_PREVIEW_RATE_LIMIT = 10
+_PREVIEW_RATE_WINDOW = 3600  # 1 hour in seconds
+
+def _check_preview_rate(ip: str) -> bool:
+    """Returns True if the request is allowed, False if rate-limited."""
+    import time as _time
+    now = _time.time()
+    calls = _preview_rate.get(ip, [])
+    calls = [t for t in calls if now - t < _PREVIEW_RATE_WINDOW]
+    if len(calls) >= _PREVIEW_RATE_LIMIT:
+        _preview_rate[ip] = calls
+        return False
+    calls.append(now)
+    _preview_rate[ip] = calls
+    return True
+
+
+class PreviewRequest(BaseModel):
+    url: str
+
+
+@app.post("/preview")
+async def preview_listing(request: PreviewRequest, req: Request):
+    """
+    Text-only property preview from a listing URL.
+
+    Detects the platform (Airbnb, VRBO, or PMC/unknown), scrapes TEXT fields
+    only (no photos, no images, no media), and returns a flat JSON dict for
+    the portal wizard's "confirm this is the right property" step.
+
+    No property_id required. No database writes. No pipeline trigger.
+    Latency: 5-10s for PMC/unknown (Firecrawl+Claude), 30-120s for
+    Airbnb/VRBO (Apify actor polling). Frontend must show a loading state.
+
+    No auth (matches /intake's current pattern) — rate-limited to 10
+    calls/IP/hour as a cost guardrail. Auth is a known gap for later.
+    """
+    from agents.agent1.apify_scraper import (
+        detect_ota_platform,
+        extract_text_from_airbnb,
+        extract_text_from_vrbo,
+    )
+    from agents.agent1.claude_parser import extract_text_from_page
+    from agents.agent1.firecrawl_scraper import firecrawl_scrape_to_markdown
+
+    # Rate limit check
+    client_ip = req.client.host if req.client else "unknown"
+    if not _check_preview_rate(client_ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Maximum 10 preview requests per hour.",
+        )
+
+    url = request.url.strip()
+    if not url or not url.startswith("http"):
+        raise HTTPException(status_code=400, detail="A valid HTTP(S) URL is required.")
+
+    try:
+        platform = detect_ota_platform(url)
+
+        if platform == "airbnb":
+            result = extract_text_from_airbnb(url)
+        elif platform == "vrbo":
+            result = extract_text_from_vrbo(url)
+        else:
+            # PMC / unknown: Firecrawl scrape → Claude text extraction
+            markdown = firecrawl_scrape_to_markdown(url)
+            if markdown:
+                from agents.agent1.claude_parser import _claude_extract
+                extraction = _claude_extract(markdown, url)
+                if extraction:
+                    description = extraction.get("description") or ""
+                    city = extraction.get("city")
+                    state = extraction.get("state")
+                    zip_code = extraction.get("zip_code")
+                    result = {
+                        "property_name": extraction.get("property_name"),
+                        "address_hint": ", ".join(filter(None, [city, state, zip_code])) or None,
+                        "bedrooms": extraction.get("bedrooms"),
+                        "bathrooms": extraction.get("bathrooms"),
+                        "max_occupancy": extraction.get("max_occupancy"),
+                        "property_type": extraction.get("property_type"),
+                        "amenities": extraction.get("amenities", []),
+                        "description_lead": description[:200] if description else None,
+                        "rating": None,
+                        "avg_nightly_rate": extraction.get("avg_nightly_rate"),
+                        "source_platform": platform or "unknown",
+                    }
+                else:
+                    result = None
+            else:
+                # Firecrawl failed — try direct page fetch + Claude
+                result = extract_text_from_page(url)
+                if result:
+                    result["source_platform"] = platform or "unknown"
+
+        if not result:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not extract property data from {url}. The page may be unreachable, empty, or not a property listing.",
+            )
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Preview extraction failed for {url}: {exc}")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Extraction failed: {type(exc).__name__}: {exc}",
+        )
 
 
 @app.post("/intake")

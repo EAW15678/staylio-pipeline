@@ -80,6 +80,14 @@ def scrape_pmc_website(
     return knowledge_base
 
 
+def firecrawl_scrape_to_markdown(url: str) -> Optional[str]:
+    """
+    Public wrapper for the /preview endpoint.
+    Scrapes a URL via Firecrawl and returns the raw markdown.
+    """
+    return _firecrawl_scrape(url)
+
+
 def _firecrawl_scrape(url: str) -> Optional[str]:
     headers = {
         "Authorization": f"Bearer {FIRECRAWL_API_KEY}",

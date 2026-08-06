@@ -658,3 +658,148 @@ def _upgrade_airbnb_photo_url(url: str) -> str:
     if "im_w=" in url:
         url = re.sub(r"im_w=\d+", "im_w=1200", url)
     return url
+
+
+# ── Standalone text-only extraction (PREVIEW-1) ─────────────────────────
+# These functions power the /preview endpoint. They call the same Apify
+# actors but return a flat dict of TEXT fields only — no photos, no
+# KnowledgeBase, no database writes.
+
+def extract_text_from_airbnb(url: str) -> Optional[dict]:
+    """
+    Run the Apify Airbnb Actor and return TEXT-ONLY property fields.
+    No photos, no reviews, no KnowledgeBase — just a flat dict for preview.
+    """
+    import json as _json
+
+    actor_input = {"startUrls": [{"url": url}]}
+    raw = _run_apify_actor(AIRBNB_ACTOR_ID, actor_input)
+    if not raw:
+        return None
+
+    listing = raw[0] if isinstance(raw, list) else raw
+
+    # ── PREVIEW-DEBUG: temporary logging to diagnose Apify schema drift ──
+    # Remove after the actual key names are confirmed from Railway logs.
+    logger.info(
+        f"[PREVIEW-DEBUG] raw keys: {list(listing.keys())}"
+    )
+    try:
+        logger.info(
+            f"[PREVIEW-DEBUG] full response: {_json.dumps(listing, default=str)}"
+        )
+    except Exception:
+        logger.info(f"[PREVIEW-DEBUG] response not JSON-serializable, repr: {repr(listing)[:3000]}")
+    # ── END PREVIEW-DEBUG ────────────────────────────────────────────────
+
+    location = listing.get("location") or listing.get("address") or {}
+    if isinstance(location, str):
+        location = {}
+
+    city = location.get("city") if isinstance(location, dict) else None
+    state = location.get("state") if isinstance(location, dict) else None
+    zip_code = (
+        (location.get("zipCode") or location.get("postalCode"))
+        if isinstance(location, dict) else None
+    )
+
+    amenities_raw = listing.get("amenities", [])
+    amenities = [
+        (a if isinstance(a, str) else a.get("name", ""))
+        for a in amenities_raw
+    ]
+    amenities = [a for a in amenities if a]
+
+    description = listing.get("description") or ""
+
+    return {
+        "property_name": listing.get("name"),
+        "address_hint": ", ".join(filter(None, [city, state, zip_code])) or None,
+        "bedrooms": listing.get("bedrooms"),
+        "bathrooms": listing.get("bathrooms"),
+        "max_occupancy": listing.get("personCapacity"),
+        "property_type": listing.get("roomType"),
+        "amenities": amenities,
+        "description_lead": description[:200] if description else None,
+        "rating": str(listing.get("stars")) if listing.get("stars") else None,
+        "avg_nightly_rate": _extract_nightly_rate(listing),
+        "source_platform": "airbnb",
+    }
+
+
+def extract_text_from_vrbo(url: str) -> Optional[dict]:
+    """
+    Run the Apify VRBO Actor and return TEXT-ONLY property fields.
+    No photos, no reviews, no KnowledgeBase — just a flat dict for preview.
+    """
+    property_id = _extract_vrbo_property_id(url)
+    if not property_id:
+        return None
+
+    actor_input = {
+        "location":             [property_id],
+        "limit":                1,
+        "site":                 "9001001",
+        "language":             "en_US",
+        "includes:description": True,
+        "includes:amenities":   True,
+        "includes:location":    True,
+        "adults:0":             2,
+    }
+
+    raw = _run_apify_actor(VRBO_ACTOR_ID, actor_input)
+    if not raw:
+        return None
+
+    listing = raw[0] if isinstance(raw, list) else raw
+
+    # Description
+    desc_container = listing.get("description") or {}
+    description = ""
+    if isinstance(desc_container, dict):
+        about = desc_container.get("about") or {}
+        texts = _flatten_vrbo_nested_items(about)
+        description = " ".join(texts) if texts else ""
+    elif isinstance(desc_container, str):
+        description = desc_container
+
+    # Specs
+    highlights = listing.get("highlights") or {}
+    bedrooms = (
+        highlights.get("bedroomsCount") or highlights.get("bedrooms")
+        if isinstance(highlights, dict) else None
+    )
+    bathrooms = (
+        highlights.get("bathroomsCount") or highlights.get("bathrooms")
+        if isinstance(highlights, dict) else None
+    )
+    max_occ = (
+        highlights.get("sleepsCount") or highlights.get("sleeps")
+        if isinstance(highlights, dict) else None
+    )
+
+    # Address
+    address = listing.get("address") or {}
+    city = address.get("city") if isinstance(address, dict) else None
+    state = (
+        address.get("province") or address.get("state")
+        if isinstance(address, dict) else None
+    )
+
+    # Amenities
+    amenities_container = listing.get("amenities") or {}
+    amenities = _flatten_vrbo_nested_items(amenities_container)
+
+    return {
+        "property_name": listing.get("name"),
+        "address_hint": ", ".join(filter(None, [city, state])) or None,
+        "bedrooms": bedrooms,
+        "bathrooms": bathrooms,
+        "max_occupancy": max_occ,
+        "property_type": None,
+        "amenities": amenities,
+        "description_lead": description[:200] if description else None,
+        "rating": None,
+        "avg_nightly_rate": None,
+        "source_platform": "vrbo",
+    }
