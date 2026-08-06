@@ -464,23 +464,34 @@ def _stable_filename(url: str, index: int) -> str:
 
 
 def _detect_source(url: str) -> str:
-    """Detect whether a photo came from Airbnb, VRBO, or was uploaded."""
+    """Detect whether a photo came from Airbnb, VRBO, or was uploaded.
+
+    ORDERING REQUIREMENT: upload-destination checks (Supabase Storage,
+    R2, getbooked) MUST come before platform-name substring checks
+    (airbnb, vrbo). Owners routinely download listing photos and
+    re-upload them with filenames like "airbnb-export-3.jpg" — a
+    substring match on the full URL would misclassify these as
+    airbnb_scraped (priority 2, score 0.0) instead of intake_upload
+    (priority 0, score 0.3), silently inverting the intended promotion.
+    Storage destination is authoritative about provenance; filename
+    contents are not. Do not reorder these branches.
+    """
+    # ── Upload destinations first (authoritative provenance) ─────────
+    # Supabase Storage: owner/PMC photos uploaded via the Step 7
+    # onboarding UI (bucket: property-photos, path {property_id}/{ts}-{file}).
+    # intake_upload drives enhancement priority 0 in
+    # _ENHANCEMENT_SOURCE_PRIORITY and source score 0.3 in Agent 5
+    # _asset_score(). host_priority is NOT the promotion mechanism —
+    # it is written by Agent 1 but read only for pHash dedupe tie-breaks.
+    if "supabase.co/storage" in url:
+        return "intake_upload"
+    if "getbooked" in url or "r2.cloudflarestorage" in url:
+        return "intake_upload"
+    # ── Platform-name substring matches (after destination checks) ───
     if "airbnb" in url or "muscache" in url:
         return "airbnb_scraped"
     if "vrbo" in url or "homeaway" in url:
         return "vrbo_scraped"
-    if "getbooked" in url or "r2.cloudflarestorage" in url:
-        return "intake_upload"
-    # Supabase Storage: owner/PMC photos uploaded via the Step 7 onboarding
-    # UI land here (bucket: property-photos, path {property_id}/{ts}-{file}).
-    # These MUST classify as intake_upload — that value drives enhancement
-    # priority 0 in _ENHANCEMENT_SOURCE_PRIORITY and source score 0.3 in
-    # Agent 5 _asset_score(). Falling through to "unknown" silently inverts
-    # the intended promotion (worst instead of best). host_priority is NOT
-    # the promotion mechanism — it is written by Agent 1 but read only for
-    # pHash dedupe tie-breaks.
-    if "supabase.co/storage" in url:
-        return "intake_upload"
     return "unknown"
 
 
