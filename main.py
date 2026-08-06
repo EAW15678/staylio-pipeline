@@ -233,34 +233,85 @@ def _check_preview_rate(ip: str) -> bool:
 
 
 class PreviewRequest(BaseModel):
-    url: str
+    # Multi-source: at least one must be non-null.
+    # Priority order: direct > vrbo > airbnb > booking_com.
+    direct_url:  Optional[str] = None
+    vrbo_url:    Optional[str] = None
+    airbnb_url:  Optional[str] = None
+    booking_url: Optional[str] = None
+    # Legacy single-URL field (PREVIEW-1 backward compat — deprecated)
+    url:         Optional[str] = None
+
+
+def _is_usable_preview(result: Optional[dict]) -> bool:
+    """A preview result is usable if it has property_name OR (bedrooms AND bathrooms)."""
+    if not result:
+        return False
+    if result.get("property_name"):
+        return True
+    if result.get("bedrooms") is not None and result.get("bathrooms") is not None:
+        return True
+    return False
+
+
+def _extract_direct(url: str) -> Optional[dict]:
+    """Direct/PMC extraction: Firecrawl markdown → Claude semantic parse."""
+    from agents.agent1.firecrawl_scraper import firecrawl_scrape_to_markdown
+    from agents.agent1.claude_parser import extract_text_from_page, _claude_extract
+
+    markdown = firecrawl_scrape_to_markdown(url)
+    if markdown:
+        extraction = _claude_extract(markdown, url)
+        if extraction:
+            description = extraction.get("description") or ""
+            city = extraction.get("city")
+            state = extraction.get("state")
+            zip_code = extraction.get("zip_code")
+            return {
+                "property_name": extraction.get("property_name"),
+                "address_hint": ", ".join(filter(None, [city, state, zip_code])) or None,
+                "bedrooms": extraction.get("bedrooms"),
+                "bathrooms": extraction.get("bathrooms"),
+                "max_occupancy": extraction.get("max_occupancy"),
+                "property_type": extraction.get("property_type"),
+                "amenities": extraction.get("amenities", []),
+                "description_lead": description[:200] if description else None,
+                "rating": None,
+                "avg_nightly_rate": extraction.get("avg_nightly_rate"),
+                "source_platform": "direct",
+            }
+    # Firecrawl failed — try direct page fetch + Claude
+    result = extract_text_from_page(url)
+    if result:
+        result["source_platform"] = "direct"
+    return result
 
 
 @app.post("/preview")
 async def preview_listing(request: PreviewRequest, req: Request):
     """
-    Text-only property preview from a listing URL.
+    Text-only property preview from listing URLs — multi-source sequential
+    fallback.
 
-    Detects the platform (Airbnb, VRBO, or PMC/unknown), scrapes TEXT fields
-    only (no photos, no images, no media), and returns a flat JSON dict for
-    the portal wizard's "confirm this is the right property" step.
+    Accepts up to 4 URLs keyed by platform type. Tries them in business
+    priority order (direct > vrbo > airbnb > booking_com), stopping at the
+    first source that returns usable data. This trades worst-case latency
+    for not paying for Apify calls when a faster/free source already worked.
+
+    "Usable" = at least property_name OR (bedrooms AND bathrooms) present.
+    Partial/missing fields are fine — the user fills gaps manually in later
+    wizard steps.
 
     No property_id required. No database writes. No pipeline trigger.
-    Latency: 5-10s for PMC/unknown (Firecrawl+Claude), 30-120s for
-    Airbnb/VRBO (Apify actor polling). Frontend must show a loading state.
-
     No auth (matches /intake's current pattern) — rate-limited to 10
-    calls/IP/hour as a cost guardrail. Auth is a known gap for later.
+    calls/IP/hour as a cost guardrail.
     """
     from agents.agent1.apify_scraper import (
-        detect_ota_platform,
         extract_text_from_airbnb,
         extract_text_from_vrbo,
     )
-    from agents.agent1.claude_parser import extract_text_from_page
-    from agents.agent1.firecrawl_scraper import firecrawl_scrape_to_markdown
 
-    # Rate limit check
+    # Rate limit: counts as ONE request regardless of sources attempted
     client_ip = req.client.host if req.client else "unknown"
     if not _check_preview_rate(client_ip):
         raise HTTPException(
@@ -268,65 +319,78 @@ async def preview_listing(request: PreviewRequest, req: Request):
             detail="Rate limit exceeded. Maximum 10 preview requests per hour.",
         )
 
-    url = request.url.strip()
-    if not url or not url.startswith("http"):
-        raise HTTPException(status_code=400, detail="A valid HTTP(S) URL is required.")
+    # Build ordered source list from provided URLs (priority order)
+    # Legacy single-URL field: detect platform and slot into the right position
+    sources: list[tuple[str, str]] = []
+    if request.direct_url:
+        sources.append(("direct", request.direct_url.strip()))
+    if request.vrbo_url:
+        sources.append(("vrbo", request.vrbo_url.strip()))
+    if request.airbnb_url:
+        sources.append(("airbnb", request.airbnb_url.strip()))
+    if request.booking_url:
+        sources.append(("booking_com", request.booking_url.strip()))
 
-    try:
-        platform = detect_ota_platform(url)
+    # Legacy backward compat: if only "url" is provided, detect platform
+    if not sources and request.url:
+        from agents.agent1.apify_scraper import detect_ota_platform
+        legacy_url = request.url.strip()
+        platform = detect_ota_platform(legacy_url) or "direct"
+        sources.append((platform, legacy_url))
 
-        if platform == "airbnb":
-            result = extract_text_from_airbnb(url)
-        elif platform == "vrbo":
-            result = extract_text_from_vrbo(url)
-        else:
-            # PMC / unknown: Firecrawl scrape → Claude text extraction
-            markdown = firecrawl_scrape_to_markdown(url)
-            if markdown:
-                from agents.agent1.claude_parser import _claude_extract
-                extraction = _claude_extract(markdown, url)
-                if extraction:
-                    description = extraction.get("description") or ""
-                    city = extraction.get("city")
-                    state = extraction.get("state")
-                    zip_code = extraction.get("zip_code")
-                    result = {
-                        "property_name": extraction.get("property_name"),
-                        "address_hint": ", ".join(filter(None, [city, state, zip_code])) or None,
-                        "bedrooms": extraction.get("bedrooms"),
-                        "bathrooms": extraction.get("bathrooms"),
-                        "max_occupancy": extraction.get("max_occupancy"),
-                        "property_type": extraction.get("property_type"),
-                        "amenities": extraction.get("amenities", []),
-                        "description_lead": description[:200] if description else None,
-                        "rating": None,
-                        "avg_nightly_rate": extraction.get("avg_nightly_rate"),
-                        "source_platform": platform or "unknown",
-                    }
-                else:
-                    result = None
-            else:
-                # Firecrawl failed — try direct page fetch + Claude
-                result = extract_text_from_page(url)
-                if result:
-                    result["source_platform"] = platform or "unknown"
-
-        if not result:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Could not extract property data from {url}. The page may be unreachable, empty, or not a property listing.",
-            )
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.error(f"Preview extraction failed for {url}: {exc}")
+    if not sources:
         raise HTTPException(
-            status_code=502,
-            detail=f"Extraction failed: {type(exc).__name__}: {exc}",
+            status_code=400,
+            detail="At least one URL is required (direct_url, vrbo_url, airbnb_url, or booking_url).",
         )
+
+    # Validate URLs
+    for platform, url in sources:
+        if not url.startswith("http"):
+            raise HTTPException(status_code=400, detail=f"Invalid URL for {platform}: {url}")
+
+    sources_attempted: list[str] = []
+    sources_failed: list[str] = []
+    failure_reasons: dict[str, str] = {}
+
+    for platform, url in sources:
+        sources_attempted.append(platform)
+        try:
+            if platform == "airbnb":
+                result = extract_text_from_airbnb(url)
+            elif platform == "vrbo":
+                result = extract_text_from_vrbo(url)
+            else:
+                # direct, booking_com, unknown — all use Firecrawl+Claude
+                result = _extract_direct(url)
+                if result:
+                    result["source_platform"] = platform
+
+            if _is_usable_preview(result):
+                result["sources_attempted"] = sources_attempted
+                result["sources_failed"] = sources_failed
+                return result
+
+            # Not usable — record failure and continue
+            sources_failed.append(platform)
+            failure_reasons[platform] = "Extraction returned insufficient data"
+            logger.info(f"[PREVIEW] {platform} extraction not usable for {url}, trying next source")
+
+        except Exception as exc:
+            sources_failed.append(platform)
+            failure_reasons[platform] = f"{type(exc).__name__}: {exc}"
+            logger.warning(f"[PREVIEW] {platform} extraction failed for {url}: {exc}")
+
+    # All sources exhausted
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "message": "Could not extract usable property data from any provided URL. You can still proceed and fill in details manually.",
+            "sources_attempted": sources_attempted,
+            "sources_failed": sources_failed,
+            "failure_reasons": failure_reasons,
+        },
+    )
 
 
 @app.post("/intake")

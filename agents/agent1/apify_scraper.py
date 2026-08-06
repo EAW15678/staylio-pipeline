@@ -665,10 +665,80 @@ def _upgrade_airbnb_photo_url(url: str) -> str:
 # actors but return a flat dict of TEXT fields only — no photos, no
 # KnowledgeBase, no database writes.
 
+def _parse_airbnb_sub_description(listing: dict) -> dict:
+    """
+    Parse bedrooms/bathrooms/city/state from Airbnb's subDescription
+    and listing title when top-level keys are absent.
+
+    Confirmed shapes (listing 1731303449683421774):
+      subDescription.items = ["10 guests", "5 bedrooms", "8 beds", "4.5 baths"]
+      subDescription.title = "Entire home in St. Petersburg, Florida"
+    """
+    result: dict = {"bedrooms": None, "bathrooms": None, "city": None, "state": None}
+    sub = listing.get("subDescription") or {}
+    if not isinstance(sub, dict):
+        return result
+
+    # Parse items like "5 bedrooms", "4.5 baths"
+    for item in sub.get("items") or []:
+        if not isinstance(item, str):
+            continue
+        lower = item.lower()
+        try:
+            num = float(re.match(r"[\d.]+", item).group())  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            continue
+        if "bedroom" in lower:
+            result["bedrooms"] = int(num) if num == int(num) else num
+        elif "bath" in lower:
+            result["bathrooms"] = num
+
+    # Parse title like "Entire home in St. Petersburg, Florida"
+    title = sub.get("title") or ""
+    if " in " in title:
+        location_part = title.split(" in ", 1)[1].strip()
+        parts = [p.strip() for p in location_part.split(",")]
+        if len(parts) == 2:
+            result["city"] = parts[0]
+            result["state"] = parts[1]
+
+    return result
+
+
+def _flatten_airbnb_amenities(amenities_raw: list) -> list[str]:
+    """
+    Handle both Airbnb amenity shapes:
+      - Flat list of strings: ["WiFi", "Kitchen"]
+      - Category groups: [{"title": "Bathroom", "values": [{"title": "Hot tub", "available": true}, ...]}]
+    """
+    amenities: list[str] = []
+    for item in amenities_raw:
+        if isinstance(item, str):
+            if item:
+                amenities.append(item)
+        elif isinstance(item, dict):
+            if "values" in item and isinstance(item["values"], list):
+                # Category group shape
+                for val in item["values"]:
+                    if isinstance(val, dict):
+                        if val.get("available", True) and val.get("title"):
+                            amenities.append(val["title"])
+                    elif isinstance(val, str) and val:
+                        amenities.append(val)
+            elif item.get("name"):
+                amenities.append(item["name"])
+            elif item.get("title"):
+                amenities.append(item["title"])
+    return amenities
+
+
 def extract_text_from_airbnb(url: str) -> Optional[dict]:
     """
     Run the Apify Airbnb Actor and return TEXT-ONLY property fields.
     No photos, no reviews, no KnowledgeBase — just a flat dict for preview.
+
+    Best-effort: Airbnb responses vary by listing. Fields that can't be
+    parsed return null rather than erroring the whole extraction.
     """
     import json as _json
 
@@ -679,49 +749,77 @@ def extract_text_from_airbnb(url: str) -> Optional[dict]:
 
     listing = raw[0] if isinstance(raw, list) else raw
 
-    # ── PREVIEW-DEBUG: temporary logging to diagnose Apify schema drift ──
-    # Remove after the actual key names are confirmed from Railway logs.
-    logger.info(
-        f"[PREVIEW-DEBUG] raw keys: {list(listing.keys())}"
-    )
+    # ── PREVIEW-DEBUG: log Airbnb response shape (kept for ongoing
+    # diagnosis — Airbnb response variability is structural, not a
+    # one-time issue) ────────────────────────────────────────────────
+    logger.info(f"[PREVIEW-DEBUG] Airbnb raw keys: {sorted(listing.keys())}")
     try:
-        logger.info(
-            f"[PREVIEW-DEBUG] full response: {_json.dumps(listing, default=str)}"
-        )
+        logger.info(f"[PREVIEW-DEBUG] Airbnb full response: {_json.dumps(listing, default=str)[:5000]}")
     except Exception:
-        logger.info(f"[PREVIEW-DEBUG] response not JSON-serializable, repr: {repr(listing)[:3000]}")
-    # ── END PREVIEW-DEBUG ────────────────────────────────────────────────
+        pass
 
+    # ── Name: try "name", fall back to "title" ─────────────────────
+    name = listing.get("name") or listing.get("title")
+
+    # ── Description: try "description", fall back to "metaDescription" ─
+    description = listing.get("description") or listing.get("metaDescription") or ""
+    if isinstance(description, dict):
+        description = description.get("value") or description.get("text") or ""
+    if isinstance(description, list):
+        description = " ".join(str(s) for s in description)
+
+    # ── Bedrooms/bathrooms: try top-level, fall back to subDescription ─
+    bedrooms = listing.get("bedrooms")
+    bathrooms = listing.get("bathrooms")
+    city = None
+    state = None
+
+    # Location from top-level location/address dict
     location = listing.get("location") or listing.get("address") or {}
     if isinstance(location, str):
         location = {}
+    if isinstance(location, dict):
+        city = location.get("city")
+        state = location.get("state")
+        zip_code = location.get("zipCode") or location.get("postalCode")
+    else:
+        zip_code = None
 
-    city = location.get("city") if isinstance(location, dict) else None
-    state = location.get("state") if isinstance(location, dict) else None
-    zip_code = (
-        (location.get("zipCode") or location.get("postalCode"))
-        if isinstance(location, dict) else None
-    )
+    # Fall back to subDescription for missing fields
+    if bedrooms is None or bathrooms is None or city is None:
+        sub = _parse_airbnb_sub_description(listing)
+        if bedrooms is None:
+            bedrooms = sub["bedrooms"]
+        if bathrooms is None:
+            bathrooms = sub["bathrooms"]
+        if city is None:
+            city = sub["city"]
+        if state is None:
+            state = sub["state"]
 
-    amenities_raw = listing.get("amenities", [])
-    amenities = [
-        (a if isinstance(a, str) else a.get("name", ""))
-        for a in amenities_raw
-    ]
-    amenities = [a for a in amenities if a]
+    # ── Amenities: handle both flat and category-grouped shapes ────
+    amenities_raw = listing.get("amenities") or []
+    amenities = _flatten_airbnb_amenities(amenities_raw)
 
-    description = listing.get("description") or ""
+    # ── Rating: try "stars", fall back to nested rating object ─────
+    rating = listing.get("stars")
+    if rating is None:
+        rating_obj = listing.get("rating")
+        if isinstance(rating_obj, dict):
+            rating = rating_obj.get("guestSatisfaction") or rating_obj.get("value")
+        elif isinstance(rating_obj, (int, float)):
+            rating = rating_obj
 
     return {
-        "property_name": listing.get("name"),
+        "property_name": name,
         "address_hint": ", ".join(filter(None, [city, state, zip_code])) or None,
-        "bedrooms": listing.get("bedrooms"),
-        "bathrooms": listing.get("bathrooms"),
+        "bedrooms": bedrooms,
+        "bathrooms": bathrooms,
         "max_occupancy": listing.get("personCapacity"),
         "property_type": listing.get("roomType"),
         "amenities": amenities,
-        "description_lead": description[:200] if description else None,
-        "rating": str(listing.get("stars")) if listing.get("stars") else None,
+        "description_lead": str(description)[:200] if description else None,
+        "rating": str(rating) if rating is not None else None,
         "avg_nightly_rate": _extract_nightly_rate(listing),
         "source_platform": "airbnb",
     }
