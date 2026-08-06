@@ -193,6 +193,12 @@ class IntakeSubmissionRequest(BaseModel):
     amenities: list[str] = []
     guest_book_entries: list[dict] = []
 
+    # Portal photo uploads (Supabase Storage public URLs).
+    # Populated by the portal wizard's photo-upload step; legacy
+    # standalone form never sends this. Each item:
+    # {"url": str, "category": str|null, "caption": str|null}
+    uploaded_photo_urls: Optional[list[dict]] = None
+
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.get("/health")
@@ -506,6 +512,7 @@ async def intake_submission(
             "state":             request.state,
             "zip_code":          request.zip_code,
             "guest_book_entries": request.guest_book_entries or [],
+            "uploaded_photos":   request.uploaded_photo_urls or [],
             "submitted_at":      datetime.now(timezone.utc).isoformat(),
             "raw_data": {
                 "owner_name":       request.owner_name,
