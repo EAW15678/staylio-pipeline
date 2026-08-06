@@ -104,6 +104,7 @@ if mock_curation_path:
 from core.pipeline_status import get_cached_knowledge_base          # noqa: E402
 from agents.agent5.page_builder import build_landing_page_html      # noqa: E402
 from agents.agent5.agent import _load_from_cache_or_state, _fallback_slug  # noqa: E402
+from agents.agent5.cloudflare_deployer import PROPERTY_PAGE_BASE_DOMAIN    # noqa: E402
 
 # ── Step 1: Load knowledge base ────────────────────────────────────────────────
 print("\n[1/4] Loading knowledge base …")
@@ -210,7 +211,7 @@ print(f"  All Photos visible      : {visible_gallery} (cap={MAX_VISIBLE_ALL_PHOT
 # ── Step 4: Build slug and render HTML ────────────────────────────────────────
 print("\n[4/4] Rendering HTML …")
 slug     = kb.get("slug") or _fallback_slug(kb)
-page_url = f"https://{slug}.staylio.ai"
+page_url = f"https://{slug}.{PROPERTY_PAGE_BASE_DOMAIN}"
 print(f"  slug     = {slug!r}")
 print(f"  page_url = {page_url}")
 

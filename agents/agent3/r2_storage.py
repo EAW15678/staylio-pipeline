@@ -39,8 +39,11 @@ BUCKET_ENHANCED  = "staylio-enhanced"
 BUCKET_CROPS     = "staylio-crops"
 BUCKET_VIDEO     = "staylio-video"
 
-# Public CDN base URL for R2 assets (configured in Cloudflare dashboard)
-R2_PUBLIC_BASE = os.environ.get("R2_PUBLIC_BASE", "https://assets.staylio.ai")
+# Public CDN base URL for R2 assets (configured in Cloudflare dashboard).
+# BLOCKER: assets.upliftstays.com does not have DNS yet (as of 2026-08-06).
+# The env var R2_PUBLIC_BASE should be set in Railway to the actual CDN URL
+# until DNS is configured. This default is the intended target.
+R2_PUBLIC_BASE = os.environ.get("R2_PUBLIC_BASE", "https://assets.upliftstays.com")
 R2_ENHANCED_PUBLIC_URL = os.environ.get("R2_ENHANCED_PUBLIC_URL", R2_PUBLIC_BASE)
 R2_VIDEO_PUBLIC_URL = os.environ.get("R2_VIDEO_PUBLIC_URL", R2_PUBLIC_BASE)
 

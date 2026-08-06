@@ -373,7 +373,7 @@ def _build_report_html(
   {"<p class='estimate-note'>* Estimated values use a 2% click-to-booking rate and average nightly rate. Install the conversion pixel for confirmed booking data.</p>" if not snapshot.pixel_active else ""}
 
   <div class="footer">
-    <span>Staylio · staylio.ai</span>
+    <span>UpliftStays · upliftstays.com</span>
     <span>Generated {datetime.now(timezone.utc).strftime("%B %d, %Y")}</span>
     <span>Confidential — {property_name}</span>
   </div>

@@ -44,17 +44,20 @@ from agents.agent7.models import (
 
 logger = logging.getLogger(__name__)
 
-# Pixel endpoint — receives POST from PMC confirmation pages
-PIXEL_ENDPOINT = os.environ.get("PIXEL_ENDPOINT_URL", "https://pixel.staylio.ai/conversion")
+# Pixel endpoint — receives POST from PMC confirmation pages.
+# BLOCKER: pixel.upliftstays.com does not have DNS yet (as of 2026-08-06).
+# The env var PIXEL_ENDPOINT_URL should be set in Railway to the actual
+# endpoint until DNS is configured. This default is the intended target.
+PIXEL_ENDPOINT = os.environ.get("PIXEL_ENDPOINT_URL", "https://pixel.upliftstays.com/conversion")
 
 
 # ── Conversion Pixel ──────────────────────────────────────────────────────
 
-PIXEL_SNIPPET_TEMPLATE = """<!-- Staylio Conversion Pixel | Install on booking confirmation page only -->
+PIXEL_SNIPPET_TEMPLATE = """<!-- UpliftStays Conversion Pixel | Install on booking confirmation page only -->
 <script>
 (function() {{
   var PROPERTY_ID = "{property_id}";
-  var ENDPOINT    = "https://pixel.staylio.ai/conversion";
+  var ENDPOINT    = "https://pixel.upliftstays.com/conversion";
 
   // Read UTM attribution from sessionStorage (set when visitor arrived from Staylio page)
   function getAttr(key) {{

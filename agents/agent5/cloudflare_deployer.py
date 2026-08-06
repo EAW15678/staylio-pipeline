@@ -3,8 +3,8 @@ TS-12 — Cloudflare R2 Deployer
 Tool: Cloudflare R2 (via boto3 S3-compatible API)
 
 Deploys built HTML landing pages to Cloudflare R2.
-A Cloudflare Worker (staylio-router) intercepts *.staylio.ai traffic,
-reads the subdomain, fetches {slug}/index.html from R2, and serves it.
+A Cloudflare Worker intercepts *.upliftstays.com (and legacy *.staylio.ai)
+traffic, reads the subdomain, fetches {slug}/index.html from R2, and serves it.
 
 FIX NOTES (v8 → v9):
   Replaced Cloudflare Pages Direct Upload API with R2 upload via boto3.
@@ -29,7 +29,14 @@ R2_ACCESS_KEY_ID       = os.environ.get("R2_ACCESS_KEY_ID", "")
 R2_SECRET_ACCESS_KEY   = os.environ.get("R2_SECRET_ACCESS_KEY", "")
 R2_BUCKET_NAME         = os.environ.get("R2_BUCKET_NAME", "staylio-pages")
 
-BOOKED_BASE_DOMAIN = "staylio.ai"
+# Default domain for new property page URLs. Env-driven so future domain
+# changes don't require code changes. History: Booked -> Staylio -> UpliftStays.
+# This only affects NEW property page URLs at creation time — existing properties
+# (e.g. Vista Azule on staylio.ai) already have their page_url stored in the DB
+# and are unaffected by this default changing.
+PROPERTY_PAGE_BASE_DOMAIN = os.environ.get(
+    "PROPERTY_PAGE_BASE_DOMAIN", "upliftstays.com"
+)
 
 
 def deploy_property_page(
@@ -85,7 +92,7 @@ def _build_page_url(
 ) -> str:
     if deploy_mode == DeployMode.CNAME_CUSTOM and custom_domain:
         return f"https://{custom_domain}"
-    return f"https://{slug}.{BOOKED_BASE_DOMAIN}"
+    return f"https://{slug}.{PROPERTY_PAGE_BASE_DOMAIN}"
 
 
 def _get_r2_client():

@@ -462,7 +462,7 @@ def build_landing_page_html(
 
   <footer class="site-footer">
     <div class="container">
-      <p class="powered-by">Marketing by <a href="https://staylio.ai">Staylio</a></p>
+      <p class="powered-by">Marketing by <a href="https://upliftstays.com">UpliftStays</a></p>
     </div>
   </footer>
 

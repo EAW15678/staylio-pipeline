@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from agents.agent5.calendar_sync import provision_calendar_sync
-from agents.agent5.cloudflare_deployer import deploy_property_page
+from agents.agent5.cloudflare_deployer import deploy_property_page, PROPERTY_PAGE_BASE_DOMAIN
 from agents.agent5.models import (
     DeployMode,
     LandingPage,
@@ -90,7 +90,7 @@ def agent5_node(state: dict) -> dict:
     if deploy_mode == DeployMode.CNAME_CUSTOM and custom_domain:
         page_url = f"https://{custom_domain}"
     else:
-        page_url = f"https://{slug}.staylio.ai"
+        page_url = f"https://{slug}.{PROPERTY_PAGE_BASE_DOMAIN}"
 
     # ── Step 5: Build HTML ────────────────────────────────────────────────
     logger.info(f"[Agent 5] Assembling HTML for property {property_id}")
