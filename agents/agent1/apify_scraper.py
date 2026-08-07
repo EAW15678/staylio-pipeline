@@ -37,7 +37,12 @@ APIFY_API_TOKEN  = os.environ["APIFY_API_TOKEN"]
 
 # Actor IDs for each platform
 AIRBNB_ACTOR_ID  = os.environ.get("APIFY_AIRBNB_ACTOR_ID", "tri_angle~airbnb-rooms-urls-scraper")
-VRBO_ACTOR_ID    = os.environ.get("APIFY_VRBO_ACTOR_ID", "kRRC9n6Rv5lEcE3b3")
+# memo23/vrbo-scraper: pure HTTP, pay-per-result ($2.50/1K rows). Replaced
+# jupri/vrbo-property (kRRC9n6Rv5lEcE3b3) which was $30/mo and began
+# returning "Too Many Requests" (VRBO Akamai/DataDome bot-blocking).
+# Input format AND response parsing are actor-specific — both must be
+# rewritten if the actor changes again.
+VRBO_ACTOR_ID    = os.environ.get("APIFY_VRBO_ACTOR_ID", "memo23~vrbo-scraper")
 
 # Polling config for sync-style run
 POLL_INTERVAL_SEC = 5
@@ -376,94 +381,65 @@ def _scrape_vrbo(
     scrape_reviews: bool,
 ) -> PropertyKnowledgeBase:
     """
-    Run the Apify jupri/vrbo-property (VRBO Extractor 4.0) Actor and merge results.
+    Run the Apify memo23/vrbo-scraper Actor and merge results.
 
-    Input: jupri/vrbo-property expects `location` as an array of property IDs,
-    NOT `startUrls`. The property ID is extracted from the VRBO listing URL.
+    Input: memo23/vrbo-scraper expects startUrls (full VRBO listing URLs).
+    Output: multi-row dataset discriminated by "kind" field:
+      kind=="property" (1 row): property data, photos, amenities, calendar
+      kind=="review"   (N rows): individual guest reviews
+    bedrooms/bathrooms/description are NOT returned by this actor by design.
+    Numeric ratings are intentionally NOT mapped (Erick decision: OTA numeric
+    ratings are not used; guest book entries are the social proof of record).
     """
-    logger.info(f"[TS-03] Apify VRBO Actor: {url}")
-
-    property_id = _extract_vrbo_property_id(url)
-    if not property_id:
-        err = f"[TS-03] Could not extract VRBO property ID from URL: {url}"
-        logger.error(err)
-        knowledge_base.ingestion_errors.append(err)
-        return knowledge_base
+    logger.info(f"[TS-03] Apify VRBO Actor (memo23/vrbo-scraper): {url}")
 
     actor_input = {
-        "location":            [property_id],
-        "limit":               1,
-        "site":                "9001001",
-        "language":            "en_US",
-        "includes:description": True,
-        "includes:amenities":  True,
-        "includes:policies":   True,
-        "includes:gallery":    "2",
-        "includes:location":   True,
-        "includes:review":     True,
-        "includes:review_count": 5,
-        "adults:0":            2,
+        "startUrls": [url],
+        "includeReviews": scrape_reviews,
+        "scrapeAvailability": True,
     }
 
     raw = _run_apify_actor(VRBO_ACTOR_ID, actor_input)
     if not raw:
         knowledge_base.ingestion_errors.append(
-            f"Apify VRBO Actor returned no results for {url} (property_id={property_id})"
+            f"Apify VRBO Actor returned no results for {url}"
         )
         return knowledge_base
 
-    listing = raw[0] if isinstance(raw, list) else raw
+    # Filter rows by kind — property data is in the kind=="property" row
+    rows = raw if isinstance(raw, list) else [raw]
+    prop_row = next((r for r in rows if r.get("kind") == "property"), None)
+    review_rows = [r for r in rows if r.get("kind") == "review"]
+
+    if not prop_row:
+        knowledge_base.ingestion_errors.append(
+            f"Apify VRBO Actor returned no property row for {url}"
+        )
+        return knowledge_base
+
     source = DataSource.VRBO
 
     # ── Name ─────────────────────────────────────────────────────────────
     knowledge_base.name = knowledge_base.merge_field(
         knowledge_base.name,
-        _field(listing.get("name"), source),
+        _field(prop_row.get("title"), source),
     )
 
-    # ── Description — flatten description.about.items[].items[] ──────────
-    desc_container = listing.get("description") or {}
-    if isinstance(desc_container, dict):
-        about = desc_container.get("about") or {}
-        texts = _flatten_vrbo_nested_items(about)
-        if texts:
-            knowledge_base.description = knowledge_base.merge_field(
-                knowledge_base.description,
-                _field(" ".join(texts), source),
-            )
-    elif isinstance(desc_container, str) and desc_container.strip():
-        knowledge_base.description = knowledge_base.merge_field(
-            knowledge_base.description,
-            _field(desc_container, source),
-        )
+    # ── bedrooms/bathrooms/description: NOT available from this actor ────
+    # (confirmed via testing — always null). Do not attempt to read them.
 
-    # ── Specs — from highlights and spaces ───────────────────────────────
-    highlights = listing.get("highlights") or {}
-    if isinstance(highlights, dict):
-        knowledge_base.bedrooms = knowledge_base.merge_field(
-            knowledge_base.bedrooms,
-            _field(
-                highlights.get("bedroomsCount") or highlights.get("bedrooms"),
-                source,
-            ),
-        )
-        knowledge_base.bathrooms = knowledge_base.merge_field(
-            knowledge_base.bathrooms,
-            _field(
-                highlights.get("bathroomsCount") or highlights.get("bathrooms"),
-                source,
-            ),
-        )
-        knowledge_base.max_occupancy = knowledge_base.merge_field(
-            knowledge_base.max_occupancy,
-            _field(
-                highlights.get("sleepsCount") or highlights.get("sleeps"),
-                source,
-            ),
-        )
+    # ── Specs ────────────────────────────────────────────────────────────
+    knowledge_base.max_occupancy = knowledge_base.merge_field(
+        knowledge_base.max_occupancy,
+        _field(prop_row.get("sleeps"), source),
+    )
+    knowledge_base.property_type = knowledge_base.merge_field(
+        knowledge_base.property_type,
+        _field(prop_row.get("propertyType"), source),
+    )
 
-    # ── Address ───────────────────────────────────────────────────────────
-    address = listing.get("address") or {}
+    # ── Address ──────────────────────────────────────────────────────────
+    address = prop_row.get("address") or {}
     if isinstance(address, dict):
         knowledge_base.city = knowledge_base.merge_field(
             knowledge_base.city,
@@ -471,71 +447,67 @@ def _scrape_vrbo(
         )
         knowledge_base.state = knowledge_base.merge_field(
             knowledge_base.state,
-            _field(address.get("province") or address.get("state"), source),
+            _field(address.get("region") or address.get("state"), source),
+        )
+        knowledge_base.zip_code = knowledge_base.merge_field(
+            knowledge_base.zip_code,
+            _field(address.get("postalCode"), source),
         )
 
-    # ── Coordinates ───────────────────────────────────────────────────────
-    coord = listing.get("coordinate") or {}
+    # ── Coordinates ──────────────────────────────────────────────────────
+    coord = prop_row.get("coordinates") or {}
     if isinstance(coord, dict):
-        if coord.get("latitude"):
+        if coord.get("lat"):
             knowledge_base.latitude = knowledge_base.merge_field(
                 knowledge_base.latitude,
-                _field(coord["latitude"], source),
+                _field(coord["lat"], source),
             )
-        if coord.get("longitude"):
+        if coord.get("lng"):
             knowledge_base.longitude = knowledge_base.merge_field(
                 knowledge_base.longitude,
-                _field(coord["longitude"], source),
+                _field(coord["lng"], source),
             )
 
-    # ── Amenities — flatten amenities.items[].items[] ─────────────────────
+    # ── Amenities — list of {id, label, group} ──────────────────────────
     existing_amenities = {a.value.lower() for a in knowledge_base.amenities if a.value}
-    amenities_container = listing.get("amenities") or {}
-    amenity_names = _flatten_vrbo_nested_items(amenities_container)
-    for name in amenity_names:
-        if name.lower() not in existing_amenities:
-            knowledge_base.amenities.append(PropertyField(value=name, source=source))
-            existing_amenities.add(name.lower())
+    for amenity in prop_row.get("amenities") or []:
+        label = amenity.get("label") if isinstance(amenity, dict) else str(amenity)
+        if label and label.lower() not in existing_amenities:
+            knowledge_base.amenities.append(PropertyField(value=label, source=source))
+            existing_amenities.add(label.lower())
 
-    # ── Gallery — flatten gallery[].images[] ──────────────────────────────
+    # ── Photos — list of {url, caption} ──────────────────────────────────
     existing_urls = {p.url for p in knowledge_base.photos}
-    for i, img in enumerate(_flatten_vrbo_gallery(listing.get("gallery") or [])):
-        if img["url"] not in existing_urls:
+    for i, photo in enumerate(prop_row.get("photos") or []):
+        photo_url = photo.get("url") if isinstance(photo, dict) else str(photo)
+        if photo_url and photo_url not in existing_urls:
             knowledge_base.photos.append(
                 PhotoAsset(
-                    url=img["url"],
+                    url=photo_url,
                     source=source,
-                    caption=img["caption"] or None,
-                    category=img["category"] or None,
+                    caption=photo.get("caption") if isinstance(photo, dict) else None,
                     order=i,
                 )
             )
-            existing_urls.add(img["url"])
+            existing_urls.add(photo_url)
 
-    # ── Reviews ───────────────────────────────────────────────────────────
+    # ── Reviews (kind=="review" rows) — text only, NO numeric ratings ────
     if scrape_reviews:
-        reviews_container = listing.get("reviews") or {}
-        total = reviews_container.get("total", 0)
-        if total and total > 0:
-            for review in reviews_container.get("reviews") or []:
-                text = review.get("text") or review.get("comments") or ""
-                if not text.strip():
-                    continue
-                reviewer = review.get("reviewer") or {}
-                knowledge_base.guest_reviews.append(
-                    GuestReview(
-                        text=text.strip(),
-                        source=source,
-                        reviewer_name=(
-                            reviewer.get("name") or reviewer.get("firstName")
-                            if isinstance(reviewer, dict) else reviewer
-                        ),
-                        stay_date=review.get("reviewDate") or review.get("stayDate"),
-                        star_rating=review.get("rating"),
-                        host_response=review.get("response"),
-                        is_guest_book=False,
-                    )
+        for review in review_rows:
+            text = review.get("text") or ""
+            if not text.strip():
+                continue
+            knowledge_base.guest_reviews.append(
+                GuestReview(
+                    text=text.strip(),
+                    source=source,
+                    reviewer_name=review.get("authorName"),
+                    stay_date=review.get("stayPeriod"),
+                    star_rating=None,  # Intentionally NOT mapped (Erick decision)
+                    host_response=review.get("managerResponse"),
+                    is_guest_book=False,
                 )
+            )
 
     if DataSource.VRBO not in knowledge_base.ingestion_sources:
         knowledge_base.ingestion_sources.append(DataSource.VRBO)
@@ -827,94 +799,66 @@ def extract_text_from_airbnb(url: str) -> Optional[dict]:
 
 def extract_text_from_vrbo(url: str) -> Optional[dict]:
     """
-    Run the Apify VRBO Actor and return TEXT-ONLY property fields.
+    Run the Apify memo23/vrbo-scraper Actor and return TEXT-ONLY property fields.
     No photos, no reviews, no KnowledgeBase — just a flat dict for preview.
-    """
-    property_id = _extract_vrbo_property_id(url)
-    if not property_id:
-        return None
 
-    # Actor input MUST match _scrape_vrbo()'s input exactly. The jupri/vrbo-property
-    # actor populates the response based on which includes: flags are set — trimming
-    # them for a "lighter" preview returns a stub with null name and highlights.
-    # Photo/review fields in the response are simply ignored by the parsing below.
+    Preview skips reviews and availability to minimize cost/latency.
+    bedrooms/bathrooms/description are NOT available from this actor.
+    _is_usable_preview() passes on property_name (title) alone.
+    """
     actor_input = {
-        "location":              [property_id],
-        "limit":                 1,
-        "site":                  "9001001",
-        "language":              "en_US",
-        "includes:description":  True,
-        "includes:amenities":    True,
-        "includes:policies":     True,
-        "includes:gallery":      "2",
-        "includes:location":     True,
-        "includes:review":       True,
-        "includes:review_count": 5,
-        "adults:0":              2,
+        "startUrls": [url],
+        "includeReviews": False,
+        "scrapeAvailability": False,
     }
 
     raw = _run_apify_actor(VRBO_ACTOR_ID, actor_input)
     if not raw:
         return None
 
-    listing = raw[0] if isinstance(raw, list) else raw
+    # Filter to the kind=="property" row
+    rows = raw if isinstance(raw, list) else [raw]
+    prop_row = next((r for r in rows if r.get("kind") == "property"), None)
+
+    if not prop_row:
+        # Fallback: if no kind field, use first row (actor may return flat)
+        prop_row = rows[0] if rows else None
+    if not prop_row:
+        return None
 
     # ── PREVIEW-DEBUG: log VRBO response shape for diagnostics ───────
-    import json as _json
-    logger.info(f"[PREVIEW-DEBUG] VRBO raw keys: {sorted(listing.keys())}")
+    logger.info(f"[PREVIEW-DEBUG] VRBO raw keys: {sorted(prop_row.keys())}")
     logger.info(
-        f"[PREVIEW-DEBUG] VRBO name={listing.get('name')!r}, "
-        f"highlights={bool(listing.get('highlights'))}, "
-        f"description={bool(listing.get('description'))}"
-    )
-
-    # Description
-    desc_container = listing.get("description") or {}
-    description = ""
-    if isinstance(desc_container, dict):
-        about = desc_container.get("about") or {}
-        texts = _flatten_vrbo_nested_items(about)
-        description = " ".join(texts) if texts else ""
-    elif isinstance(desc_container, str):
-        description = desc_container
-
-    # Specs
-    highlights = listing.get("highlights") or {}
-    bedrooms = (
-        highlights.get("bedroomsCount") or highlights.get("bedrooms")
-        if isinstance(highlights, dict) else None
-    )
-    bathrooms = (
-        highlights.get("bathroomsCount") or highlights.get("bathrooms")
-        if isinstance(highlights, dict) else None
-    )
-    max_occ = (
-        highlights.get("sleepsCount") or highlights.get("sleeps")
-        if isinstance(highlights, dict) else None
+        f"[PREVIEW-DEBUG] VRBO title={prop_row.get('title')!r}, "
+        f"sleeps={prop_row.get('sleeps')!r}, "
+        f"amenitiesCount={prop_row.get('amenitiesCount')!r}"
     )
 
     # Address
-    address = listing.get("address") or {}
+    address = prop_row.get("address") or {}
     city = address.get("city") if isinstance(address, dict) else None
     state = (
-        address.get("province") or address.get("state")
+        address.get("region") or address.get("state")
         if isinstance(address, dict) else None
     )
 
-    # Amenities
-    amenities_container = listing.get("amenities") or {}
-    amenities = _flatten_vrbo_nested_items(amenities_container)
+    # Amenities — list of {id, label, group}
+    amenities = [
+        a.get("label") if isinstance(a, dict) else str(a)
+        for a in (prop_row.get("amenities") or [])
+    ]
+    amenities = [a for a in amenities if a]
 
     return {
-        "property_name": listing.get("name"),
+        "property_name": prop_row.get("title"),
         "address_hint": ", ".join(filter(None, [city, state])) or None,
-        "bedrooms": bedrooms,
-        "bathrooms": bathrooms,
-        "max_occupancy": max_occ,
-        "property_type": None,
+        "bedrooms": None,      # Not available from this actor
+        "bathrooms": None,     # Not available from this actor
+        "max_occupancy": prop_row.get("sleeps"),
+        "property_type": prop_row.get("propertyType"),
         "amenities": amenities,
-        "description_lead": description[:200] if description else None,
-        "rating": None,
-        "avg_nightly_rate": None,
+        "description_lead": None,  # Not available from this actor
+        "rating": None,        # Intentionally not mapped (Erick decision)
+        "avg_nightly_rate": prop_row.get("pricePerNight"),
         "source_platform": "vrbo",
     }
