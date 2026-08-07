@@ -834,15 +834,23 @@ def extract_text_from_vrbo(url: str) -> Optional[dict]:
     if not property_id:
         return None
 
+    # Actor input MUST match _scrape_vrbo()'s input exactly. The jupri/vrbo-property
+    # actor populates the response based on which includes: flags are set — trimming
+    # them for a "lighter" preview returns a stub with null name and highlights.
+    # Photo/review fields in the response are simply ignored by the parsing below.
     actor_input = {
-        "location":             [property_id],
-        "limit":                1,
-        "site":                 "9001001",
-        "language":             "en_US",
-        "includes:description": True,
-        "includes:amenities":   True,
-        "includes:location":    True,
-        "adults:0":             2,
+        "location":              [property_id],
+        "limit":                 1,
+        "site":                  "9001001",
+        "language":              "en_US",
+        "includes:description":  True,
+        "includes:amenities":    True,
+        "includes:policies":     True,
+        "includes:gallery":      "2",
+        "includes:location":     True,
+        "includes:review":       True,
+        "includes:review_count": 5,
+        "adults:0":              2,
     }
 
     raw = _run_apify_actor(VRBO_ACTOR_ID, actor_input)
@@ -850,6 +858,15 @@ def extract_text_from_vrbo(url: str) -> Optional[dict]:
         return None
 
     listing = raw[0] if isinstance(raw, list) else raw
+
+    # ── PREVIEW-DEBUG: log VRBO response shape for diagnostics ───────
+    import json as _json
+    logger.info(f"[PREVIEW-DEBUG] VRBO raw keys: {sorted(listing.keys())}")
+    logger.info(
+        f"[PREVIEW-DEBUG] VRBO name={listing.get('name')!r}, "
+        f"highlights={bool(listing.get('highlights'))}, "
+        f"description={bool(listing.get('description'))}"
+    )
 
     # Description
     desc_container = listing.get("description") or {}
