@@ -19,18 +19,17 @@ import json
 import logging
 import os
 import re
-import time
 from datetime import date, datetime, timezone
 from typing import Optional
 
 import anthropic
 
+from agents.agent8.retry import retry_with_backoff
+
 logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
 _MAX_TOKENS = 4096
-_MAX_RETRIES = 3
-_RETRY_BACKOFF_BASE = 2.0  # seconds; exponential: 2, 4, 8
 
 
 # ── KB loader (same as Agent 2/3) ───────────────────────────────────────
@@ -211,54 +210,48 @@ Return ONLY valid JSON — no markdown, no prose, no code fences:
 # ── Claude call with retry ───────────────────────────────────────────────
 
 def _call_claude(prompt: str) -> Optional[dict]:
-    """Call Claude Sonnet with retry and backoff."""
+    """
+    Call Claude Sonnet with retry and backoff via agents.agent8.retry.
+
+    Retries on API errors and rate limits. Concept-specific validation
+    (exactly 8 concepts, valid JSON) is checked after the call; a wrong
+    count raises ValueError to trigger a retry.
+    """
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-    for attempt in range(_MAX_RETRIES):
-        try:
-            resp = client.messages.create(
-                model=_MODEL,
-                max_tokens=_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = resp.content[0].text.strip()
-            # Strip markdown code fences if present
-            raw = re.sub(r"^```json\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            parsed = json.loads(raw)
-            concepts = parsed.get("concepts")
-            if not isinstance(concepts, list) or len(concepts) != 8:
-                logger.warning(
-                    "[Agent 8] Claude returned %d concepts (expected 8), attempt %d",
-                    len(concepts) if isinstance(concepts, list) else 0,
-                    attempt + 1,
-                )
-                if attempt < _MAX_RETRIES - 1:
-                    time.sleep(_RETRY_BACKOFF_BASE ** (attempt + 1))
-                    continue
-            return parsed
+    def _attempt() -> dict:
+        resp = client.messages.create(
+            model=_MODEL,
+            max_tokens=_MAX_TOKENS,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        raw = resp.content[0].text.strip()
+        raw = re.sub(r"^```json\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+        parsed = json.loads(raw)
+        concepts = parsed.get("concepts")
+        if not isinstance(concepts, list) or len(concepts) != 8:
+            count = len(concepts) if isinstance(concepts, list) else 0
+            raise ValueError(f"Expected 8 concepts, got {count}")
+        return parsed
 
-        except (json.JSONDecodeError, KeyError) as exc:
-            logger.warning("[Agent 8] Parse error on attempt %d: %s", attempt + 1, exc)
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_RETRY_BACKOFF_BASE ** (attempt + 1))
-                continue
-            return None
-
-        except anthropic.RateLimitError as exc:
-            wait = _RETRY_BACKOFF_BASE ** (attempt + 1)
-            logger.warning("[Agent 8] Rate limited, waiting %.1fs: %s", wait, exc)
-            time.sleep(wait)
-            continue
-
-        except anthropic.APIError as exc:
-            logger.error("[Agent 8] API error on attempt %d: %s", attempt + 1, exc)
-            if attempt < _MAX_RETRIES - 1:
-                time.sleep(_RETRY_BACKOFF_BASE ** (attempt + 1))
-                continue
-            return None
-
-    return None
+    try:
+        return retry_with_backoff(
+            fn=_attempt,
+            max_retries=3,
+            backoff_base=2.0,
+            retryable=(
+                anthropic.RateLimitError,
+                anthropic.APIError,
+                json.JSONDecodeError,
+                KeyError,
+                ValueError,
+            ),
+            label="Claude concept generation",
+        )
+    except Exception as exc:
+        logger.error("[Agent 8] Claude call failed after retries: %s", exc)
+        return None
 
 
 # ── DB write ─────────────────────────────────────────────────────────────
