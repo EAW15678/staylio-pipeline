@@ -115,6 +115,72 @@ async def async_generate_tts(
         return None
 
 
+ELEVENLABS_MUSIC_MODEL = "music_v2"
+
+
+def generate_music(
+    prompt_text: Optional[str] = None,
+    composition_plan: Optional[dict] = None,
+    duration_ms: Optional[int] = None,
+    force_instrumental: bool = True,
+) -> tuple:
+    """
+    Generate music via ElevenLabs Music API (synchronous).
+    Returns (audio_bytes, model_used) or (None, model_used) on failure.
+
+    prompt_text and composition_plan are mutually exclusive.
+    composition_plan requires model_id="music_v2".
+    """
+    from core.retry import retry_with_backoff
+
+    if prompt_text and composition_plan:
+        raise ValueError("prompt_text and composition_plan are mutually exclusive")
+
+    if not ELEVENLABS_API_KEY:
+        logger.warning("[ElevenLabs] ELEVENLABS_API_KEY not set for music generation")
+        return None, ELEVENLABS_MUSIC_MODEL
+
+    # Build the model ID — composition_plan requires music_v2
+    model_id = ELEVENLABS_MUSIC_MODEL
+
+    payload: dict = {"model_id": model_id, "force_instrumental": force_instrumental}
+    if prompt_text:
+        payload["prompt"] = prompt_text
+    if composition_plan:
+        payload["composition_plan"] = composition_plan
+    if duration_ms is not None:
+        payload["music_length_ms"] = duration_ms
+
+    headers = {
+        "xi-api-key": ELEVENLABS_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        def _call():
+            with httpx.Client(timeout=120) as client:
+                resp = client.post(
+                    f"{ELEVENLABS_API_BASE}/music",
+                    headers=headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                return resp.content
+
+        audio_bytes = retry_with_backoff(
+            fn=_call,
+            max_retries=3,
+            backoff_base=2.0,
+            retryable=(httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException),
+            label="ElevenLabs Music",
+        )
+        return audio_bytes, model_id
+
+    except Exception as exc:
+        logger.error("[ElevenLabs] Music generation failed: %s", exc)
+        return None, model_id
+
+
 def sync_generate_tts(
     script: str,
     voice_id: str,
