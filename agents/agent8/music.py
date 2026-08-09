@@ -18,7 +18,18 @@ from typing import Optional
 
 from agents.agent8.creative_director import validate_music_brief_prohibited
 
+from pipeline_emitter import emit_media_cost
+
 logger = logging.getLogger(__name__)
+
+# Verified first-party at elevenlabs.io/pricing/api on 2026-08-09:
+# Eleven Music — $0.15 PER MINUTE, pro-rated by duration.
+# 5-minute duration limit. 44.1kHz, 128-192kbps.
+# Commercial use licensing included on Starter tier and above.
+# NOTE: this does NOT resolve the paid-advertising question (Erick is
+# handling that in his contract). The default license_basis
+# "self_serve_commercial" reflects the Starter tier's included licence.
+_MUSIC_COST_PER_MINUTE_USD = 0.15
 
 # ── Prohibited artist names (common in music prompts) ───────────────────
 _PROHIBITED_ARTIST_NAMES = [
@@ -291,6 +302,21 @@ def render_music(
     # Estimate duration from audio size (MP3 ~128kbps)
     if not asset["duration_seconds"] and audio_bytes:
         asset["duration_seconds"] = round(len(audio_bytes) / (128 * 1024 / 8), 1)
+
+    # Cost estimate: $0.15/minute, pro-rated
+    dur = asset.get("duration_seconds") or 0
+    asset["cost_estimate_usd"] = round(dur / 60.0 * _MUSIC_COST_PER_MINUTE_USD, 4)
+
+    emit_media_cost(
+        vendor="elevenlabs",
+        service="music_v2",
+        units=round(dur, 1),
+        unit_name="seconds",
+        property_id=property_id,
+        workflow_name="agent8_stage5",
+        generation_reason="music_generation",
+        discriminator=spec_id[:8],
+    )
 
     _persist_music(asset, property_id, input_hash)
 
