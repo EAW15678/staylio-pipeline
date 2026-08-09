@@ -441,17 +441,10 @@ def _upload_pdf_to_r2(
 ) -> Optional[str]:
     """Upload the rendered PDF to Cloudflare R2."""
     try:
-        from agents.agent3.r2_storage import _get_r2_client, R2_PUBLIC_BASE
+        from core.r2_storage import upload_to_r2, R2_PUBLIC_BASE
         key = f"reports/{client_id}/{property_id}/{report_month}.pdf"
         bucket = "staylio-reports"
-        client = _get_r2_client()
-        client.put_object(
-            Bucket=bucket,
-            Key=key,
-            Body=pdf_bytes,
-            ContentType="application/pdf",
-            CacheControl="private, no-cache",
-        )
+        upload_to_r2(bucket, key, pdf_bytes, "application/pdf")
         return f"{R2_PUBLIC_BASE}/reports/{key}"
     except Exception as exc:
         logger.error(f"[TS-23] R2 PDF upload failed: {exc}")

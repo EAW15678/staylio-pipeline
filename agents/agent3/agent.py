@@ -46,6 +46,7 @@ from agents.agent3.r2_storage import (
     upload_photo_enhanced,
     upload_photo_original,
 )
+from core.r2_storage import _stable_filename
 from agents.agent3.llm_curator import run_llm_vision_curation
 from agents.agent3.phash_resolver import resolve_canonical_phashes, backfill_media_assets_phash
 from agents.agent3.video_generator import generate_all_videos
@@ -458,9 +459,8 @@ async def _download_photos(urls: list[str]) -> list[tuple[str, Optional[bytes]]]
     return await asyncio.gather(*tasks)
 
 
-def _stable_filename(url: str, index: int) -> str:
-    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
-    return f"photo_{index:03d}_{url_hash}.jpg"
+
+# _stable_filename imported from core.r2_storage
 
 
 def _detect_source(url: str) -> str:

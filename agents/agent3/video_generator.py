@@ -44,8 +44,14 @@ from agents.agent3.r2_storage import upload_video
 logger = logging.getLogger(__name__)
 
 # ── API Configuration ─────────────────────────────────────────────────────
-ELEVENLABS_API_KEY  = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
+from core.elevenlabs import (
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_API_BASE,
+    ELEVENLABS_MODEL,
+    VIBE_VOICE_IDS,
+    DEFAULT_VOICE_SETTINGS,
+    async_generate_tts,
+)
 
 RUNWAYML_API_SECRET = os.environ.get("RUNWAYML_API_SECRET", "")
 RUNWAY_MODEL        = "gen4_turbo"
@@ -55,20 +61,8 @@ CREATOMATE_API_KEY  = os.environ.get("CREATOMATE_API_KEY", "")
 CREATOMATE_API_BASE = "https://api.creatomate.com/v2"
 
 # ── Voice Configuration ───────────────────────────────────────────────────
-# These voice IDs must be configured in the Staylio ElevenLabs account.
-# Vibe voices are created via Voice Design — Staylio-owned, no removal risk.
+# VIBE_VOICE_IDS imported from core.elevenlabs (all 7 vibes).
 # Review voices are ElevenLabs premade defaults — no removal risk.
-
-VIBE_VOICE_IDS: dict[str, str] = {
-    # Populated with actual Voice Design IDs before production build
-    # Format: "vibe_profile": "elevenlabs_voice_id"
-    "romantic_escape":       os.environ.get("VOICE_ROMANTIC_ESCAPE", ""),
-    "family_adventure":      os.environ.get("VOICE_FAMILY_ADVENTURE", ""),
-    "multigenerational_retreat": os.environ.get("VOICE_MULTIGENERATIONAL", ""),
-    "wellness_retreat":      os.environ.get("VOICE_WELLNESS", ""),
-    "adventure_base_camp":   os.environ.get("VOICE_ADVENTURE", ""),
-    "social_celebrations":   os.environ.get("VOICE_SOCIAL", ""),
-}
 
 # Pool of ElevenLabs premade voices for guest review narration
 # Rotated: video 3 → pool[0], video 4 → pool[1], video 8 → pool[2]
@@ -424,12 +418,8 @@ async def _generate_elevenlabs_audio(
                     },
                     json={
                         "text": script,
-                        "model_id": "eleven_multilingual_v2",
-                        "voice_settings": {
-                            "stability": 0.5,
-                            "similarity_boost": 0.75,
-                            "style": 0.3,
-                        },
+                        "model_id": ELEVENLABS_MODEL,
+                        "voice_settings": DEFAULT_VOICE_SETTINGS,
                     },
                 )
                 resp.raise_for_status()

@@ -29,31 +29,14 @@ from agents.agent8.creative_director import validate_no_guest_names, _extract_gu
 
 logger = logging.getLogger(__name__)
 
-ELEVENLABS_API_KEY = os.environ.get("ELEVENLABS_API_KEY", "")
-ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
-ELEVENLABS_MODEL = "eleven_multilingual_v2"
-
-# Voice selection by vibe — same env vars as Agent 3's video_generator.py
-VIBE_VOICE_IDS: dict[str, str] = {
-    "romantic_escape":           os.environ.get("VOICE_ROMANTIC_ESCAPE", ""),
-    "family_adventure":          os.environ.get("VOICE_FAMILY_ADVENTURE", ""),
-    "multigenerational_retreat": os.environ.get("VOICE_MULTIGENERATIONAL", ""),
-    "wellness_retreat":          os.environ.get("VOICE_WELLNESS", ""),
-    "adventure_base_camp":       os.environ.get("VOICE_ADVENTURE", ""),
-    "social_celebrations":       os.environ.get("VOICE_SOCIAL", ""),
-    "creative_remote_work":      os.environ.get("VOICE_CREATIVE", ""),
-}
-
-# Human-readable labels for review surfaces
-VIBE_VOICE_LABELS: dict[str, str] = {
-    "romantic_escape":           "Romantic Escape voice",
-    "family_adventure":          "Family Adventure voice",
-    "multigenerational_retreat": "Multi-Generational voice",
-    "wellness_retreat":          "Wellness Retreat voice",
-    "adventure_base_camp":       "Adventure Base Camp voice",
-    "social_celebrations":       "Social & Celebrations voice",
-    "creative_remote_work":      "Creative & Remote Work voice",
-}
+from core.elevenlabs import (
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_API_BASE,
+    ELEVENLABS_MODEL,
+    VIBE_VOICE_IDS,
+    VIBE_VOICE_LABELS,
+    DEFAULT_VOICE_SETTINGS,
+)
 
 
 def _compute_input_hash(script: str, voice_id: str, model: str, language: str) -> str:
@@ -326,11 +309,7 @@ def _render_elevenlabs(script: str, voice_id: str, property_id: str) -> Optional
     payload = {
         "text": script,
         "model_id": ELEVENLABS_MODEL,
-        "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75,
-            "style": 0.3,
-        },
+        "voice_settings": DEFAULT_VOICE_SETTINGS,
     }
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
@@ -397,7 +376,7 @@ def _render_elevenlabs(script: str, voice_id: str, property_id: str) -> Optional
 
     # Upload to R2
     try:
-        from agents.agent3.r2_storage import upload_video
+        from core.r2_storage import upload_video
         r2_url = upload_video(
             property_id=property_id,
             video_bytes=audio_bytes,
