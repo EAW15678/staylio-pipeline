@@ -122,7 +122,7 @@ MOCK_EXISTING_CONCEPTS = [
 
 class TestRunCycle:
     def test_skips_generation_when_concepts_exist(self):
-        """Resumability: existing active concepts are returned, not regenerated."""
+        """Default: existing active concepts are returned, no model call."""
         with patch(
             "agents.agent8.runner._check_existing_concepts",
             return_value=MOCK_EXISTING_CONCEPTS,
@@ -152,13 +152,25 @@ class TestRunCycle:
         )
         assert len(result) == 8
 
-    def test_dry_run_always_generates(self):
-        """dry_run bypasses the existing-concepts check."""
+    def test_dry_run_with_existing_makes_no_model_call(self):
+        """dry_run=True with existing concepts returns them — NO model call, $0."""
+        with patch(
+            "agents.agent8.runner._check_existing_concepts",
+            return_value=MOCK_EXISTING_CONCEPTS,
+        ) as mock_check:
+            result = run_cycle(VISTA_AZULE_ID, CYCLE, dry_run=True)
+
+        mock_check.assert_called_once()
+        assert len(result) == 8
+        assert result[0]["title"] == "Concept 1"
+
+    def test_dry_run_without_existing_generates_without_writing(self):
+        """dry_run=True without existing concepts generates but passes dry_run to generator."""
         mock_concepts = [{"title": f"Dry {i}", "concept_number": i} for i in range(1, 9)]
 
         with patch(
             "agents.agent8.runner._check_existing_concepts",
-            return_value=MOCK_EXISTING_CONCEPTS,
+            return_value=None,
         ), patch(
             "agents.agent8.concept_generator.generate_concepts",
             return_value=mock_concepts,
@@ -170,52 +182,44 @@ class TestRunCycle:
             cycle_month=CYCLE,
             dry_run=True,
         )
-        assert result[0]["title"] == "Dry 1"
-
-    def test_dry_run_passes_through_to_generate_concepts(self):
-        """dry_run flag is forwarded to generate_concepts."""
-        with patch(
-            "agents.agent8.runner._check_existing_concepts",
-            return_value=None,
-        ), patch(
-            "agents.agent8.concept_generator.generate_concepts",
-            return_value=[],
-        ) as mock_gen:
-            run_cycle(VISTA_AZULE_ID, CYCLE, dry_run=True)
-
-        _, kwargs = mock_gen.call_args
-        assert kwargs["dry_run"] is True
-
-
-class TestCheckExistingConcepts:
-    """
-    _check_existing_concepts does a lazy import of get_supabase from
-    core.supabase_store, which has import-time dependencies that fail
-    outside Railway. Test the function's LOGIC by mocking it at the
-    runner level in the run_cycle tests above. These tests verify the
-    contract: 8 rows = return them, <8 = None, error = None.
-    """
-
-    def test_returns_8_concepts_via_run_cycle(self):
-        """If _check finds 8 concepts, run_cycle returns them without generating."""
-        with patch(
-            "agents.agent8.runner._check_existing_concepts",
-            return_value=MOCK_EXISTING_CONCEPTS,
-        ):
-            result = run_cycle(VISTA_AZULE_ID, CYCLE)
         assert len(result) == 8
-        assert result[0]["concept_number"] == 1
 
-    def test_returns_none_triggers_generation(self):
-        """If _check returns None, run_cycle calls generate_concepts."""
-        mock_concepts = [{"title": f"Gen {i}", "concept_number": i} for i in range(1, 9)]
+    def test_force_bypasses_existing_check(self):
+        """force=True ignores existing concepts and regenerates."""
+        mock_concepts = [{"title": f"Forced {i}", "concept_number": i} for i in range(1, 9)]
+
         with patch(
             "agents.agent8.runner._check_existing_concepts",
-            return_value=None,
-        ), patch(
+        ) as mock_check, patch(
             "agents.agent8.concept_generator.generate_concepts",
             return_value=mock_concepts,
-        ):
-            result = run_cycle(VISTA_AZULE_ID, CYCLE)
-        assert len(result) == 8
-        assert result[0]["title"] == "Gen 1"
+        ) as mock_gen:
+            result = run_cycle(VISTA_AZULE_ID, CYCLE, force=True)
+
+        mock_check.assert_not_called()
+        mock_gen.assert_called_once_with(
+            property_id=VISTA_AZULE_ID,
+            cycle_month=CYCLE,
+            dry_run=False,
+        )
+        assert result[0]["title"] == "Forced 1"
+
+    def test_force_dry_run_generates_without_writing(self):
+        """force=True + dry_run=True regenerates without writing — costs ~$0.03."""
+        mock_concepts = [{"title": f"Preview {i}", "concept_number": i} for i in range(1, 9)]
+
+        with patch(
+            "agents.agent8.runner._check_existing_concepts",
+        ) as mock_check, patch(
+            "agents.agent8.concept_generator.generate_concepts",
+            return_value=mock_concepts,
+        ) as mock_gen:
+            result = run_cycle(VISTA_AZULE_ID, CYCLE, force=True, dry_run=True)
+
+        mock_check.assert_not_called()
+        mock_gen.assert_called_once_with(
+            property_id=VISTA_AZULE_ID,
+            cycle_month=CYCLE,
+            dry_run=True,
+        )
+        assert result[0]["title"] == "Preview 1"

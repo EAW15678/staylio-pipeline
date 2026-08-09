@@ -32,6 +32,7 @@ def run_cycle(
     cycle_month: date,
     *,
     dry_run: bool = False,
+    force: bool = False,
 ) -> list[dict]:
     """
     Run the Agent 8 content cycle for a property.
@@ -45,28 +46,50 @@ def run_cycle(
     regenerating. This is derived from the status columns and partial
     unique indexes already on the table — no parallel state store.
 
+    Parameter semantics and cost:
+
+        dry_run=False, force=False (default)
+            If 8 active concepts exist: returns them. NO model call. $0.
+            If not: generates 8, writes to DB. ~$0.03 (one Claude call).
+
+        dry_run=True, force=False
+            If 8 active concepts exist: returns them. NO model call. $0.
+            If not: generates 8, returns WITHOUT writing. ~$0.03.
+
+        dry_run=False, force=True
+            Ignores existing concepts, regenerates, writes to DB
+            (supersedes prior set). ~$0.03.
+
+        dry_run=True, force=True
+            Ignores existing concepts, regenerates, returns WITHOUT
+            writing. ~$0.03. The "let me see a different set before
+            committing" case — the only combination that costs money
+            without producing a row.
+
     Args:
         property_id: UUID of the property.
         cycle_month: First day of the target month (e.g. date(2026, 9, 1)).
-        dry_run: If True, generate concepts without writing to DB.
+        dry_run: If True, return concepts without writing to DB.
+        force: If True, ignore existing concepts and regenerate.
 
     Returns:
         List of concept dicts from Stage 2.
     """
     logger.info(
-        "[Agent 8] run_cycle: property=%s cycle=%s dry_run=%s",
-        property_id, cycle_month.isoformat(), dry_run,
+        "[Agent 8] run_cycle: property=%s cycle=%s dry_run=%s force=%s",
+        property_id, cycle_month.isoformat(), dry_run, force,
     )
 
     # ── Stage 2: Concept generation ──────────────────────────────────────
 
-    existing = _check_existing_concepts(property_id, cycle_month)
-    if existing and not dry_run:
-        logger.info(
-            "[Agent 8] %d active concepts already exist for property=%s cycle=%s, skipping generation",
-            len(existing), property_id, cycle_month.isoformat(),
-        )
-        return existing
+    if not force:
+        existing = _check_existing_concepts(property_id, cycle_month)
+        if existing:
+            logger.info(
+                "[Agent 8] %d active concepts already exist for property=%s cycle=%s, skipping generation",
+                len(existing), property_id, cycle_month.isoformat(),
+            )
+            return existing
 
     from agents.agent8.concept_generator import generate_concepts
 
