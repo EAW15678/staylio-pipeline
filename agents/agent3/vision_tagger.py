@@ -23,9 +23,11 @@ import logging
 from typing import Optional
 
 from pipeline_emitter import emit_media_cost
+from core.retry import retry_with_backoff
 
 from google.cloud import vision
 from google.cloud.vision_v1 import types
+from google.api_core import exceptions as google_exceptions
 from google.oauth2 import service_account
 
 from agents.agent3.models import (
@@ -292,6 +294,16 @@ def tag_original_for_provenance(
     client = _get_vision_client()
     labels = _get_labels(client, image_bytes=image_bytes, url=asset.asset_url_original)
     asset.labels_original = labels
+    emit_media_cost(
+        vendor="google_vision",
+        service="label_detection",
+        units=1,
+        unit_name="images",
+        property_id=str(asset.property_id) if hasattr(asset, "property_id") else None,
+        workflow_name="listing_generation",
+        slot_name="provenance_baseline",
+        generation_reason="gcv_provenance_tag",
+    )
     return asset
 
 
@@ -323,7 +335,13 @@ def _tag_single_asset(
             types.Feature(type_=vision.Feature.Type.SAFE_SEARCH_DETECTION),
         ]
 
-        response = client.annotate_image({"image": image, "features": features})
+        response = retry_with_backoff(
+            fn=lambda: client.annotate_image({"image": image, "features": features}),
+            max_retries=3,
+            backoff_base=2.0,
+            retryable=(google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.ResourceExhausted),
+            label="Vision API annotate_image",
+        )
 
         # Labels
         labels = [l.description.lower() for l in response.label_annotations]
@@ -394,7 +412,13 @@ def _get_labels(
             image.source.image_uri = url
         else:
             return []
-        resp = client.label_detection(image=image, max_results=20)
+        resp = retry_with_backoff(
+            fn=lambda: client.label_detection(image=image, max_results=20),
+            max_retries=3,
+            backoff_base=2.0,
+            retryable=(google_exceptions.ServiceUnavailable, google_exceptions.DeadlineExceeded, google_exceptions.ResourceExhausted),
+            label="Vision API label_detection",
+        )
         return [l.description.lower() for l in resp.label_annotations]
     except Exception as exc:
         logger.warning(f"Vision labels failed: {exc}")

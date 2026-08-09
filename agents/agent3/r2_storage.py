@@ -48,19 +48,26 @@ R2_ENHANCED_PUBLIC_URL = os.environ.get("R2_ENHANCED_PUBLIC_URL", R2_PUBLIC_BASE
 R2_VIDEO_PUBLIC_URL = os.environ.get("R2_VIDEO_PUBLIC_URL", R2_PUBLIC_BASE)
 
 
+_r2_client = None
+
+
 def _get_r2_client():
     """
     Create an S3-compatible boto3 client pointing at Cloudflare R2.
     R2 endpoint format: https://{account_id}.r2.cloudflarestorage.com
+    Cached at module level to avoid recreating the client on every call.
     """
-    return boto3.client(
-        "s3",
-        endpoint_url=os.environ["R2_ENDPOINT_URL"],
-        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
-        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
-        config=Config(signature_version="s3v4"),
-        region_name="auto",
-    )
+    global _r2_client
+    if _r2_client is None:
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=os.environ["R2_ENDPOINT_URL"],
+            aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+            aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+            config=Config(signature_version="s3v4"),
+            region_name="auto",
+        )
+    return _r2_client
 
 
 def upload_photo_original(

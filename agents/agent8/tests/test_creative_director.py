@@ -300,7 +300,7 @@ def _patch_all_deps(
             "agents.agent8.creative_director.anthropic.Anthropic",
             return_value=mock_client,
         ),
-        patch("agents.agent8.retry.time.sleep"),
+        patch("core.retry.time.sleep"),
     ]
     return patches, mock_client, persisted
 

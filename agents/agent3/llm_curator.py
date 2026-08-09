@@ -36,6 +36,7 @@ import httpx
 from PIL import Image, ImageDraw, ImageFont
 
 from core.pipeline_status import cache_knowledge_base, get_cached_knowledge_base
+from pipeline_emitter import emit_media_cost
 
 logger = logging.getLogger(__name__)
 
@@ -780,6 +781,14 @@ def _single_call(
             messages=[{"role": "user", "content": content}],
         )
         _log_token_usage(resp, "single")
+        emit_media_cost(
+            vendor="anthropic",
+            service="vision_curation",
+            units=len(index_map),
+            unit_name="images",
+            workflow_name="listing_generation",
+            generation_reason="llm_vision_curation_single",
+        )
         raw = resp.content[0].text
         return _parse_and_validate(raw, index_map)
     except Exception as exc:
@@ -819,6 +828,14 @@ def _batch_call(
             messages=[{"role": "user", "content": content}],
         )
         _log_token_usage(resp, "batch")
+        emit_media_cost(
+            vendor="anthropic",
+            service="vision_curation",
+            units=len(batch_index),
+            unit_name="images",
+            workflow_name="listing_generation",
+            generation_reason="llm_vision_curation_batch",
+        )
         raw = resp.content[0].text
         parsed = _parse_and_validate(raw, batch_index)
         return parsed["images"] if parsed else []

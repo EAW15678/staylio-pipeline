@@ -90,7 +90,7 @@ class TestRetryWithBackoff:
                 raise ValueError("fail")
             return "ok"
 
-        with patch("agents.agent8.retry.time.sleep", side_effect=mock_sleep):
+        with patch("core.retry.time.sleep", side_effect=mock_sleep):
             retry_with_backoff(
                 fn=fails_twice,
                 max_retries=3,

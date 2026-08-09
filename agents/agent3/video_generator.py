@@ -29,6 +29,7 @@ from typing import Optional
 import httpx
 import runwayml
 
+from core.retry import async_retry_with_backoff
 from pipeline_emitter import emit_media_cost
 
 from agents.agent3.models import (
@@ -413,25 +414,34 @@ async def _generate_elevenlabs_audio(
         return None
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            resp = await client.post(
-                f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}",
-                headers={
-                    "xi-api-key": ELEVENLABS_API_KEY,
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": script,
-                    "model_id": "eleven_multilingual_v2",
-                    "voice_settings": {
-                        "stability": 0.5,
-                        "similarity_boost": 0.75,
-                        "style": 0.3,
+        async def _elevenlabs_attempt():
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}",
+                    headers={
+                        "xi-api-key": ELEVENLABS_API_KEY,
+                        "Content-Type": "application/json",
                     },
-                },
-            )
-            resp.raise_for_status()
-            audio_bytes = resp.content
+                    json={
+                        "text": script,
+                        "model_id": "eleven_multilingual_v2",
+                        "voice_settings": {
+                            "stability": 0.5,
+                            "similarity_boost": 0.75,
+                            "style": 0.3,
+                        },
+                    },
+                )
+                resp.raise_for_status()
+                return resp.content
+
+        audio_bytes = await async_retry_with_backoff(
+            fn=_elevenlabs_attempt,
+            max_retries=3,
+            backoff_base=2.0,
+            retryable=(httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException),
+            label="ElevenLabs TTS",
+        )
 
         emit_media_cost(
             vendor="elevenlabs",
@@ -489,32 +499,40 @@ async def _generate_runway_clips(
                 continue
 
             try:
-                task = await runway_client.image_to_video.create(
-                    model=RUNWAY_MODEL,
-                    prompt_image=photo_url,
-                    prompt_text="Slow cinematic pan, professional real estate video style, smooth motion",
-                    duration=5,    # 5-second clips, assembled by Creatomate
-                    ratio="1280:720",
-                )
+                async def _runway_attempt():
+                    t = await runway_client.image_to_video.create(
+                        model=RUNWAY_MODEL,
+                        prompt_image=photo_url,
+                        prompt_text="Slow cinematic pan, professional real estate video style, smooth motion",
+                        duration=5,    # 5-second clips, assembled by Creatomate
+                        ratio="1280:720",
+                    )
 
-                # SDK blocks until SUCCEEDED, raises TaskFailedError on failure
-                result = await task.wait_for_task_output(timeout=600)
+                    # SDK blocks until SUCCEEDED, raises TaskFailedError on failure
+                    r = await t.wait_for_task_output(timeout=600)
 
-                output_urls = getattr(result, "output", None) or []
-                if not output_urls:
-                    logger.warning(f"[TS-09] Runway returned no output for clip {i} of {property_id}")
-                    continue
+                    out_urls = getattr(r, "output", None) or []
+                    if not out_urls:
+                        raise RuntimeError(f"Runway returned no output for clip {i} of {property_id}")
 
-                # Download and upload to R2
-                async with httpx.AsyncClient(timeout=120) as dl_client:
-                    dl = await dl_client.get(output_urls[0])
-                    dl.raise_for_status()
+                    # Download and upload to R2
+                    async with httpx.AsyncClient(timeout=120) as dl_client:
+                        dl = await dl_client.get(out_urls[0])
+                        dl.raise_for_status()
 
-                r2_url = upload_video(
-                    property_id=property_id,
-                    video_bytes=dl.content,
-                    video_type=clip_video_type,
-                    format_label="mp4",
+                    return upload_video(
+                        property_id=property_id,
+                        video_bytes=dl.content,
+                        video_type=clip_video_type,
+                        format_label="mp4",
+                    )
+
+                r2_url = await async_retry_with_backoff(
+                    fn=_runway_attempt,
+                    max_retries=3,
+                    backoff_base=2.0,
+                    retryable=(httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException, RuntimeError),
+                    label="Runway clip generation",
                 )
 
                 # Cache the clip so reruns skip this Runway call
@@ -617,28 +635,39 @@ async def _assemble_with_creatomate(
             if not template_id or "FILL_IN_AFTER_BUILDING_TEMPLATE" in template_id:
                 continue
             try:
-                render_resp = await client.post(
-                    f"{CREATOMATE_API_BASE}/renders",
-                    headers={
-                        "Authorization": f"Bearer {CREATOMATE_API_KEY}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "template_id": template_id,
-                        "modifications": _build_creatomate_modifications(
-                            motion_clips, audio_url, script, fmt
-                        ),
-                    },
-                )
-                render_resp.raise_for_status()
-                renders = render_resp.json()
-                render = renders[0] if isinstance(renders, list) else renders
-                render_id = render.get("id")
-                if not render_id:
-                    continue
+                async def _creatomate_attempt():
+                    render_resp = await client.post(
+                        f"{CREATOMATE_API_BASE}/renders",
+                        headers={
+                            "Authorization": f"Bearer {CREATOMATE_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "template_id": template_id,
+                            "modifications": _build_creatomate_modifications(
+                                motion_clips, audio_url, script, fmt
+                            ),
+                        },
+                    )
+                    render_resp.raise_for_status()
+                    renders = render_resp.json()
+                    render = renders[0] if isinstance(renders, list) else renders
+                    render_id = render.get("id")
+                    if not render_id:
+                        return None
 
-                # Poll for completion
-                output_url = await _poll_creatomate_render(client, render_id)
+                    # Poll for completion
+                    out_url = await _poll_creatomate_render(client, render_id)
+                    return out_url
+
+                output_url = await async_retry_with_backoff(
+                    fn=_creatomate_attempt,
+                    max_retries=3,
+                    backoff_base=2.0,
+                    retryable=(httpx.HTTPStatusError, httpx.ConnectError, httpx.TimeoutException),
+                    label="Creatomate render",
+                )
+
                 if not output_url:
                     continue
 
