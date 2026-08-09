@@ -16,6 +16,7 @@ from agents.agent8.concept_generator import (
     _build_prompt,
     _build_utm_content_slug,
     _extract_amenity_names,
+    _supersede_and_insert,
 )
 
 VISTA_AZULE_ID = "a1b2c3d4-0001-0001-0001-000000000001"
@@ -244,3 +245,229 @@ class TestPromptConstruction:
     def test_prompt_contains_vibe_as_prior(self):
         prompt = _build_prompt(MOCK_KB, date(2026, 9, 1))
         assert "PRIOR, NOT A TEMPLATE" in prompt
+
+
+# ── Version-bump tests (exercises _supersede_and_insert with mock DB) ───
+
+class MockSupabaseTable:
+    """
+    In-memory mock of a Supabase table for testing the supersede-and-insert
+    path. No real DB-backed test infrastructure exists in this repo — this
+    simulates the Supabase client's fluent API against an in-memory list.
+    """
+
+    def __init__(self):
+        self._rows: list[dict] = []
+        self._query_chain: dict = {}
+
+    def table(self, name: str):
+        self._query_chain = {}
+        return self
+
+    def select(self, cols: str, count: str = None):
+        self._query_chain["select"] = cols
+        return self
+
+    def eq(self, col: str, val):
+        self._query_chain.setdefault("filters", []).append((col, "eq", val))
+        return self
+
+    def is_(self, col: str, val: str):
+        self._query_chain.setdefault("filters", []).append((col, "is", val))
+        return self
+
+    def in_(self, col: str, vals: list):
+        self._query_chain.setdefault("filters", []).append((col, "in", vals))
+        return self
+
+    def insert(self, rows):
+        if isinstance(rows, list):
+            import uuid
+            for r in rows:
+                r.setdefault("concept_id", str(uuid.uuid4()))
+                self._rows.append(dict(r))
+        else:
+            import uuid
+            rows.setdefault("concept_id", str(uuid.uuid4()))
+            self._rows.append(dict(rows))
+        return self
+
+    def update(self, data: dict):
+        self._query_chain["update_data"] = data
+        return self
+
+    def execute(self):
+        filters = self._query_chain.get("filters", [])
+        update_data = self._query_chain.get("update_data")
+
+        if update_data:
+            # Apply update to matching rows
+            for row in self._rows:
+                if self._matches(row, filters):
+                    row.update(update_data)
+            result = MagicMock()
+            result.data = []
+            self._query_chain = {}
+            return result
+
+        # Select
+        matched = [r for r in self._rows if self._matches(r, filters)]
+        result = MagicMock()
+        result.data = matched
+        result.count = len(matched)
+        self._query_chain = {}
+        return result
+
+    def _matches(self, row: dict, filters: list) -> bool:
+        for col, op, val in filters:
+            rv = row.get(col)
+            if op == "eq" and rv != val:
+                return False
+            if op == "is" and val == "null" and rv is not None:
+                return False
+            if op == "in" and rv not in val:
+                return False
+        return True
+
+    def get_active_rows(self, property_id: str, cycle_month: str) -> list[dict]:
+        """Helper: get active (non-superseded) rows for a property+cycle."""
+        return [
+            r for r in self._rows
+            if r.get("property_id") == property_id
+            and r.get("cycle_month") == cycle_month
+            and r.get("superseded_at") is None
+        ]
+
+
+class TestVersionBump:
+    """
+    Tests the supersede-and-insert path using an in-memory mock of the
+    Supabase client. No real DB connection — the repo has no DB-backed
+    test infrastructure.
+    """
+
+    def _make_rows(self, version: int = 1) -> list[dict]:
+        """Build 8 concept rows for testing."""
+        return [
+            {
+                "property_id": VISTA_AZULE_ID,
+                "cycle_month": "2026-09-01",
+                "concept_number": cn,
+                "concept_version": version,
+                "utm_content_slug": f"vista-azule_2026-09_c{cn}",
+                "title": f"Concept {cn} v{version}",
+                "premise": f"Premise for concept {cn}",
+                "vibe_prior": "multigenerational_retreat",
+                "evidence_basis": [],
+                "source_material": [],
+                "target_platforms": ["tiktok", "pinterest", "facebook", "instagram"],
+                "status": "draft",
+                "created_by_agent": "agent8_stage2",
+                "superseded_at": None,
+            }
+            for cn in range(1, 9)
+        ]
+
+    def test_first_run_inserts_8_at_version_1(self):
+        sb = MockSupabaseTable()
+        rows = self._make_rows(version=1)
+        result = _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), rows)
+        assert len(result) == 8
+        assert all(r["concept_version"] == 1 for r in result)
+        active = sb.get_active_rows(VISTA_AZULE_ID, "2026-09-01")
+        assert len(active) == 8
+
+    def test_second_run_supersedes_v1_inserts_v2(self):
+        sb = MockSupabaseTable()
+
+        # First run
+        rows_v1 = self._make_rows(version=1)
+        _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), rows_v1)
+
+        # Second run
+        rows_v2 = self._make_rows(version=1)  # version will be overridden
+        result = _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), rows_v2)
+
+        # V2 rows inserted at version 2
+        assert all(r["concept_version"] == 2 for r in result)
+
+        # Exactly 8 active rows (v2), 8 superseded (v1)
+        active = sb.get_active_rows(VISTA_AZULE_ID, "2026-09-01")
+        assert len(active) == 8
+        assert all(r["concept_version"] == 2 for r in active)
+
+        superseded = [
+            r for r in sb._rows
+            if r["property_id"] == VISTA_AZULE_ID
+            and r["superseded_at"] is not None
+        ]
+        assert len(superseded) == 8
+        assert all(r["concept_version"] == 1 for r in superseded)
+
+    def test_slug_identical_across_versions(self):
+        sb = MockSupabaseTable()
+
+        rows_v1 = self._make_rows(version=1)
+        _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), rows_v1)
+
+        rows_v2 = self._make_rows(version=1)
+        result_v2 = _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), rows_v2)
+
+        # Slugs must be identical between v1 and v2 for same concept_number
+        for cn in range(1, 9):
+            expected_slug = f"vista-azule_2026-09_c{cn}"
+            v2_row = next(r for r in result_v2 if r["concept_number"] == cn)
+            assert v2_row["utm_content_slug"] == expected_slug
+
+    def test_third_run_produces_version_3(self):
+        sb = MockSupabaseTable()
+
+        # Three sequential runs
+        for run in range(3):
+            rows = self._make_rows(version=1)
+            result = _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), rows)
+
+        # Latest version is 3
+        assert all(r["concept_version"] == 3 for r in result)
+
+        # Exactly 8 active rows
+        active = sb.get_active_rows(VISTA_AZULE_ID, "2026-09-01")
+        assert len(active) == 8
+        assert all(r["concept_version"] == 3 for r in active)
+
+        # 16 superseded rows (v1 + v2)
+        superseded = [
+            r for r in sb._rows
+            if r["property_id"] == VISTA_AZULE_ID
+            and r["superseded_at"] is not None
+        ]
+        assert len(superseded) == 16
+
+        # Slugs still stable
+        for cn in range(1, 9):
+            slug = f"vista-azule_2026-09_c{cn}"
+            active_row = next(r for r in active if r["concept_number"] == cn)
+            assert active_row["utm_content_slug"] == slug
+
+    def test_partial_unique_one_active_per_slot(self):
+        """concept_ledger_one_active: only one active row per (property, month, number)."""
+        sb = MockSupabaseTable()
+
+        _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), self._make_rows())
+        _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), self._make_rows())
+
+        active = sb.get_active_rows(VISTA_AZULE_ID, "2026-09-01")
+        # Check uniqueness: no two active rows share the same concept_number
+        active_numbers = [r["concept_number"] for r in active]
+        assert len(active_numbers) == len(set(active_numbers)) == 8
+
+    def test_partial_unique_slug_active(self):
+        """concept_ledger_utm_slug_active: only one active row per slug."""
+        sb = MockSupabaseTable()
+
+        _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), self._make_rows())
+        _supersede_and_insert(sb, VISTA_AZULE_ID, date(2026, 9, 1), self._make_rows())
+
+        active = sb.get_active_rows(VISTA_AZULE_ID, "2026-09-01")
+        active_slugs = [r["utm_content_slug"] for r in active]
+        assert len(active_slugs) == len(set(active_slugs)) == 8
