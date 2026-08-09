@@ -18,7 +18,8 @@ from agents.agent8.creative_director import (
     validate_overlay_placement,
     validate_amenity_references,
     validate_no_ota,
-    validate_guest_text_verbatim,
+    validate_no_guest_names,
+    validate_quote_fidelity,
     validate_music_brief_prohibited,
     validate_duration,
     _run_validators,
@@ -519,32 +520,138 @@ class TestValidateOverlayPlacement:
         assert violations[0]["rule"] == "overlay_placement"
 
 
-class TestValidateGuestTextVerbatim:
-    def test_pass(self):
-        spec = {
-            "overlay_register": [
-                {
-                    "text": "Nobody felt like they got the bad room.",
-                    "provenance": "guest_book",
-                    "beat_ordinal": 1,
-                },
-            ],
-        }
-        assert validate_guest_text_verbatim(spec, MOCK_KB) == []
+class TestValidateNoGuestNames:
+    """Deterministic, absolute, no model call."""
 
-    def test_fail(self):
+    def test_pass_no_names(self):
+        spec = {
+            "narration_brief": "Nobody felt like they got the bad room.",
+            "overlay_register": [
+                {"text": "Three families, one roof.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        assert validate_no_guest_names(spec, MOCK_KB) == []
+
+    def test_fail_bare_name_in_overlay(self):
         spec = {
             "overlay_register": [
+                {"text": "The Williamson Family loved it.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        violations = validate_no_guest_names(spec, MOCK_KB)
+        assert len(violations) >= 1
+        assert violations[0]["rule"] == "no_guest_names"
+
+    def test_fail_name_in_narration(self):
+        spec = {
+            "narration_brief": "As the Williamsons put it, nobody got the bad room.",
+            "overlay_register": [],
+        }
+        violations = validate_no_guest_names(spec, MOCK_KB)
+        assert len(violations) >= 1
+
+    def test_fail_attribution_pattern_dash(self):
+        spec = {
+            "narration_brief": "Nobody got the bad room. — The Williamson Family",
+            "overlay_register": [],
+        }
+        violations = validate_no_guest_names(spec, MOCK_KB)
+        assert len(violations) >= 1
+
+    def test_pass_no_guest_entries(self):
+        """No guest entries in KB → no names to check → pass."""
+        kb_no_guests = {**MOCK_KB, "guest_reviews": []}
+        spec = {"narration_brief": "Some random text.", "overlay_register": []}
+        assert validate_no_guest_names(spec, kb_no_guests) == []
+
+
+class TestValidateQuoteFidelity:
+    """Model-assisted. All tests mock the model call."""
+
+    def test_exact_quote_passes(self):
+        spec = {
+            "overlay_register": [
+                {"text": "Nobody felt like they got the bad room.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        with patch("agents.agent8.creative_director._check_fidelity_with_model", return_value="pass"):
+            assert validate_quote_fidelity(spec, MOCK_KB) == []
+
+    def test_misspelling_corrected_passes(self):
+        spec = {
+            "overlay_register": [
+                {"text": "Nobody felt like they got the bad room.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        with patch("agents.agent8.creative_director._check_fidelity_with_model", return_value="pass"):
+            assert validate_quote_fidelity(spec, MOCK_KB) == []
+
+    def test_truncation_preserving_meaning_passes(self):
+        spec = {
+            "overlay_register": [
+                {"text": "Nobody got the bad room.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        with patch("agents.agent8.creative_director._check_fidelity_with_model", return_value="pass"):
+            assert validate_quote_fidelity(spec, MOCK_KB) == []
+
+    def test_truncation_inverting_meaning_fails(self):
+        """The pool/beach case: cutting "The pool was fine, the beach was incredible"
+        to "The pool was fine" inverts the guest's emphasis."""
+        kb_with_pool = {
+            **MOCK_KB,
+            "guest_reviews": [
                 {
-                    "text": "Everyone loved their room.",
-                    "provenance": "guest_book",
-                    "beat_ordinal": 1,
+                    "text": "The pool was fine, the beach was incredible",
+                    "source": "guest_book",
+                    "reviewer_name": "Beach Guest",
+                    "is_guest_book": True,
                 },
             ],
         }
-        violations = validate_guest_text_verbatim(spec, MOCK_KB)
-        assert len(violations) == 1
-        assert violations[0]["rule"] == "guest_text_verbatim"
+        spec = {
+            "overlay_register": [
+                {"text": "The pool was fine", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        with patch("agents.agent8.creative_director._check_fidelity_with_model", return_value="fail"):
+            violations = validate_quote_fidelity(spec, kb_with_pool)
+            assert len(violations) == 1
+            assert violations[0]["rule"] == "quote_fidelity"
+            assert violations[0]["severity"] == "fail"
+
+    def test_reworded_quote_fails(self):
+        spec = {
+            "overlay_register": [
+                {"text": "Everyone loved their rooms equally.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        with patch("agents.agent8.creative_director._check_fidelity_with_model", return_value="fail"):
+            violations = validate_quote_fidelity(spec, MOCK_KB)
+            assert len(violations) == 1
+            assert violations[0]["severity"] == "fail"
+
+    def test_uncertain_verdict_holds(self):
+        """Uncertain is NOT a pass — output is HELD."""
+        spec = {
+            "overlay_register": [
+                {"text": "Nobody got the bad room, that never happens.", "provenance": "guest_book", "beat_ordinal": 1},
+            ],
+        }
+        with patch("agents.agent8.creative_director._check_fidelity_with_model", return_value="uncertain"):
+            violations = validate_quote_fidelity(spec, MOCK_KB)
+            assert len(violations) == 1
+            assert violations[0]["severity"] == "uncertain"
+            assert "HELD" in violations[0]["detail"]
+
+    def test_no_guest_overlays_passes(self):
+        """No guest-provenance overlays → nothing to check → pass."""
+        spec = {
+            "overlay_register": [
+                {"text": "Welcome home.", "provenance": "original", "beat_ordinal": 1},
+            ],
+        }
+        assert validate_quote_fidelity(spec, MOCK_KB) == []
 
 
 # -- Revision loop tests ---------------------------------------------------

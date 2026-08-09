@@ -305,28 +305,222 @@ def validate_no_ota(spec: dict) -> list[dict]:
     return violations
 
 
-def validate_guest_text_verbatim(spec: dict, kb: dict) -> list[dict]:
-    """Reproduced guest text must match source exactly."""
+def validate_no_guest_names(spec: dict, kb: dict) -> list[dict]:
+    """
+    DETERMINISTIC, absolute, no model call.
+
+    No guest name appears anywhere in narration_brief, overlay_register
+    text, or caption fields. Catches bare names AND attribution patterns
+    the model produces unprompted ("— Sarah", "Sarah M.", "as Sarah put it").
+
+    Erick's rule: "Names will not be used in social media. That is a rule."
+    Unconditional — it does not matter that the same guest IS named on the
+    landing page. Social is a different context.
+    """
     violations = []
     guest_entries = _extract_guest_book_entries(kb)
     if not guest_entries:
         return violations
 
-    guest_texts = [e["text"] for e in guest_entries if e.get("text")]
+    # Collect all guest names (non-empty)
+    guest_names = [
+        e["reviewer_name"]
+        for e in guest_entries
+        if e.get("reviewer_name")
+    ]
+    if not guest_names:
+        return violations
 
-    # Check overlay_register for guest text provenance
-    overlays = spec.get("overlay_register") or []
-    for overlay in overlays:
-        prov = overlay.get("provenance", "")
-        if prov == "guest_book":
-            text = overlay.get("text", "")
-            if text and not any(text in gt for gt in guest_texts):
+    # Collect all text surfaces to check
+    surfaces: list[tuple[str, str]] = []  # (text, location)
+    narration = spec.get("narration_brief") or ""
+    if narration:
+        surfaces.append((narration, "narration_brief"))
+
+    for overlay in spec.get("overlay_register") or []:
+        text = overlay.get("text") or ""
+        if text:
+            beat = overlay.get("beat_ordinal", "?")
+            surfaces.append((text, f"overlay beat {beat}"))
+
+    # Check each surface for each name
+    for name in guest_names:
+        name_lower = name.lower()
+        # Split multi-word names to also catch partial use
+        name_parts = [p for p in name_lower.split() if len(p) > 2]
+
+        for text, location in surfaces:
+            text_lower = text.lower()
+
+            # Exact name match
+            if name_lower in text_lower:
                 violations.append({
-                    "rule": "guest_text_verbatim",
-                    "detail": f"Guest text not found verbatim in KB: '{text[:80]}...'",
-                    "beats": [overlay.get("beat_ordinal", 0)],
+                    "rule": "no_guest_names",
+                    "detail": f"Guest name '{name}' found in {location}",
+                    "beats": [],
                 })
+                continue
+
+            # Attribution patterns: "— Name", "- Name", "as Name put it"
+            for part in name_parts:
+                patterns = [
+                    f"— {part}", f"- {part}", f"– {part}",
+                    f"as {part} ", f"as {part},", f"as {part}.",
+                    f"{part} said", f"{part} told", f"{part} wrote",
+                    f"{part} m.", f"{part} w.",  # "Sarah M." style
+                ]
+                for pattern in patterns:
+                    if pattern in text_lower:
+                        violations.append({
+                            "rule": "no_guest_names",
+                            "detail": f"Guest name pattern '{pattern}' found in {location} (guest: {name})",
+                            "beats": [],
+                        })
+                        break  # one violation per name per surface
+
     return violations
+
+
+def validate_quote_fidelity(spec: dict, kb: dict) -> list[dict]:
+    """
+    MODEL-ASSISTED: checks whether quoted guest text preserves meaning.
+
+    Social media uses guest material as PULL-QUOTES, not verbatim records.
+    Permitted: corrected misspellings, truncation to a quotable line.
+    Not permitted: any shift in meaning, including by omission.
+
+    THREE OUTCOMES: pass, fail, uncertain.
+    Uncertain is NOT a pass — Guidelines section 8: where compliance is
+    uncertain, output is HELD, not shipped. Uncertain surfaces in
+    rejection_reasons the same way a failure does.
+
+    This makes Stage 3 model-assisted where it was previously pure-code.
+    Added cost: ~$0.01 per spec when guest-book overlays are present.
+    """
+    violations = []
+    guest_entries = _extract_guest_book_entries(kb)
+    if not guest_entries:
+        return violations
+
+    guest_texts = {e["text"]: e for e in guest_entries if e.get("text")}
+    if not guest_texts:
+        return violations
+
+    # Collect guest-provenance quotes from overlays and narration
+    quotes_to_check: list[tuple[str, str]] = []  # (quote, location)
+
+    for overlay in spec.get("overlay_register") or []:
+        if overlay.get("provenance") == "guest_book":
+            text = overlay.get("text") or ""
+            if text:
+                beat = overlay.get("beat_ordinal", "?")
+                quotes_to_check.append((text, f"overlay beat {beat}"))
+
+    narration_prov = spec.get("narration_provenance") or ""
+    narration = spec.get("narration_brief") or ""
+    if "guest_book" in narration_prov and narration:
+        quotes_to_check.append((narration, "narration_brief"))
+
+    if not quotes_to_check:
+        return violations
+
+    # Find the best-matching source for each quote
+    for quote, location in quotes_to_check:
+        # Find which source text this quote likely came from
+        best_source = None
+        best_overlap = 0
+        for source_text in guest_texts:
+            # Check for substring or high word overlap
+            quote_words = set(quote.lower().split())
+            source_words = set(source_text.lower().split())
+            overlap = len(quote_words & source_words)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_source = source_text
+
+        if not best_source:
+            violations.append({
+                "rule": "quote_fidelity",
+                "detail": f"Cannot identify source for guest quote in {location}: '{quote[:80]}'",
+                "beats": [],
+                "severity": "fail",
+            })
+            continue
+
+        # Model-assisted fidelity check
+        verdict = _check_fidelity_with_model(best_source, quote)
+
+        if verdict == "fail":
+            violations.append({
+                "rule": "quote_fidelity",
+                "detail": f"Quote in {location} materially changes meaning of source. Original: '{best_source[:80]}' → Used: '{quote[:80]}'",
+                "beats": [],
+                "severity": "fail",
+            })
+        elif verdict == "uncertain":
+            violations.append({
+                "rule": "quote_fidelity",
+                "detail": f"Uncertain whether quote in {location} preserves meaning. Original: '{best_source[:80]}' → Used: '{quote[:80]}'. HELD per Guidelines section 8.",
+                "beats": [],
+                "severity": "uncertain",
+            })
+
+    return violations
+
+
+def _check_fidelity_with_model(original: str, quote: str) -> str:
+    """
+    Ask Claude whether a pull-quote preserves the meaning of the original.
+
+    Returns: "pass", "fail", or "uncertain".
+    Cost: ~$0.005 per call (short prompt, short response).
+    """
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+
+    prompt = f"""\
+A guest wrote this in a vacation rental's physical guest book:
+
+ORIGINAL: "{original}"
+
+For social media, this was shortened to:
+
+QUOTE: "{quote}"
+
+Rules:
+- Correcting misspellings is permitted.
+- Truncating to a quotable line is permitted.
+- Any change that shifts what the guest stated or implied is NOT permitted.
+- Truncation that inverts meaning by omission is NOT permitted.
+  Example: "The pool was fine, the beach was incredible" cut to
+  "The pool was fine" inverts the guest's emphasis.
+
+Does the quote preserve the meaning and intent of the original?
+
+Respond with EXACTLY one word: pass, fail, or uncertain.
+- pass: meaning is preserved
+- fail: meaning is materially changed
+- uncertain: you cannot confidently determine either way"""
+
+    try:
+        resp = retry_with_backoff(
+            fn=lambda: client.messages.create(
+                model=_MODEL,
+                max_tokens=10,
+                messages=[{"role": "user", "content": prompt}],
+            ),
+            max_retries=2,
+            backoff_base=1.0,
+            retryable=(anthropic.RateLimitError, anthropic.APIError),
+            label="quote fidelity check",
+        )
+        verdict = resp.content[0].text.strip().lower()
+        if verdict in ("pass", "fail", "uncertain"):
+            return verdict
+        logger.warning("[Agent 8] Unexpected fidelity verdict: %s", verdict)
+        return "uncertain"
+    except Exception as exc:
+        logger.warning("[Agent 8] Fidelity check failed, treating as uncertain: %s", exc)
+        return "uncertain"
 
 
 def validate_music_brief_prohibited(spec: dict) -> list[dict]:
@@ -595,7 +789,8 @@ def _run_validators(
     violations.extend(validate_overlay_placement(spec, inventory_map))
     violations.extend(validate_amenity_references(spec, kb))
     violations.extend(validate_no_ota(spec))
-    violations.extend(validate_guest_text_verbatim(spec, kb))
+    violations.extend(validate_no_guest_names(spec, kb))
+    violations.extend(validate_quote_fidelity(spec, kb))
     violations.extend(validate_music_brief_prohibited(spec))
     violations.extend(validate_duration(spec))
     return violations
