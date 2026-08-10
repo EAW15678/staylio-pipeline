@@ -3,7 +3,7 @@ Agent 6 — Social Media Marketing Data Models
 
 PostRecord:     A single scheduled or published social post
 CampaignRecord: A Meta or TikTok paid ad campaign for a property
-ContentCalendar: The full 60-day + steady-state publishing schedule
+ContentCalendar: Monthly publishing schedule (8 concepts x 4 platforms = 32 posts)
 SparkCluster:   A regional TikTok Spark Ad cluster (5+ property minimum)
 """
 
@@ -47,34 +47,15 @@ class CampaignStatus(str, Enum):
     FAILED   = "failed"
 
 
-# ── Platform cadence config ───────────────────────────────────────────────
-# Posts per day per platform during 60-day launch sprint phases
-SPRINT_CADENCE = {
-    "weeks_1_2": {
-        Platform.TIKTOK:    2,   # 2x daily — new account discovery window
-        Platform.INSTAGRAM: 1,
-        Platform.PINTEREST: 1,   # 7/week = 1/day
-        Platform.FACEBOOK:  1,
-    },
-    "weeks_3_4": {
-        Platform.TIKTOK:    2,
-        Platform.INSTAGRAM: 1,
-        Platform.PINTEREST: 1,
-        Platform.FACEBOOK:  1,
-    },
-    "weeks_5_8": {
-        Platform.TIKTOK:    1,   # Shift from volume to quality
-        Platform.INSTAGRAM: 1,
-        Platform.PINTEREST: 1,
-        Platform.FACEBOOK:  1,
-    },
-}
+# ── Volume config ────────────────────────────────────────────────────────
+# 8 concepts per monthly cycle, each published to all 4 platforms = 32 posts/month
+CONCEPTS_PER_CYCLE = 8
 
-# Steady-state cadence after Day 60
+# Steady-state cadence (kept for backward-compat with any callers)
 STEADY_STATE_CADENCE_PER_WEEK = {
-    Platform.TIKTOK:    3,
-    Platform.INSTAGRAM: 3,
-    Platform.PINTEREST: 3,
+    Platform.TIKTOK:    2,
+    Platform.INSTAGRAM: 2,
+    Platform.PINTEREST: 2,
     Platform.FACEBOOK:  2,
 }
 
@@ -83,14 +64,6 @@ MIN_POST_GAP_MINUTES = 60
 
 # TikTok cluster minimum property count before Spark Ads activate
 SPARK_CLUSTER_MIN_PROPERTIES = 5
-
-# Meta launch campaign budget per phase
-META_PHASE_BUDGETS = {
-    CampaignPhase.PHASE_A_AWARENESS:   35.0,
-    CampaignPhase.PHASE_B_INFEED:      70.0,
-    CampaignPhase.PHASE_C_RETARGETING: 45.0,
-}
-META_TOTAL_LAUNCH_BUDGET = 150.0
 
 
 @dataclass
@@ -170,8 +143,8 @@ class PostRecord:
 @dataclass
 class ContentCalendar:
     """
-    The full publishing schedule for a property.
-    60-day sprint followed by steady-state cadence.
+    The monthly publishing schedule for a property.
+    8 concepts x 4 platforms = 32 posts per cycle.
     """
     property_id: str
     page_url: str

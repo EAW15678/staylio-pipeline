@@ -1,24 +1,11 @@
 """
 Content Calendar Builder
 
-Builds the 60-day launch sprint content calendar for a new property,
-followed by steady-state scheduling.
+Builds a monthly content calendar for a new property.
 
-60-Day Sprint Structure (TS-15):
-  Weeks 1–2:  Account launch burst — short high-completion videos first
-              TikTok 2x daily (Videos 2+6 → then 1,3,4 rotation)
-              Instagram 1x daily, Pinterest 7 pins/week, Facebook 1x daily
-
-  Weeks 3–4:  Engagement build — longer videos, TikTok Spark Ad nomination
-              TikTok 2x daily (Videos 1,3,4,5 — drives saves/shares)
-              Same cadence on other platforms
-
-  Weeks 5–8:  Sustained + paid amplification
-              TikTok 1–2x daily (Videos 7, 8 introduced)
-              All platforms continue, Spark Ads running
-
-Total per property over 60 days: ~260 pieces of content
-  ~100 TikTok, ~60 Instagram, ~60 Pinterest, ~40 Facebook
+Volume: 8 concepts × 4 platforms = 32 posts per month.
+Each concept is repurposed across TikTok, Pinterest, Facebook,
+and Instagram — one post per platform per concept.
 
 Key constraint: minimum 60-minute gap between posts on same platform.
 """
@@ -38,6 +25,11 @@ from agents.agent6.utm_generator import build_utm_link_for_post
 
 logger = logging.getLogger(__name__)
 
+# ── Volume constants ─────────────────────────────────────────────────────
+CONCEPTS_PER_CYCLE = 8
+PLATFORMS = ["tiktok", "pinterest", "facebook", "instagram"]
+POSTS_PER_CYCLE = CONCEPTS_PER_CYCLE * len(PLATFORMS)  # 32
+
 # Optimal posting times per platform (UTC hour) — based on STR audience research
 OPTIMAL_POST_TIMES: dict[Platform, list[int]] = {
     Platform.TIKTOK:    [12, 19],    # Noon and 7pm — peak STR browsing
@@ -46,29 +38,18 @@ OPTIMAL_POST_TIMES: dict[Platform, list[int]] = {
     Platform.FACEBOOK:  [13],
 }
 
-# Video sequence for 60-day sprint per week range
-# Values are video_type strings matching VideoType enum values
-TIKTOK_VIDEO_SEQUENCE = {
-    "weeks_1_2": [
-        "walk_through",      # Video 2 — short, high completion
-        "feature_closeup",   # Video 6 — 12-15s, FYP-optimised
-        "vibe_match",        # Video 1 — hero video
-        "guest_review_1",    # Video 3
-    ],
-    "weeks_3_4": [
-        "vibe_match",        # Video 1
-        "guest_review_1",    # Video 3
-        "guest_review_2",    # Video 4
-        "local_highlight",   # Video 5 — destination search intent
-    ],
-    "weeks_5_8": [
-        "vibe_match",
-        "seasonal",          # Video 7
-        "guest_review_3",    # Video 8
-        "local_highlight",
-        "walk_through",
-    ],
-}
+# Concept rotation — each concept maps to a video type or photo style.
+# These are distributed round-robin across the month's 8 concept slots.
+CONCEPT_ROTATION = [
+    "vibe_match",        # Concept 1 — hero video
+    "walk_through",      # Concept 2 — property tour
+    "guest_review_1",    # Concept 3 — guest review
+    "guest_review_2",    # Concept 4 — guest review
+    "local_highlight",   # Concept 5 — destination / area
+    "feature_closeup",   # Concept 6 — feature detail
+    "seasonal",          # Concept 7 — seasonal angle
+    "guest_review_3",    # Concept 8 — guest review
+]
 
 
 def build_content_calendar(
@@ -77,12 +58,12 @@ def build_content_calendar(
     slug: str,
     vibe_profile: str,
     video_assets: list[dict],      # From Agent 3 visual_media_package
-    social_captions: list[dict],   # From Agent 2 content_package
+    social_captions: list[dict],   # From Agent 2 content_package (legacy — see SEAM below)
     photo_urls: list[dict],        # Category winner photos from Agent 3
     launch_date: Optional[str] = None,
 ) -> ContentCalendar:
     """
-    Build the complete 60-day content calendar for a property.
+    Build a monthly content calendar: 8 concepts × 4 platforms = 32 posts.
 
     Args:
         property_id:     Property UUID
@@ -90,12 +71,12 @@ def build_content_calendar(
         slug:            URL slug for UTM parameters
         vibe_profile:    For UTM term and content selection
         video_assets:    List of VideoAsset dicts from Agent 3
-        social_captions: List of SocialCaption dicts from Agent 2
+        social_captions: List of SocialCaption dicts from Agent 2 (legacy, see SEAM)
         photo_urls:      Category winner photo URLs from Agent 3
         launch_date:     ISO date string; defaults to today
 
     Returns:
-        ContentCalendar with all posts scheduled
+        ContentCalendar with 32 posts (8 concepts × 4 platforms)
     """
     start = datetime.now(timezone.utc).date()
     if launch_date:
@@ -118,92 +99,93 @@ def build_content_calendar(
 
     # Track last post time per platform to enforce 60-min gap
     last_post_time: dict[Platform, datetime] = {}
-
-    day = 0
     post_sequence: dict[str, int] = {}   # {platform_video_type: sequence_counter}
 
-    while day < 60:
-        current_date = start + timedelta(days=day)
-        week = day // 7 + 1
+    # Distribute 32 posts (8 concepts × 4 platforms) across ~30 days.
+    # Each concept gets a "publish day" spread across the month.
+    days_in_cycle = 30
+    concept_days = [
+        int(i * days_in_cycle / CONCEPTS_PER_CYCLE)
+        for i in range(CONCEPTS_PER_CYCLE)
+    ]
 
-        if week <= 2:
-            phase_key = "weeks_1_2"
-        elif week <= 4:
-            phase_key = "weeks_3_4"
-        else:
-            phase_key = "weeks_5_8"
+    platform_enum_map = {
+        "tiktok":    Platform.TIKTOK,
+        "instagram": Platform.INSTAGRAM,
+        "pinterest": Platform.PINTEREST,
+        "facebook":  Platform.FACEBOOK,
+    }
 
-        # ── TikTok ────────────────────────────────────────────────────────
-        tiktok_videos_today = _get_tiktok_videos_for_day(
-            day, phase_key, video_map
-        )
-        for i, (video_type, video_url) in enumerate(tiktok_videos_today):
+    for concept_idx, day_offset in enumerate(concept_days):
+        current_date = start + timedelta(days=day_offset)
+        week = day_offset // 7 + 1
+        concept_type = CONCEPT_ROTATION[concept_idx % len(CONCEPT_ROTATION)]
+
+        for platform_str in PLATFORMS:
+            platform = platform_enum_map[platform_str]
+
+            # Decide media: video (9:16 for TikTok/IG, 1:1 for FB) or photo (Pinterest)
+            if platform == Platform.PINTEREST:
+                media_url = photo_list[concept_idx % len(photo_list)] if photo_list else ""
+                content_type = ContentType.PIN
+                video_type_label = None
+            elif platform == Platform.FACEBOOK:
+                media_url = video_map.get(concept_type, {}).get("1_1", "")
+                if not media_url and photo_list:
+                    media_url = photo_list[concept_idx % len(photo_list)]
+                content_type = ContentType.VIDEO_REEL if media_url and concept_type in video_map else ContentType.FEED_PHOTO
+                video_type_label = concept_type if concept_type in video_map else None
+            else:
+                # TikTok + Instagram — 9:16 vertical video
+                media_url = video_map.get(concept_type, {}).get("9_16", "")
+                content_type = ContentType.VIDEO_REEL
+                video_type_label = concept_type
+
+            if not media_url:
+                continue
+
             post_time = _next_valid_post_time(
-                current_date,
-                Platform.TIKTOK,
-                slot=i,
-                last_post_time=last_post_time,
+                current_date, platform, slot=0, last_post_time=last_post_time,
             )
-            seq = _next_seq(post_sequence, f"tiktok_{video_type}")
+            seq = _next_seq(post_sequence, f"{platform.value}_{concept_type}")
             utm = build_utm_link_for_post(
-                page_url, Platform.TIKTOK, slug,
-                video_type, week, seq, vibe_profile, property_id
+                page_url, platform, slug,
+                video_type_label or "photo", week, seq, vibe_profile, property_id,
             )
-            caption_text, hashtags = _get_caption(
-                caption_map, Platform.TIKTOK, video_type, seq
-            )
+
+            # SEAM: Agent 8 Stage 9 owns captions via platform_variants.caption.
+            # Until Stage 9 is built, this field will be None. Agent 6 must NOT
+            # fall back to Agent 2's seed captions silently — that would publish
+            # content that was never directed or reviewed.
+            platform_variant_caption = None   # TODO: read from platform_variants when Stage 9 exists
+
+            if platform_variant_caption is not None:
+                caption_text = platform_variant_caption
+                hashtags = []  # platform_variants will include hashtags
+            else:
+                caption_text, hashtags = _get_caption(
+                    caption_map, platform, video_type_label or "photo", seq,
+                )
+
             post = PostRecord(
                 property_id=property_id,
-                platform=Platform.TIKTOK,
-                content_type=ContentType.VIDEO_REEL,
+                platform=platform,
+                content_type=content_type,
                 caption=caption_text,
                 hashtags=hashtags,
-                media_url=video_url,
-                video_type=video_type,
+                media_url=media_url,
+                video_type=video_type_label,
                 page_url=page_url,
                 utm_link=utm,
                 scheduled_at=post_time.isoformat(),
             )
             calendar.posts.append(post)
-            last_post_time[Platform.TIKTOK] = post_time
-
-        # ── Instagram ─────────────────────────────────────────────────────
-        ig_post = _build_instagram_post(
-            day, week, phase_key, current_date,
-            property_id, page_url, slug, vibe_profile,
-            video_map, photo_list, caption_map,
-            last_post_time, post_sequence,
-        )
-        if ig_post:
-            calendar.posts.append(ig_post)
-            last_post_time[Platform.INSTAGRAM] = datetime.fromisoformat(ig_post.scheduled_at)
-
-        # ── Pinterest ─────────────────────────────────────────────────────
-        pin_post = _build_pinterest_post(
-            day, current_date, property_id, page_url, slug,
-            vibe_profile, photo_list, caption_map,
-            last_post_time, post_sequence,
-        )
-        if pin_post:
-            calendar.posts.append(pin_post)
-            last_post_time[Platform.PINTEREST] = datetime.fromisoformat(pin_post.scheduled_at)
-
-        # ── Facebook ──────────────────────────────────────────────────────
-        fb_post = _build_facebook_post(
-            day, week, current_date, property_id, page_url, slug,
-            vibe_profile, video_map, photo_list, caption_map,
-            last_post_time, post_sequence,
-        )
-        if fb_post:
-            calendar.posts.append(fb_post)
-            last_post_time[Platform.FACEBOOK] = datetime.fromisoformat(fb_post.scheduled_at)
-
-        day += 1
+            last_post_time[platform] = post_time
 
     calendar.total_scheduled = len(calendar.posts)
     logger.info(
         f"[Agent 6] Calendar built for property {property_id}: "
-        f"{calendar.total_scheduled} posts scheduled over 60 days "
+        f"{calendar.total_scheduled} posts scheduled ({CONCEPTS_PER_CYCLE} concepts × {len(PLATFORMS)} platforms) "
         f"(TikTok: {sum(1 for p in calendar.posts if p.platform == Platform.TIKTOK)}, "
         f"Instagram: {sum(1 for p in calendar.posts if p.platform == Platform.INSTAGRAM)}, "
         f"Pinterest: {sum(1 for p in calendar.posts if p.platform == Platform.PINTEREST)}, "
@@ -223,51 +205,21 @@ def build_steady_state_posts(
     weeks_ahead: int = 4,
 ) -> list[PostRecord]:
     """
-    Generate steady-state posts for the next N weeks after Day 60.
+    Generate steady-state posts for subsequent months.
+    Same volume as initial calendar: 8 concepts × 4 platforms = 32 posts.
     Called monthly to keep the queue full.
     """
-    video_map   = _build_video_map(video_assets)
-    caption_map = _build_caption_map(social_captions)
-    photo_list  = [p.get("url", "") for p in photo_urls[:12] if p.get("url")]
-
-    posts: list[PostRecord] = []
-    start = datetime.now(timezone.utc).date()
-    post_sequence: dict[str, int] = {}
-
-    for week_offset in range(weeks_ahead):
-        for day_of_week in range(7):
-            current_date = start + timedelta(weeks=week_offset, days=day_of_week)
-            week_number = week_offset + 1
-
-            for platform, posts_this_week in STEADY_STATE_CADENCE_PER_WEEK.items():
-                # Distribute posts across the week
-                posts_per_day_chance = posts_this_week / 7.0
-                # Post on this day if it falls within the weekly budget
-                if day_of_week < posts_this_week:
-                    post_time = _scheduled_time(current_date, platform, slot=0)
-                    video_type = _pick_steady_state_video(platform, video_map, post_sequence)
-                    media_url = video_map.get(video_type, {}).get("9_16") or (photo_list[day_of_week % len(photo_list)] if photo_list else "")
-                    seq = _next_seq(post_sequence, f"{platform.value}_{video_type}_steady")
-                    utm = build_utm_link_for_post(
-                        page_url, platform, slug,
-                        video_type or "photo", week_number, seq, vibe_profile, property_id
-                    )
-                    caption_text, hashtags = _get_caption(
-                        caption_map, platform, video_type or "photo", seq
-                    )
-                    posts.append(PostRecord(
-                        property_id=property_id,
-                        platform=platform,
-                        content_type=ContentType.VIDEO_REEL if video_type else ContentType.FEED_PHOTO,
-                        caption=caption_text,
-                        hashtags=hashtags,
-                        media_url=media_url,
-                        video_type=video_type,
-                        page_url=page_url,
-                        utm_link=utm,
-                        scheduled_at=post_time.isoformat(),
-                    ))
-    return posts
+    # Delegate to the same calendar builder — steady-state uses identical volume.
+    calendar = build_content_calendar(
+        property_id=property_id,
+        page_url=page_url,
+        slug=slug,
+        vibe_profile=vibe_profile,
+        video_assets=video_assets,
+        social_captions=social_captions,
+        photo_urls=photo_urls,
+    )
+    return calendar.posts
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────
@@ -304,161 +256,6 @@ def _build_caption_map(social_captions: list[dict]) -> dict:
         if platform and video_num:
             cmap.setdefault(platform, {}).setdefault(video_num, []).append(c)
     return cmap
-
-
-def _get_tiktok_videos_for_day(
-    day: int,
-    phase_key: str,
-    video_map: dict,
-) -> list[tuple[str, str]]:
-    """
-    Return (video_type, url) pairs to post on TikTok for this day.
-    """
-    sequence = TIKTOK_VIDEO_SEQUENCE.get(phase_key, [])
-    if not sequence:
-        return []
-
-    posts_per_day = 2 if phase_key in ("weeks_1_2", "weeks_3_4") else 1
-    results = []
-    for i in range(posts_per_day):
-        idx = (day * posts_per_day + i) % len(sequence)
-        video_type = sequence[idx]
-        url = video_map.get(video_type, {}).get("9_16", "")
-        if url:
-            results.append((video_type, url))
-    return results
-
-
-def _build_instagram_post(
-    day: int, week: int, phase_key: str, current_date,
-    property_id, page_url, slug, vibe_profile,
-    video_map, photo_list, caption_map,
-    last_post_time, post_sequence,
-) -> Optional[PostRecord]:
-    """Build one Instagram post for the day."""
-    # Alternate between Reels and feed photos
-    use_video = day % 3 != 2   # 2 out of 3 days use video
-    if use_video:
-        video_type = _pick_instagram_video(day, video_map)
-        url = video_map.get(video_type, {}).get("9_16") if video_type else None
-        content_type = ContentType.VIDEO_REEL
-    else:
-        video_type = None
-        url = photo_list[day % len(photo_list)] if photo_list else None
-        content_type = ContentType.FEED_PHOTO
-
-    if not url:
-        return None
-
-    post_time = _next_valid_post_time(current_date, Platform.INSTAGRAM, 0, last_post_time)
-    seq = _next_seq(post_sequence, f"instagram_{video_type or 'photo'}")
-    utm = build_utm_link_for_post(
-        page_url, Platform.INSTAGRAM, slug,
-        video_type or "photo", week, seq, vibe_profile, property_id
-    )
-    caption_text, hashtags = _get_caption(caption_map, Platform.INSTAGRAM, video_type or "photo", seq)
-
-    return PostRecord(
-        property_id=property_id,
-        platform=Platform.INSTAGRAM,
-        content_type=content_type,
-        caption=caption_text,
-        hashtags=hashtags,
-        media_url=url,
-        video_type=video_type,
-        page_url=page_url,
-        utm_link=utm,
-        scheduled_at=post_time.isoformat(),
-    )
-
-
-def _build_pinterest_post(
-    day, current_date, property_id, page_url, slug,
-    vibe_profile, photo_list, caption_map,
-    last_post_time, post_sequence,
-) -> Optional[PostRecord]:
-    """Build one Pinterest pin for the day (7 pins/week)."""
-    if not photo_list:
-        return None
-    photo_url = photo_list[day % len(photo_list)]
-    post_time = _next_valid_post_time(current_date, Platform.PINTEREST, 0, last_post_time)
-    week = day // 7 + 1
-    seq = _next_seq(post_sequence, "pinterest_pin")
-    utm = build_utm_link_for_post(
-        page_url, Platform.PINTEREST, slug, "photo", week, seq, vibe_profile, property_id
-    )
-    caption_text, hashtags = _get_caption(caption_map, Platform.PINTEREST, "photo", seq)
-    return PostRecord(
-        property_id=property_id,
-        platform=Platform.PINTEREST,
-        content_type=ContentType.PIN,
-        caption=caption_text,
-        hashtags=hashtags,
-        media_url=photo_url,
-        video_type=None,
-        page_url=page_url,
-        utm_link=utm,
-        scheduled_at=post_time.isoformat(),
-    )
-
-
-def _build_facebook_post(
-    day, week, current_date, property_id, page_url, slug,
-    vibe_profile, video_map, photo_list, caption_map,
-    last_post_time, post_sequence,
-) -> Optional[PostRecord]:
-    """Build one Facebook post for the day."""
-    # Facebook gets the 1:1 format of videos or feed photos
-    video_type = _pick_instagram_video(day, video_map)
-    url = video_map.get(video_type, {}).get("1_1") if video_type else None
-    if not url and photo_list:
-        url = photo_list[day % len(photo_list)]
-        video_type = None
-
-    if not url:
-        return None
-
-    post_time = _next_valid_post_time(current_date, Platform.FACEBOOK, 0, last_post_time)
-    seq = _next_seq(post_sequence, f"facebook_{video_type or 'photo'}")
-    utm = build_utm_link_for_post(
-        page_url, Platform.FACEBOOK, slug,
-        video_type or "photo", week, seq, vibe_profile, property_id
-    )
-    caption_text, hashtags = _get_caption(caption_map, Platform.FACEBOOK, video_type or "photo", seq)
-    return PostRecord(
-        property_id=property_id,
-        platform=Platform.FACEBOOK,
-        content_type=ContentType.VIDEO_REEL if video_type else ContentType.FEED_PHOTO,
-        caption=caption_text,
-        hashtags=hashtags,
-        media_url=url,
-        video_type=video_type,
-        page_url=page_url,
-        utm_link=utm,
-        scheduled_at=post_time.isoformat(),
-    )
-
-
-def _pick_instagram_video(day: int, video_map: dict) -> Optional[str]:
-    """Rotate through available video types for Instagram."""
-    rotation = ["vibe_match", "guest_review_1", "walk_through", "guest_review_2",
-                "local_highlight", "seasonal", "guest_review_3", "feature_closeup"]
-    for vt in rotation[day % len(rotation):] + rotation[:day % len(rotation)]:
-        if vt in video_map:
-            return vt
-    return None
-
-
-def _pick_steady_state_video(platform: Platform, video_map: dict, seq: dict) -> Optional[str]:
-    """Pick a video type for steady-state posts."""
-    rotation = ["vibe_match", "guest_review_1", "local_highlight",
-                "seasonal", "guest_review_2", "walk_through", "guest_review_3"]
-    key = f"steady_{platform.value}"
-    idx = seq.get(key, 0) % len(rotation)
-    for vt in rotation[idx:] + rotation[:idx]:
-        if vt in video_map:
-            return vt
-    return None
 
 
 def _get_caption(

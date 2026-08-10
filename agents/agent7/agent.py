@@ -316,7 +316,7 @@ def _enrich_social_data(
         from core.supabase_store import get_supabase
         result = (
             get_supabase()
-            .table("social_posts")
+            .table("social_posts_legacy")
             .select("platform, views, likes, shares, comments")
             .eq("property_id", property_id)
             .eq("status", "published")

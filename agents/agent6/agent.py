@@ -7,9 +7,9 @@ social publishing begins — all links in posts point to the live page).
 
 Pipeline:
   1. Load all inputs from Redis/state
-  2. Build 60-day content calendar
+  2. Build monthly content calendar (8 concepts x 4 platforms = 32 posts)
   3. Schedule all posts via Ayrshare in batches
-  4. Launch 3-phase Meta paid campaign
+  4. Launch 4-month taper Meta paid campaign
   5. Register property in regional TikTok Spark cluster
   6. Save all records to Supabase
   7. Update pipeline status → signals Agent 7
@@ -51,7 +51,6 @@ logger = logging.getLogger(__name__)
 AGENT_NUMBER = 6
 
 # Number of posts to schedule in one Ayrshare batch call
-# Ayrshare has rate limits — don't flood with 260 requests at once
 BATCH_SIZE = 10
 
 
@@ -82,8 +81,16 @@ def agent6_node(state: dict) -> dict:
 
     vibe_profile   = kb.get("vibe_profile", "family_adventure")
     video_assets   = visual_media.get("video_assets") or []
-    social_captions = content_pkg.get("social_captions") or []
     booking_url    = kb.get("booking_url", "")
+
+    # SEAM: Agent 8 Stage 9 owns captions via platform_variants.caption.
+    # Until Stage 9 is built, this field will be None. Agent 6 must NOT
+    # fall back to Agent 2's seed captions silently — that would publish
+    # content that was never directed or reviewed.
+    #
+    # For now we still pass Agent 2's captions to the calendar builder,
+    # but the calendar builder will prefer platform_variants when available.
+    social_captions = content_pkg.get("social_captions") or []
     city           = _extract(kb, "city")
     state_abbr     = _extract(kb, "state")
     lat            = _extract_float(kb, "latitude")
@@ -139,7 +146,7 @@ def agent6_node(state: dict) -> dict:
     review_video_urls = _get_review_video_urls(visual_media)
 
     if booking_url and hero_video_url:
-        logger.info(f"[Agent 6] Launching Meta 3-phase campaign for property {property_id}")
+        logger.info(f"[Agent 6] Launching Meta taper campaign for property {property_id}")
         meta_campaigns = launch_meta_campaign(
             property_id=property_id,
             page_url=page_url,
@@ -339,7 +346,7 @@ def _save_calendar(calendar: ContentCalendar) -> None:
         # Save posts in batches
         if calendar.posts:
             records = [p.to_dict() for p in calendar.posts[:500]]
-            get_supabase().table("social_posts").upsert(
+            get_supabase().table("social_posts_legacy").upsert(
                 records,
                 on_conflict="property_id,platform,scheduled_at",
             ).execute()
@@ -379,7 +386,7 @@ def _load_cluster_recent_posts(cluster: SparkCluster) -> list[PostRecord]:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
         result = (
             get_supabase()
-            .table("social_posts")
+            .table("social_posts_legacy")
             .select("*")
             .in_("property_id", cluster.property_ids)
             .eq("platform", "tiktok")
@@ -420,7 +427,7 @@ def _load_pending_posts(property_id: str) -> list[PostRecord]:
         from core.supabase_store import get_supabase
         result = (
             get_supabase()
-            .table("social_posts")
+            .table("social_posts_legacy")
             .select("*")
             .eq("property_id", property_id)
             .eq("status", "scheduled")
@@ -454,7 +461,7 @@ def _update_post_status(post: PostRecord) -> None:
     try:
         from core.supabase_store import get_supabase
         if post.ayrshare_post_id:
-            get_supabase().table("social_posts").update({
+            get_supabase().table("social_posts_legacy").update({
                 "status": post.status,
                 "ayrshare_post_id": post.ayrshare_post_id,
                 "platform_post_id": post.platform_post_id,

@@ -1,17 +1,17 @@
 """
 Agent 6 Test Suite
-Run with: pytest booked/agents/agent6/tests/ -v
+Run with: pytest agents/agent6/tests/ -v
 
 Tests cover:
   - UTM generation correctness (all required params present)
   - UTM validation — every post must have valid UTM
-  - Content calendar structure (60 days, correct post counts)
+  - Content calendar structure (8 concepts x 4 platforms = 32 posts)
   - Minimum 60-minute gap between same-platform posts
-  - Correct video type sequencing per sprint phase
+  - Concept rotation coverage
   - Spark nomination scoring (engagement_score formula)
   - Spark cluster eligibility threshold (5 properties)
   - Spark nomination skips when score below minimum
-  - Meta campaign phase budget totals ($150 total)
+  - Paid taper budget defaults
   - Ayrshare pre-publish validation blocks invalid posts
   - Agent node output contract
 """
@@ -22,15 +22,13 @@ from unittest.mock import MagicMock, patch
 
 from agents.agent6.models import (
     CampaignPhase,
+    CONCEPTS_PER_CYCLE,
     ContentType,
-    META_PHASE_BUDGETS,
-    META_TOTAL_LAUNCH_BUDGET,
     Platform,
     PostRecord,
     PostStatus,
     SPARK_CLUSTER_MIN_PROPERTIES,
     SparkCluster,
-    SPRINT_CADENCE,
     STEADY_STATE_CADENCE_PER_WEEK,
 )
 from agents.agent6.utm_generator import (
@@ -39,9 +37,13 @@ from agents.agent6.utm_generator import (
     validate_utm_link,
 )
 from agents.agent6.content_calendar import (
-    TIKTOK_VIDEO_SEQUENCE,
+    CONCEPT_ROTATION,
+    CONCEPTS_PER_CYCLE as CAL_CONCEPTS_PER_CYCLE,
+    PLATFORMS,
+    POSTS_PER_CYCLE,
     build_content_calendar,
 )
+from agents.agent6.meta_ads_manager import PAID_TAPER
 from agents.agent6.spark_nominator import (
     MIN_SPARK_SCORE,
     evaluate_spark_nominations,
@@ -164,7 +166,8 @@ class TestUTMGeneration:
 # ── Content Calendar Tests ────────────────────────────────────────────────
 
 class TestContentCalendar:
-    def test_calendar_spans_60_days(self):
+    def test_calendar_produces_32_posts(self):
+        """8 concepts x 4 platforms = 32 posts per month."""
         calendar = build_content_calendar(
             property_id="p1",
             page_url="https://test.staylio.ai",
@@ -174,36 +177,7 @@ class TestContentCalendar:
             social_captions=[],
             photo_urls=[{"url": "https://r2.example.com/photo.jpg"}],
         )
-        # Verify posts span the expected date range
-        assert calendar.total_scheduled > 0
-        dates = set()
-        for post in calendar.posts:
-            if post.scheduled_at:
-                dates.add(post.scheduled_at[:10])   # date part only
-        assert len(dates) <= 60
-        assert len(dates) >= 55   # Allow slight variation
-
-    def test_tiktok_posts_twice_daily_in_weeks_1_2(self):
-        calendar = build_content_calendar(
-            property_id="p1",
-            page_url="https://test.staylio.ai",
-            slug="test-slug",
-            vibe_profile="family_adventure",
-            video_assets=make_video_assets(),
-            social_captions=[],
-            photo_urls=[{"url": "https://r2.example.com/photo.jpg"}],
-        )
-        # Count TikTok posts in first 14 days
-        start = datetime.fromisoformat(calendar.launch_date)
-        end_14 = start + timedelta(days=14)
-        tiktok_early = [
-            p for p in calendar.posts
-            if p.platform == Platform.TIKTOK
-            and p.scheduled_at
-            and datetime.fromisoformat(p.scheduled_at[:19]) < end_14.replace(tzinfo=timezone.utc)
-        ]
-        # Should be ~28 posts (2x daily × 14 days)
-        assert 20 <= len(tiktok_early) <= 30
+        assert calendar.total_scheduled == POSTS_PER_CYCLE
 
     def test_all_posts_have_valid_utm_links(self):
         """Critical: every post must have a valid UTM link."""
@@ -217,7 +191,7 @@ class TestContentCalendar:
             photo_urls=[{"url": "https://r2.example.com/photo.jpg"}],
         )
         for post in calendar.posts:
-            if post.media_url:   # Only check posts with media
+            if post.media_url:
                 valid, missing = validate_utm_link(post.utm_link)
                 assert valid, (
                     f"Post {post.platform}/{post.video_type} has invalid UTM: {missing}. "
@@ -235,7 +209,6 @@ class TestContentCalendar:
             social_captions=[],
             photo_urls=[{"url": "https://r2.example.com/photo.jpg"}],
         )
-        # Group posts by platform and date
         from collections import defaultdict
         platform_day_posts: dict = defaultdict(list)
         for post in calendar.posts:
@@ -250,7 +223,7 @@ class TestContentCalendar:
             times.sort()
             for i in range(1, len(times)):
                 gap_minutes = (times[i] - times[i-1]).total_seconds() / 60
-                if gap_minutes < 59:   # Allow 1-minute tolerance
+                if gap_minutes < 59:
                     violations.append(
                         f"{key}: gap={gap_minutes:.0f}min between "
                         f"{times[i-1].strftime('%H:%M')} and {times[i].strftime('%H:%M')}"
@@ -273,8 +246,8 @@ class TestContentCalendar:
         assert Platform.PINTEREST in platforms_with_posts
         assert Platform.FACEBOOK in platforms_with_posts
 
-    def test_calendar_approaches_260_total_posts(self):
-        """Spec target: ~260 posts over 60 days."""
+    def test_each_platform_gets_8_posts(self):
+        """Each of the 4 platforms should get exactly 8 posts (one per concept)."""
         calendar = build_content_calendar(
             property_id="p1",
             page_url="https://test.staylio.ai",
@@ -284,12 +257,14 @@ class TestContentCalendar:
             social_captions=[],
             photo_urls=[{"url": f"https://r2.example.com/photo_{i}.jpg"} for i in range(8)],
         )
-        assert 200 <= calendar.total_scheduled <= 320
+        for platform in Platform:
+            count = sum(1 for p in calendar.posts if p.platform == platform)
+            assert count == CAL_CONCEPTS_PER_CYCLE, (
+                f"{platform.value} has {count} posts, expected {CAL_CONCEPTS_PER_CYCLE}"
+            )
 
-    def test_tiktok_video_sequence_defined_for_all_phases(self):
-        for phase in ("weeks_1_2", "weeks_3_4", "weeks_5_8"):
-            assert phase in TIKTOK_VIDEO_SEQUENCE
-            assert len(TIKTOK_VIDEO_SEQUENCE[phase]) >= 3
+    def test_concept_rotation_has_8_entries(self):
+        assert len(CONCEPT_ROTATION) == 8
 
 
 # ── Ayrshare Pre-Publish Validation ──────────────────────────────────────
@@ -409,20 +384,26 @@ class TestSparkNomination:
 
 # ── Meta Campaign Budget Tests ────────────────────────────────────────────
 
-class TestMetaBudgets:
-    def test_phase_budgets_sum_to_total(self):
-        """The 3 phases must sum to $150 total per property."""
-        total = sum(META_PHASE_BUDGETS.values())
-        assert total == pytest.approx(META_TOTAL_LAUNCH_BUDGET, rel=0.01)
+class TestPaidTaper:
+    def test_taper_has_3_months(self):
+        """Paid taper covers months 1-3, then zero."""
+        assert len(PAID_TAPER) == 3
+        assert 1 in PAID_TAPER
+        assert 2 in PAID_TAPER
+        assert 3 in PAID_TAPER
 
-    def test_phase_a_budget(self):
-        assert META_PHASE_BUDGETS[CampaignPhase.PHASE_A_AWARENESS] == pytest.approx(35.0)
+    def test_taper_month_1_highest(self):
+        assert PAID_TAPER[1] >= PAID_TAPER[2] >= PAID_TAPER[3]
 
-    def test_phase_b_budget(self):
-        assert META_PHASE_BUDGETS[CampaignPhase.PHASE_B_INFEED] == pytest.approx(70.0)
+    def test_taper_defaults(self):
+        """Default placeholder values (these are not decisions — Erick sets the amounts)."""
+        assert PAID_TAPER[1] == pytest.approx(50.0)
+        assert PAID_TAPER[2] == pytest.approx(25.0)
+        assert PAID_TAPER[3] == pytest.approx(10.0)
 
-    def test_phase_c_budget(self):
-        assert META_PHASE_BUDGETS[CampaignPhase.PHASE_C_RETARGETING] == pytest.approx(45.0)
+    def test_total_taper_budget(self):
+        total = sum(PAID_TAPER.values())
+        assert total == pytest.approx(85.0)
 
 
 # ── Agent Node Contract Tests ─────────────────────────────────────────────

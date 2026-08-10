@@ -124,7 +124,7 @@ CREATE TABLE IF NOT EXISTS landing_pages (
 
 -- ── Social media ──────────────────────────────────────────────────────────
 
-CREATE TABLE IF NOT EXISTS social_posts (
+CREATE TABLE IF NOT EXISTS social_posts_legacy (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     property_id       UUID NOT NULL REFERENCES properties(property_id),
     platform          TEXT NOT NULL CHECK (platform IN ('instagram', 'tiktok', 'facebook', 'pinterest')),
@@ -271,7 +271,7 @@ ALTER TABLE pipeline_status          ENABLE ROW LEVEL SECURITY;
 ALTER TABLE content_versions         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE media_assets             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE landing_pages            ENABLE ROW LEVEL SECURITY;
-ALTER TABLE social_posts             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE social_posts_legacy             ENABLE ROW LEVEL SECURITY;
 ALTER TABLE content_calendars        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE meta_campaigns           ENABLE ROW LEVEL SECURITY;
 ALTER TABLE spark_clusters           ENABLE ROW LEVEL SECURITY;
