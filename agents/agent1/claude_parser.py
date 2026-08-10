@@ -33,12 +33,88 @@ ANTHROPIC_CLIENT = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 MODEL = "claude-sonnet-4-6"
 MAX_PAGE_CHARS = 40_000   # Trim large pages to control token cost
 
-# max_tokens is a CEILING, not a reservation — billing is on tokens actually
-# generated, so unused headroom costs nothing.  This was set to 2000 and caused
-# a deterministic truncation failure (Casa de Lubitz, 2026-08-10: response cut
-# mid-string at char 5,982, discarding a successful 44,289-char Firecrawl
-# scrape → 0 photos, 0 amenities).  Set to Sonnet's maximum output.
-EXTRACT_MAX_TOKENS = 64_000
+# Output token budget for the extraction call.  Two constraints:
+#   - Too low → response truncated mid-JSON, json.loads raises (the original bug:
+#     2,000 tokens cut Casa de Lubitz at char 5,982 → 0 photos, 0 amenities).
+#   - Above 21,333 → Anthropic SDK refuses to send (ValueError: "Streaming is
+#     required"); threshold is 3600 * max_tokens / 128_000 > 600.
+# With photo_urls extracted by regex before the LLM call, the response contains
+# only judgment fields (name, description, amenities, etc.) — comfortably under
+# 8,000 tokens.
+EXTRACT_MAX_TOKENS = 8_000
+
+# ── Photo URL extraction ─────────────────────────────────────────────────────
+# Image file extensions considered valid photo URLs.
+_IMAGE_EXTENSIONS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".avif"})
+
+# Substrings in URLs that indicate non-photo images (logos, icons, tracking pixels).
+_NON_PHOTO_PATTERNS = (
+    "/logo", "/icon", "/favicon", "/badge", "/sprite", "/pixel",
+    "/tracking", "/analytics", "/beacon", "/spacer", "/blank",
+    "/widget", "/button", "/arrow", "/spinner",
+    "gravatar.com", "facebook.com", "instagram.com", "twitter.com",
+    "googletagmanager.com", "google-analytics.com", "doubleclick.net",
+)
+
+
+def _extract_photo_urls(text: str) -> list[str]:
+    """Extract photo URLs from markdown or plain text.
+
+    Handles:
+      - Markdown images: ![alt](url)
+      - Bare image URLs on their own or in markdown links: [text](url.jpg)
+      - Bare URLs in text matching image extensions
+
+    Filters out logos, icons, tracking pixels, and data URIs.
+    Returns deduplicated list preserving first-seen order.
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    # 1. Markdown image syntax: ![...](url)
+    for match in re.finditer(r'!\[[^\]]*\]\((https?://[^\s)]+)\)', text):
+        urls.append(match.group(1))
+
+    # 2. Markdown link syntax where the URL has an image extension: [...](url.jpg)
+    for match in re.finditer(r'\[[^\]]*\]\((https?://[^\s)]+)\)', text):
+        urls.append(match.group(1))
+
+    # 3. Bare URLs with image extensions (catches URLs not in markdown syntax)
+    for match in re.finditer(r'(https?://[^\s"\'<>)\]]+)', text):
+        urls.append(match.group(1))
+
+    # Deduplicate, filter, and validate
+    result: list[str] = []
+    for url in urls:
+        if url in seen:
+            continue
+        seen.add(url)
+
+        # Must have a recognisable image extension (strip query params for check)
+        path = url.split("?")[0].split("#")[0].lower()
+        if not any(path.endswith(ext) for ext in _IMAGE_EXTENSIONS):
+            continue
+
+        # Filter out non-photo URLs
+        url_lower = url.lower()
+        if any(pat in url_lower for pat in _NON_PHOTO_PATTERNS):
+            continue
+
+        # Skip tiny images (common pattern: dimensions encoded in URL)
+        # e.g. /images/100x100/logo.jpg or ?w=50&h=50
+        tiny = re.search(r'[/_ -](\d+)x(\d+)[/_ .-]', url_lower)
+        if tiny:
+            w, h = int(tiny.group(1)), int(tiny.group(2))
+            if w < 100 or h < 100:
+                continue
+
+        # Skip data URIs (shouldn't appear but defensive)
+        if url.startswith("data:"):
+            continue
+
+        result.append(url)
+
+    return result
 
 
 def parse_unknown_ota(
@@ -194,17 +270,28 @@ def _claude_extract(page_text: str, source_url: str) -> Optional[dict]:
     """
     Ask Claude to extract structured property data from raw page text.
     Returns a dict matching the PMC extract schema, or None.
+
+    Photo URLs are extracted by regex before the LLM call — they are
+    mechanically extractable from markdown image syntax and don't need
+    LLM judgment. This keeps the LLM response small (judgment fields
+    only) and avoids the token-limit truncation that caused the Casa de
+    Lubitz failure (2026-08-10).
     """
+    # Extract photo URLs mechanically before the LLM call
+    photo_urls = _extract_photo_urls(page_text)
+    logger.info("[TS-04c] Regex extracted %d photo URLs from page text", len(photo_urls))
+
     prompt = f"""You are extracting structured vacation rental property data from a web page.
 
 Source URL: {source_url}
-Page content (truncated):
+Page content:
 ---
 {page_text}
 ---
 
 Extract all available property information and respond ONLY with a JSON object.
 If a field is not found, use null. Do not invent data.
+Do NOT include photo URLs — those are extracted separately.
 
 {{
   "property_name": "string or null",
@@ -219,7 +306,6 @@ If a field is not found, use null. Do not invent data.
   "state": "two-letter state code or null",
   "zip_code": "string or null",
   "avg_nightly_rate": number_or_null,
-  "photo_urls": ["list of absolute image URLs found on the page"],
   "neighborhood_description": "string or null",
   "booking_url": "direct booking URL if found or null"
 }}"""
@@ -246,10 +332,15 @@ If a field is not found, use null. Do not invent data.
         raw = resp.content[0].text.strip()
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
+        result = json.loads(raw)
     except Exception as exc:
         logger.error(f"[TS-04c] Claude extraction failed: {exc}")
         return None
+
+    # Merge regex-extracted photo URLs into the result so _apply_extraction
+    # sees the same shape it always has (dict with "photo_urls" key).
+    result["photo_urls"] = photo_urls
+    return result
 
 
 def _apply_extraction(
