@@ -124,6 +124,22 @@ def load_intake_submission(property_id: str) -> Optional[PropertyKnowledgeBase]:
     for feature in data.get("unique_features") or []:
         kb.unique_features.append(PropertyField(value=feature, source=S, confidence=1.0))
 
+    def _resolve_guest_entry_text(entry: dict) -> str:
+        """Combine written guest book text and verbal recollection.
+
+        Rules (from Erick):
+          - Both present → combine as two paragraphs (reads naturally aloud
+            for ElevenLabs narration and on the page)
+          - Verbal only  → use verbal
+          - Text only    → use text
+          - Neither      → empty string
+        """
+        written = (entry.get("text") or entry.get("review_text") or "").strip()
+        verbal = (entry.get("verbal") or "").strip()
+        if written and verbal:
+            return f"{written}\n\n{verbal}"
+        return written or verbal
+
     # Photos uploaded at intake — these are already in R2, URL stored in intake record
     for photo in data.get("uploaded_photos") or []:
         kb.photos.append(PhotoAsset(
@@ -134,13 +150,17 @@ def load_intake_submission(property_id: str) -> Optional[PropertyKnowledgeBase]:
             order=photo.get("order", 0),
         ))
 
-    # Physical guest book entries entered at intake
+    # Physical guest book entries entered at intake.
+    # The portal stores {name, date, text, verbal}; legacy/API callers may
+    # send {guest_name, stay_date, review_text}.  Read both shapes rather
+    # than coupling to one vocabulary.
     for entry in data.get("guest_book_entries") or []:
+        review_text = _resolve_guest_entry_text(entry)
         kb.guest_reviews.append(GuestReview(
-            text=entry.get("review_text", ""),
+            text=review_text,
             source=S,
-            reviewer_name=entry.get("guest_name"),
-            stay_date=entry.get("stay_date"),
+            reviewer_name=entry.get("name") or entry.get("guest_name"),
+            stay_date=entry.get("date") or entry.get("stay_date"),
             is_guest_book=True,
         ))
 

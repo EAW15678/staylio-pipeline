@@ -122,7 +122,26 @@ async def generate_all_videos(
     Returns list of VideoAsset records (with R2 URLs) for storage.
     """
     videos: list[VideoAsset] = []
-    review_count = len([r for r in guest_reviews if r.get("is_guest_book")])
+    # Count only reviews with actual text — hollow entries (empty text from a
+    # field-name mismatch) must not pass the gate.  The original gate counted
+    # is_guest_book entries regardless of text, so 3 hollow entries passed and
+    # each _generate_review_video returned [] silently.
+    book_reviews_with_text = [
+        r for r in guest_reviews
+        if r.get("is_guest_book") and (r.get("text") or "").strip()
+    ]
+    hollow_count = len([
+        r for r in guest_reviews
+        if r.get("is_guest_book") and not (r.get("text") or "").strip()
+    ])
+    if hollow_count:
+        logger.warning(
+            "[TS-09] %d guest_book entries have EMPTY text and were excluded from "
+            "review video generation. This usually means the intake field mapping "
+            "dropped the review content. Property: %s",
+            hollow_count, property_id,
+        )
+    review_count = len(book_reviews_with_text)
     has_enough_reviews = review_count >= 3
 
     # Video generation tasks — run sequentially to control API rate limits
@@ -142,7 +161,7 @@ async def generate_all_videos(
 
     # VIDEOS 3, 4, 8 — Guest Review videos (need 3 guest book entries)
     if has_enough_reviews:
-        book_reviews = [r for r in guest_reviews if r.get("is_guest_book")][:3]
+        book_reviews = book_reviews_with_text[:3]
         for i, (review, review_idx) in enumerate(zip(book_reviews, [0, 1, 2])):
             video_type = [VideoType.GUEST_REVIEW_1, VideoType.GUEST_REVIEW_2, VideoType.GUEST_REVIEW_3][i]
             voice_id = REVIEW_VOICE_POOL[review_idx] if review_idx < len(REVIEW_VOICE_POOL) else ""
