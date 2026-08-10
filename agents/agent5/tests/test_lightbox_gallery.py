@@ -384,3 +384,82 @@ class TestOpenGalleryFiltered:
     def test_multi_category_filter(self):
         html = _build_lightbox_gallery_js(_make_gallery_items())
         assert "cats.indexOf(p.cat)" in html
+
+
+# ── Truthful button count tests ──────────────────────────────────────────
+
+class TestButtonCountTruthful:
+    def test_button_matches_gallery_count_not_module_count(self):
+        """When gallery has fewer items than module (dupe suppression),
+        button shows gallery count."""
+        # Module has 10 items but gallery only has 6 with matching category
+        modules = _make_module("Living Areas", 9)  # 10 total in module
+        # Build gallery with only 6 living_room items (simulating dupe suppression)
+        gallery = [
+            {"url": f"https://r2.example.com/gal{i}.jpg",
+             "alt": f"Gallery {i}", "category": "living_room"}
+            for i in range(6)
+        ]
+        html = _build_category_modules_section(modules, gallery)
+        # Should show gallery count (6), not module count (10)
+        assert "View all 6 photos" in html
+        assert "View all 10 photos" not in html
+
+    def test_no_button_when_gallery_count_le_4(self):
+        """If dupe suppression reduces gallery count to ≤4, no button."""
+        modules = _make_module("Living Areas", 9)  # 10 in module
+        # But only 4 reach the gallery
+        gallery = [
+            {"url": f"https://r2.example.com/gal{i}.jpg",
+             "alt": f"Gallery {i}", "category": "living_room"}
+            for i in range(4)
+        ]
+        html = _build_category_modules_section(modules, gallery)
+        assert "cat-module-more" not in html
+
+    def test_label_and_filter_same_categories(self):
+        """The button label count and the JS filter use the same category set."""
+        modules = _make_module("Living Areas", 10)
+        # Gallery has items in both living_room and game_entertainment
+        gallery = [
+            {"url": f"https://r2.example.com/lr{i}.jpg",
+             "alt": f"Living {i}", "category": "living_room"}
+            for i in range(5)
+        ] + [
+            {"url": f"https://r2.example.com/ge{i}.jpg",
+             "alt": f"Game {i}", "category": "game_entertainment"}
+            for i in range(3)
+        ]
+        html = _build_category_modules_section(modules, gallery)
+        # Total gallery count for Living Areas = 5 + 3 = 8
+        assert "View all 8 photos" in html
+        # And the JS filter includes both categories
+        assert "'living_room'" in html
+        assert "'game_entertainment'" in html
+
+    def test_dupe_suppressed_shows_reduced_count(self):
+        """Section with 26 raw images but only 21 in gallery shows 21."""
+        modules = _make_module("Pool", 25, category="pool_hot_tub")  # 26 raw
+        # Only 21 survive to gallery (5 dupe non-winners suppressed)
+        gallery = [
+            {"url": f"https://r2.example.com/pool{i}.jpg",
+             "alt": f"Pool {i}", "category": "pool_hot_tub"}
+            for i in range(21)
+        ]
+        html = _build_category_modules_section(modules, gallery)
+        assert "View all 21 photos" in html
+        assert "View all 26 photos" not in html
+
+    def test_zero_gallery_count_no_button(self):
+        """If a section's photos are entirely absent from gallery, no button.
+        This would indicate a problem (reported, not fixed here)."""
+        modules = _make_module("Pool", 5, category="pool_hot_tub")
+        # Gallery has no pool_hot_tub items at all
+        gallery = [
+            {"url": f"https://r2.example.com/ext{i}.jpg",
+             "alt": f"Exterior {i}", "category": "exterior"}
+            for i in range(10)
+        ]
+        html = _build_category_modules_section(modules, gallery)
+        # No button since gallery_count for pool_hot_tub = 0
+        assert "cat-module-more" not in html

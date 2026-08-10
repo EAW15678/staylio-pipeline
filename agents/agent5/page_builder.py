@@ -1716,21 +1716,26 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
             grid_class = "cat-module-grid cat-module-grid--solo"
             grid_inner = hero_html
 
-        # Per-section "View all N photos" button when more than 4 visible
+        # Per-section "View all N photos" button — N is the count of gallery
+        # items matching this section's GCV categories, i.e. what the modal
+        # will actually show. This ensures label and filter are computed from
+        # the same source and cannot drift apart.
         section_btn = ""
-        if section_total > _MAX_VISIBLE_SUPPORTING + 1:
-            # Map section label → GCV category keys for gallery filtering
-            gcv_cats = _SECTION_TO_GCV_CATS.get(label)
-            if not gcv_cats:
-                # Fallback: collect unique categories from the section's own items
-                gcv_cats = list({item.get("category") or "uncategorised" for item in all_items})
+        gcv_cats = _SECTION_TO_GCV_CATS.get(label)
+        if not gcv_cats:
+            gcv_cats = list({item.get("category") or "uncategorised" for item in all_items})
+        gcv_cats_set = set(gcv_cats)
+        gallery_count = sum(
+            1 for gi in gallery_items if gi.get("category") in gcv_cats_set
+        )
+        if gallery_count > _MAX_VISIBLE_SUPPORTING + 1:
             cats_js = ",".join(f"'{_esc_js(c)}'" for c in gcv_cats)
             section_btn = (
                 f'<div class="cat-module-more">'
                 f'<a href="#gallery" class="cat-module-more-btn" '
                 f'onclick="if(window.openGalleryFiltered){{event.preventDefault();'
                 f'openGalleryFiltered([{cats_js}]);}}">'
-                f'View all {section_total} photos</a></div>'
+                f'View all {gallery_count} photos</a></div>'
             )
 
         modules_html += f"""
