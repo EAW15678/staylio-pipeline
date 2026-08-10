@@ -4,7 +4,7 @@ Tool: Claid.ai
 
 Enhances all property photos through Claid.ai's real estate
 enhancement pipeline. 100-photo ceiling per property.
-One-time cost at intake: ~$4.00/property.
+One-time cost at intake: ~$0.48/property ($0.012 × 40 cap).
 
 GOVERNANCE ENFORCEMENT — THIS IS NON-NEGOTIABLE:
 The permitted operations whitelist is enforced at the API call level.

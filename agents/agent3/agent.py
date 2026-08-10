@@ -48,6 +48,7 @@ from agents.agent3.r2_storage import (
 )
 from core.r2_storage import _stable_filename
 from agents.agent3.llm_curator import run_llm_vision_curation
+from agents.agent3.shot_inventory_builder import populate_shot_inventory
 from agents.agent3.phash_resolver import resolve_canonical_phashes, backfill_media_assets_phash
 from agents.agent3.video_generator import generate_all_videos
 from agents.agent3.vision_tagger import (
@@ -319,6 +320,12 @@ def agent3_node(state: dict) -> dict:
     )
     if llm_curation:
         logger.info("[Agent 3] LLM curation complete — embedded in visual_media cache")
+        # Populate shot_inventory from curation results (pure data transform, no LLM)
+        try:
+            si_count = populate_shot_inventory(property_id)
+            logger.info("[Agent 3] Shot inventory populated: %d rows", si_count)
+        except Exception as si_exc:
+            logger.warning("[Agent 3] Shot inventory population failed (non-fatal): %s", si_exc)
     else:
         logger.info("[Agent 3] LLM curation unavailable — Agent 5 uses GCV fallback path")
 

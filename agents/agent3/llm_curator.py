@@ -58,7 +58,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v9_property_driven_caps"
+_CURATION_VERSION = "curation_v10_shot_inventory"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -1048,6 +1048,33 @@ For each image report the following factual attributes:
   is_best_in_duplicate_group — true for the best image within its duplicate group
   alt                 — concise descriptive alt text (≤80 chars); empty string if excluded
   llm_category        — GCV-compatible category: {categories}
+  physical_room_id    — which physical space this is (e.g. "bedroom_1", "kitchen", "master_bath",
+                        "pool_deck", "front_exterior"). Same ID for different ANGLES of the same room.
+                        Different from duplicate_group: that is visual similarity, this is spatial identity.
+  visual_duplicate_of — asset_id of the image this is a near-duplicate of (same space, similar angle).
+                        null if unique. Replaces the "similar angles" meaning of duplicate_group.
+  depth_structure     — flat | shallow | deep. Whether the frame has recession a camera could travel into.
+  foreground_elements — near-field objects that would separate from background under camera translation
+                        (foliage, wall edge, furniture). JSON array of strings. Empty array if none.
+  frame_element       — a doorway, arch, window or opening visible in the frame. null if absent.
+  beyond_frame_element — what is visible through frame_element. null when frame_element is null.
+  space_direction     — which way the space extends: into_frame | left | right | up | down | none
+  light_direction     — front | back | side_left | side_right | top | diffuse
+  light_quality       — hard | soft | mixed | flat
+  time_of_day_read    — what the frame reads as: dawn | morning | midday | golden | dusk | night | interior_ambiguous
+  negative_space      — regions where text can sit without covering the subject. JSON array of
+                        objects [{{"region", "size", "contrast"}}] over a 9-cell grid (top_left, top_center,
+                        top_right, middle_left, middle_center, middle_right, bottom_left, bottom_center,
+                        bottom_right). Empty array if none.
+  depth_tier          — wide | medium | detail
+  motion_affordance   — camera moves this frame genuinely supports. JSON array from:
+                        push_in, pull_back, pan_left, pan_right, tilt_up, tilt_down, parallax, orbit, hold.
+                        A move is listed ONLY if the frame supports it: push_in requires genuine depth (depth_structure != flat),
+                        parallax requires distinct foreground_elements.
+  motion_risk         — elements likely to break under generation. JSON array from:
+                        repeating_geometry, straight_architectural_lines, reflections, water_surface,
+                        fine_text, thin_railings, patterned_fabric. MUST include reflections and
+                        water_surface where present.
 
 Return ONLY valid JSON — no markdown, no prose, no code fences:
 
@@ -1105,7 +1132,21 @@ def _schema_example() -> str:
       "duplicate_group": "dg_kitchen_1",
       "is_best_in_duplicate_group": true,
       "alt": "Open-plan kitchen with marble island and ocean views",
-      "llm_category": "kitchen"
+      "llm_category": "kitchen",
+      "physical_room_id": "kitchen",
+      "visual_duplicate_of": null,
+      "depth_structure": "deep",
+      "foreground_elements": ["island countertop", "bar stool"],
+      "frame_element": "archway",
+      "beyond_frame_element": "living room with ocean view",
+      "space_direction": "into_frame",
+      "light_direction": "back",
+      "light_quality": "soft",
+      "time_of_day_read": "morning",
+      "negative_space": [{"region": "top_center", "size": "large", "contrast": "high"}],
+      "depth_tier": "wide",
+      "motion_affordance": ["push_in", "pan_right"],
+      "motion_risk": ["straight_architectural_lines", "reflections"]
     }
   ]
 }"""
@@ -1182,6 +1223,21 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
         is_best = _bool(img.get("is_best_in_duplicate_group"), default=True)
 
         llm_exclude = _bool(img.get("exclude"))
+
+        # ── New shot-inventory fields (v10) — pass through with type safety ──
+        def _str_or_none(val) -> Optional[str]:
+            return str(val)[:80] if val is not None else None
+
+        def _str_array(val) -> list:
+            if isinstance(val, list):
+                return [str(v) for v in val]
+            return []
+
+        def _obj_array(val) -> list:
+            if isinstance(val, list):
+                return [v for v in val if isinstance(v, dict)]
+            return []
+
         valid_images.append({
             # ── Inspection facts (LLM-authored) ──────────────────────────
             "has_bed":                  _bool(img.get("has_bed")),
@@ -1200,6 +1256,21 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "exclude_reason":           str(img["exclude_reason"])[:100] if img.get("exclude_reason") else None,
             "duplicate_group":          img.get("duplicate_group") or None,
             "is_best_in_duplicate_group": is_best,
+            # ── Shot-inventory fields (v10) ──────────────────────────────
+            "physical_room_id":         _str_or_none(img.get("physical_room_id")),
+            "visual_duplicate_of":      _str_or_none(img.get("visual_duplicate_of")),
+            "depth_structure":          _str_or_none(img.get("depth_structure")),
+            "foreground_elements":      _str_array(img.get("foreground_elements")),
+            "frame_element":            _str_or_none(img.get("frame_element")),
+            "beyond_frame_element":     _str_or_none(img.get("beyond_frame_element")),
+            "space_direction":          _str_or_none(img.get("space_direction")),
+            "light_direction":          _str_or_none(img.get("light_direction")),
+            "light_quality":            _str_or_none(img.get("light_quality")),
+            "time_of_day_read":         _str_or_none(img.get("time_of_day_read")),
+            "negative_space":           _obj_array(img.get("negative_space")),
+            "depth_tier":               _str_or_none(img.get("depth_tier")),
+            "motion_affordance":        _str_array(img.get("motion_affordance")),
+            "motion_risk":              _str_array(img.get("motion_risk")),
             # ── Visibility / eligibility (Sprint 1) ──────────────────────
             # gallery_visible: always True from LLM path — LLM exclude does NOT
             #   hide images from All Photos.  Only deterministic checks (e.g. missing
@@ -1232,6 +1303,14 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
                 "likely_room_type": "", "visual_summary": "",
                 "quality_score": 0.5, "exclude": False, "exclude_reason": None,
                 "duplicate_group": None, "is_best_in_duplicate_group": True,
+                # Shot-inventory fields (v10) — conservative defaults
+                "physical_room_id": None, "visual_duplicate_of": None,
+                "depth_structure": None, "foreground_elements": [],
+                "frame_element": None, "beyond_frame_element": None,
+                "space_direction": None, "light_direction": None,
+                "light_quality": None, "time_of_day_read": None,
+                "negative_space": [], "depth_tier": None,
+                "motion_affordance": [], "motion_risk": [],
                 "gallery_visible": True, "tour_eligible": True,
                 "asset_id": asset_id, "alt": "", "llm_category": "uncategorised",
                 "rank_within_category": 99, "is_primary_in_group": True,
