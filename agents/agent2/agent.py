@@ -78,6 +78,20 @@ def agent2_node(state: PipelineState) -> PipelineState:
 
     update_pipeline_status(property_id, AGENT_NUMBER, PipelineStepStatus.RUNNING)
 
+    try:
+        return _agent2_body(state, property_id)
+    except Exception as exc:
+        logger.error(f"[Agent 2] Unhandled exception for property {property_id}: {exc}", exc_info=True)
+        update_pipeline_status(
+            property_id, AGENT_NUMBER, PipelineStepStatus.FAILED,
+            error_message=f"Unhandled exception: {exc}",
+        )
+        raise
+
+
+def _agent2_body(state: PipelineState, property_id: str) -> PipelineState:
+    """Agent 2 implementation, separated so agent2_node can wrap it in try/except."""
+
     # ── Step 1: Load knowledge base from Redis ────────────────────────────
     kb = get_cached_knowledge_base(property_id)
     if kb is None:
