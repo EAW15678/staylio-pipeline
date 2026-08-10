@@ -200,40 +200,34 @@ def test_others_are_9_16(
 
 def test_safe_zone_survives_pinterest_crop():
     """
-    Verify that the 900x1400 safe zone centered in 1080x1920 fits within
-    the Pinterest crop (1080x1620). The safe zone top is 260, safe zone
-    bottom is 1660. Pinterest crop height is 1620. The 1620-1660 strip
-    (40px) is clipped.
+    Verify that the universal safe zone (900x1280) fits ENTIRELY within
+    the Pinterest crop (1080x1620). The safe zone is the intersection of
+    all four platform safe zones — it must fit inside all of them,
+    including after the Pinterest 300px bottom crop.
     """
-    # Safe zone dimensions from assembly.py
-    assert SAFE_TOP == 260
-    assert SAFE_BOTTOM == 1660
+    # Safe zone: 900x1280 at (60, 220)
+    assert SAFE_W == 900
+    assert SAFE_H == 1280
+    assert SAFE_LEFT == 60
+    assert SAFE_TOP == 220
+    assert SAFE_RIGHT == 960
+    assert SAFE_BOTTOM == 1500
 
-    # Pinterest crop removes bottom 300px -> 1620 height
+    # Pinterest crop removes bottom 300px → 1620 height
     pinterest_height = PLATFORM_SPECS["pinterest"]["height"]
     assert pinterest_height == 1620
 
-    # Safe zone top must be within Pinterest crop
-    assert SAFE_TOP < pinterest_height, "Safe zone top must be within Pinterest crop"
-
-    # 900x1400 centered — verify it fits horizontally
-    assert SAFE_LEFT >= 0
-    assert SAFE_RIGHT <= PLATFORM_SPECS["pinterest"]["width"]
-
-    # The safe zone bottom (1660) exceeds Pinterest height (1620) by 40px
-    clipped_px = SAFE_BOTTOM - pinterest_height
-    assert clipped_px == 40, (
-        f"Expected 40px clipped, got {clipped_px}. "
-        f"Safe zone bottom ({SAFE_BOTTOM}) - Pinterest height ({pinterest_height})"
+    # Safe zone must fit ENTIRELY within Pinterest crop — no clipping
+    assert SAFE_BOTTOM <= pinterest_height, (
+        f"Safe zone bottom ({SAFE_BOTTOM}) exceeds Pinterest height ({pinterest_height})"
     )
+    assert SAFE_RIGHT <= PLATFORM_SPECS["pinterest"]["width"]
+    assert SAFE_TOP >= 0
+    assert SAFE_LEFT >= 0
 
-    # Effective safe zone height for Pinterest
-    effective_safe_h = pinterest_height - SAFE_TOP  # 1620 - 260 = 1360
-    assert effective_safe_h == 1360
-
-    # The bulk of the safe zone (1360 of 1400 px = 97.1%) survives
-    survival_pct = effective_safe_h / SAFE_H * 100
-    assert survival_pct > 97.0
+    # The entire safe zone fits within Pinterest — 100% survival
+    assert SAFE_BOTTOM <= pinterest_height
+    assert SAFE_H == 1280  # true intersection, not the old 1400
 
 
 @patch("agents.agent8.publish.shutil.which", return_value="/usr/bin/ffmpeg")

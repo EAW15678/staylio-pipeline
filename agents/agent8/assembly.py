@@ -49,26 +49,46 @@ else:
 # ── Master canvas dimensions ──────────────────────────────────────────────
 MASTER_W, MASTER_H = 1080, 1920
 
-# ── Universal safe zone: 900x1400 centered in 1080x1920 ──────────────────
-SAFE_W, SAFE_H = 900, 1400
-SAFE_LEFT = (MASTER_W - SAFE_W) // 2     # 90
-SAFE_TOP = (MASTER_H - SAFE_H) // 2      # 260
-SAFE_RIGHT = SAFE_LEFT + SAFE_W          # 990
-SAFE_BOTTOM = SAFE_TOP + SAFE_H          # 1660
+# ── Universal safe zone ──────────────────────────────────────────────────
+# Computed as the intersection of ALL FOUR platform safe zones PLUS the
+# Pinterest 2:3 crop (1080×1620, 300px trimmed from bottom).
+#
+# Platform-by-platform (in 1080×1920 master coordinates):
+#   TikTok:            left=60,  top=108, right=960,  bottom=1600
+#   Instagram Reels:   left=0,   top=0,   right=996,  bottom=1610
+#   Boosted IG/FB:     left=35,  top=220, right=1045, bottom=1500
+#   Pinterest (2:3):   left=0,   top=0,   right=1080, bottom=1620
+#
+# Intersection:        left=60,  top=220, right=960,  bottom=1500
+#                      = 900 × 1280
+#
+# DO NOT "correct" this back to 900×1400 — the old box exceeded ALL
+# FOUR platform boundaries at the bottom and exceeded TikTok's right
+# boundary. See the computation at agent8-stage7-safezone-report.md.
+SAFE_W, SAFE_H = 900, 1280
+SAFE_LEFT   = 60    # TikTok left edge
+SAFE_TOP    = 220   # Boosted IG/FB top edge
+SAFE_RIGHT  = 960   # TikTok right edge
+SAFE_BOTTOM = 1500  # Boosted IG/FB bottom edge
 
-# ── 9-cell grid mapping for landscape -> 9:16 master ─────────────────────
+# ── 9-cell grid mapping for landscape → 9:16 master ─────────────────────
 # The source negative_space grid was computed on a LANDSCAPE image.
-# After 9:16 crop, the top/bottom thirds shift significantly.
+# After 9:16 crop, the grid is remapped into the universal safe zone.
+# Each cell is SAFE_W/3 × SAFE_H/3 = 300 × 426 pixels.
+_CELL_W = SAFE_W // 3   # 300
+_CELL_H = SAFE_H // 3   # 426 (truncated; last row absorbs remainder)
+_CELL_H_LAST = SAFE_H - 2 * _CELL_H  # 428 (1280 - 2*426)
+
 GRID_REGIONS_IN_MASTER = {
-    "top_left":      (SAFE_LEFT, SAFE_TOP, SAFE_LEFT + SAFE_W // 3, SAFE_TOP + SAFE_H // 3),
-    "top_center":    (SAFE_LEFT + SAFE_W // 3, SAFE_TOP, SAFE_LEFT + 2 * SAFE_W // 3, SAFE_TOP + SAFE_H // 3),
-    "top_right":     (SAFE_LEFT + 2 * SAFE_W // 3, SAFE_TOP, SAFE_RIGHT, SAFE_TOP + SAFE_H // 3),
-    "middle_left":   (SAFE_LEFT, SAFE_TOP + SAFE_H // 3, SAFE_LEFT + SAFE_W // 3, SAFE_TOP + 2 * SAFE_H // 3),
-    "middle_center": (SAFE_LEFT + SAFE_W // 3, SAFE_TOP + SAFE_H // 3, SAFE_LEFT + 2 * SAFE_W // 3, SAFE_TOP + 2 * SAFE_H // 3),
-    "middle_right":  (SAFE_LEFT + 2 * SAFE_W // 3, SAFE_TOP + SAFE_H // 3, SAFE_RIGHT, SAFE_TOP + 2 * SAFE_H // 3),
-    "bottom_left":   (SAFE_LEFT, SAFE_TOP + 2 * SAFE_H // 3, SAFE_LEFT + SAFE_W // 3, SAFE_BOTTOM),
-    "bottom_center": (SAFE_LEFT + SAFE_W // 3, SAFE_TOP + 2 * SAFE_H // 3, SAFE_LEFT + 2 * SAFE_W // 3, SAFE_BOTTOM),
-    "bottom_right":  (SAFE_LEFT + 2 * SAFE_W // 3, SAFE_TOP + 2 * SAFE_H // 3, SAFE_RIGHT, SAFE_BOTTOM),
+    "top_left":      (SAFE_LEFT,             SAFE_TOP,              SAFE_LEFT + _CELL_W,     SAFE_TOP + _CELL_H),
+    "top_center":    (SAFE_LEFT + _CELL_W,   SAFE_TOP,              SAFE_LEFT + 2 * _CELL_W, SAFE_TOP + _CELL_H),
+    "top_right":     (SAFE_LEFT + 2*_CELL_W, SAFE_TOP,              SAFE_RIGHT,              SAFE_TOP + _CELL_H),
+    "middle_left":   (SAFE_LEFT,             SAFE_TOP + _CELL_H,    SAFE_LEFT + _CELL_W,     SAFE_TOP + 2 * _CELL_H),
+    "middle_center": (SAFE_LEFT + _CELL_W,   SAFE_TOP + _CELL_H,    SAFE_LEFT + 2 * _CELL_W, SAFE_TOP + 2 * _CELL_H),
+    "middle_right":  (SAFE_LEFT + 2*_CELL_W, SAFE_TOP + _CELL_H,    SAFE_RIGHT,              SAFE_TOP + 2 * _CELL_H),
+    "bottom_left":   (SAFE_LEFT,             SAFE_TOP + 2 * _CELL_H, SAFE_LEFT + _CELL_W,    SAFE_BOTTOM),
+    "bottom_center": (SAFE_LEFT + _CELL_W,   SAFE_TOP + 2 * _CELL_H, SAFE_LEFT + 2 * _CELL_W, SAFE_BOTTOM),
+    "bottom_right":  (SAFE_LEFT + 2*_CELL_W, SAFE_TOP + 2 * _CELL_H, SAFE_RIGHT,             SAFE_BOTTOM),
 }
 
 # Ordered list of safe-zone-compliant regions for fallback repositioning
