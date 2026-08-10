@@ -387,6 +387,20 @@ def agent3_node(state: dict) -> dict:
         pkg_dict["image_curation"] = llm_curation
     cache_knowledge_base(f"{property_id}:visual_media", pkg_dict, ttl_seconds=86400)
 
+    # Verify the write landed — Agent 5 depends on this cache and has no
+    # way to signal back that it missed. The 2026-08-10 incident produced
+    # a page with zero photos because the Redis write silently failed
+    # (Upstash hibernated) and Agent 3 reported COMPLETE anyway.
+    _verify = get_cached_knowledge_base(f"{property_id}:visual_media")
+    if not _verify:
+        logger.error(
+            "[Agent 3] VISUAL_MEDIA CACHE WRITE FAILED — Redis did not "
+            "persist the visual_media payload for property %s. Agent 5 will "
+            "fall back to Supabase media_assets if available, but LLM curation "
+            "embedding is LOST. Check Redis connectivity.",
+            property_id,
+        )
+
     # ── Step 10: Pipeline status ──────────────────────────────────────────
     update_pipeline_status(
         property_id, AGENT_NUMBER, PipelineStepStatus.COMPLETE,

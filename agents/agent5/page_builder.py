@@ -234,6 +234,28 @@ def build_landing_page_html(
     media_assets   = visual_media.get("media_assets", [])
     image_curation = visual_media.get("image_curation")
 
+    # Supabase fallback for media_assets when Redis missed.
+    # Without this, curation loads fine from Supabase but every asset_id
+    # lookup fails against an empty list — the fallback that exists
+    # (curation) is made useless by the one that did not (media).
+    # This was the root cause of unresolvable=120 on 2026-08-10.
+    if not media_assets:
+        _pid = kb.get("property_id") or ""
+        if _pid:
+            media_assets = _load_media_assets_from_supabase(_pid)
+            if media_assets:
+                logger.info(
+                    "[Agent 5] media_assets loaded from SUPABASE FALLBACK "
+                    "(Redis missed): %d assets for property %s",
+                    len(media_assets), _pid,
+                )
+            else:
+                logger.error(
+                    "[Agent 5] media_assets NOT FOUND in Redis OR Supabase "
+                    "for property %s — gallery will be empty",
+                    _pid,
+                )
+
     # Supabase fallback: Redis cache may have expired or Agent 3 ran before this
     # instance of Agent 5 was deployed. Load from Supabase when not in visual_media.
     if image_curation is None:
@@ -1026,6 +1048,47 @@ def _load_curation_from_supabase(property_id: str) -> Optional[dict]:
     except Exception as exc:
         logger.warning("[Agent 5] Supabase curation load failed: %s", exc)
     return None
+
+
+def _load_media_assets_from_supabase(property_id: str) -> list[dict]:
+    """
+    Load media_assets from Supabase when Redis visual_media cache missed.
+
+    Returns the list of asset dicts the resolver needs — keyed by
+    asset_url_original, with asset_url_enhanced for display. Mirrors the
+    shape Agent 3 puts into the visual_media Redis payload.
+
+    Added after the 2026-08-10 defect where Redis was hibernated, Agent 3
+    reported COMPLETE with its output never reaching Redis, and Agent 5
+    built a page with zero photos because the media list was empty while
+    the curation loaded fine from its own Supabase fallback.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("media_assets")
+            .select(
+                "asset_url_original,asset_url_enhanced,"
+                "source,subject_category,composition_score,"
+                "labels_enhanced,hero_rank,category_rank"
+            )
+            .eq("property_id", property_id)
+            .execute()
+        )
+        if result.data:
+            logger.info(
+                "[Agent 5] Supabase media_assets load: %d rows for property %s",
+                len(result.data), property_id,
+            )
+            return result.data
+        logger.warning(
+            "[Agent 5] Supabase media_assets: no rows for property %s",
+            property_id,
+        )
+    except Exception as exc:
+        logger.warning("[Agent 5] Supabase media_assets load failed: %s", exc)
+    return []
 
 
 # These replace _prepare_gallery_items / _build_category_modules when Agent 3
