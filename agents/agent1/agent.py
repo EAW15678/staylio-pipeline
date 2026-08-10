@@ -131,9 +131,30 @@ def agent1_node(state: PipelineState) -> PipelineState:
         logger.warning(f"[Agent 1] Normalisation pass failed (non-fatal): {exc}")
         kb.ingestion_errors.append(f"Normalisation pass failed: {exc}")
 
-    # ── Step 5: Generate slug if missing ─────────────────────────────────
+    # ── Step 5: Use existing slug from properties table, generate only if absent ─
+    # properties.slug is the source of truth, set at intake by main.py.
+    # Do NOT overwrite it — a cloned/renamed property must keep its own slug.
+    # The 2026-08-10 incident was caused by Agent 1 regenerating the slug
+    # from the scraped name, overwriting the intake slug in the KB.
+    if not kb.slug:
+        try:
+            from core.supabase_store import get_supabase as _gsb
+            _prop = (
+                _gsb().table("properties")
+                .select("slug")
+                .eq("id", property_id)
+                .limit(1)
+                .execute()
+            )
+            if _prop.data and _prop.data[0].get("slug"):
+                kb.slug = _prop.data[0]["slug"]
+                logger.info("[Agent 1] Using existing properties.slug='%s'", kb.slug)
+        except Exception as exc:
+            logger.warning("[Agent 1] Could not read properties.slug: %s", exc)
+
     if not kb.slug and kb.name and kb.name.value:
         kb.slug = _generate_slug(kb.name.value)
+        logger.info("[Agent 1] Generated slug='%s' from property name", kb.slug)
 
     # ── Step 6: Mark ingestion complete ──────────────────────────────────
     kb.ingested_at = datetime.now(timezone.utc)

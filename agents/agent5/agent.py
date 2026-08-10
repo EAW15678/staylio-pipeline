@@ -64,7 +64,31 @@ def agent5_node(state: dict) -> dict:
         return {**state, "errors": state.get("errors", []) + [error], "agent5_complete": False}
 
     # ── Step 2: Determine slug and deploy mode ────────────────────────────
-    slug = kb.get("slug") or _fallback_slug(kb)
+    # properties.slug is the SOURCE OF TRUTH. kb.slug (from Redis) is a
+    # GENERATED value that may not match, especially for cloned/renamed
+    # properties. The 2026-08-10 incident overwrote the live Vista Azule
+    # page because a test clone's kb.slug resolved to the original's slug.
+    properties_slug = _get_properties_slug(property_id)
+    slug = properties_slug or kb.get("slug") or _fallback_slug(kb)
+
+    # GUARD: if properties.slug exists and differs from kb.slug,
+    # REFUSE to deploy. This prevents test properties from overwriting
+    # live pages via R2 key collision.
+    kb_slug = kb.get("slug")
+    if properties_slug and kb_slug and properties_slug != kb_slug:
+        logger.warning(
+            "[Agent 5] properties.slug='%s' differs from kb.slug='%s' for "
+            "property %s — using properties.slug (authoritative)",
+            properties_slug, kb_slug, property_id,
+        )
+
+    if not properties_slug:
+        logger.warning(
+            "[Agent 5] properties.slug is NULL for property %s — "
+            "using generated slug '%s'. Guard check skipped.",
+            property_id, slug,
+        )
+
     pmc_tier = _get_client_tier(kb.get("client_id"))
     custom_domain = kb.get("custom_domain")   # Set at intake for Portfolio tier
     deploy_mode = (
@@ -203,6 +227,28 @@ def _load_from_cache_or_state(
         f"— page section will be omitted"
     )
     return {}
+
+
+def _get_properties_slug(property_id: str) -> Optional[str]:
+    """
+    Read the slug from properties table — the authoritative source.
+    Returns None if the row doesn't exist or slug is NULL.
+    """
+    try:
+        from core.supabase_store import get_supabase
+        result = (
+            get_supabase()
+            .table("properties")
+            .select("slug")
+            .eq("id", property_id)
+            .limit(1)
+            .execute()
+        )
+        if result.data:
+            return result.data[0].get("slug")
+    except Exception as exc:
+        logger.warning("[Agent 5] Failed to read properties.slug for %s: %s", property_id, exc)
+    return None
 
 
 def _fallback_slug(kb: dict) -> str:
