@@ -33,6 +33,13 @@ ANTHROPIC_CLIENT = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 MODEL = "claude-sonnet-4-6"
 MAX_PAGE_CHARS = 40_000   # Trim large pages to control token cost
 
+# max_tokens is a CEILING, not a reservation — billing is on tokens actually
+# generated, so unused headroom costs nothing.  This was set to 2000 and caused
+# a deterministic truncation failure (Casa de Lubitz, 2026-08-10: response cut
+# mid-string at char 5,982, discarding a successful 44,289-char Firecrawl
+# scrape → 0 photos, 0 amenities).  Set to Sonnet's maximum output.
+EXTRACT_MAX_TOKENS = 64_000
+
 
 def parse_unknown_ota(
     url: str,
@@ -220,9 +227,22 @@ If a field is not found, use null. Do not invent data.
     try:
         resp = ANTHROPIC_CLIENT.messages.create(
             model=MODEL,
-            max_tokens=2000,
+            max_tokens=EXTRACT_MAX_TOKENS,
             messages=[{"role": "user", "content": prompt}],
         )
+
+        # Check for truncation before attempting JSON parse.
+        # Pattern from agents/agent3/llm_curator.py:916-927.
+        stop_reason = getattr(resp, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            output_tokens = getattr(getattr(resp, "usage", None), "output_tokens", None)
+            logger.error(
+                "[TS-04c] Claude extraction TRUNCATED — response hit max_tokens=%d "
+                "(output_tokens=%s). Increase EXTRACT_MAX_TOKENS. Source: %s",
+                EXTRACT_MAX_TOKENS, output_tokens, source_url,
+            )
+            return None
+
         raw = resp.content[0].text.strip()
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
