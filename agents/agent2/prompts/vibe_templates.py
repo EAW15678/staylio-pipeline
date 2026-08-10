@@ -83,10 +83,10 @@ What to avoid: family-oriented language, capacity numbers as a selling point, ph
         "user": lambda kb, keywords: f"""Write marketing copy for this vacation rental property.
 
 PROPERTY DATA:
-Name: {kb.get('name', {}).get('value', 'the property')}
-Location: {kb.get('city', {}).get('value', '')} {kb.get('state', {}).get('value', '')}
-Type: {kb.get('property_type', {}).get('value', 'vacation rental')}
-Bedrooms: {kb.get('bedrooms', {}).get('value', '')}  Bathrooms: {kb.get('bathrooms', {}).get('value', '')}
+Name: {(kb.get('name') or {}).get('value', 'the property')}
+Location: {(kb.get('city') or {}).get('value', '')} {(kb.get('state') or {}).get('value', '')}
+Type: {(kb.get('property_type') or {}).get('value', 'vacation rental')}
+Bedrooms: {(kb.get('bedrooms') or {}).get('value', '')}  Bathrooms: {(kb.get('bathrooms') or {}).get('value', '')}
 Description from intake: {(kb.get('description', {}) or {}).get('value', '')[:800]}
 Standout amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:20] if a.get('value')])}
 Unique features (owner-highlighted): {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
@@ -114,10 +114,10 @@ What to avoid: romantic language, intimacy, "just the two of you" framing. Never
         "user": lambda kb, keywords: f"""Write marketing copy for this vacation rental property.
 
 PROPERTY DATA:
-Name: {kb.get('name', {}).get('value', 'the property')}
-Location: {kb.get('city', {}).get('value', '')} {kb.get('state', {}).get('value', '')}
-Type: {kb.get('property_type', {}).get('value', 'vacation rental')}
-Bedrooms: {kb.get('bedrooms', {}).get('value', '')}  Bathrooms: {kb.get('bathrooms', {}).get('value', '')}  Max occupancy: {kb.get('max_occupancy', {}).get('value', '')}
+Name: {(kb.get('name') or {}).get('value', 'the property')}
+Location: {(kb.get('city') or {}).get('value', '')} {(kb.get('state') or {}).get('value', '')}
+Type: {(kb.get('property_type') or {}).get('value', 'vacation rental')}
+Bedrooms: {(kb.get('bedrooms') or {}).get('value', '')}  Bathrooms: {(kb.get('bathrooms') or {}).get('value', '')}  Max occupancy: {(kb.get('max_occupancy') or {}).get('value', '')}
 Description from intake: {(kb.get('description', {}) or {}).get('value', '')[:800]}
 Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:20] if a.get('value')])}
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
@@ -145,10 +145,10 @@ What to avoid: romantic language, "just the two of you," intimate or couple-focu
         "user": lambda kb, keywords: f"""Write marketing copy for this vacation rental property.
 
 PROPERTY DATA:
-Name: {kb.get('name', {}).get('value', 'the property')}
-Location: {kb.get('city', {}).get('value', '')} {kb.get('state', {}).get('value', '')}
-Type: {kb.get('property_type', {}).get('value', 'vacation rental')}
-Bedrooms: {kb.get('bedrooms', {}).get('value', '')}  Bathrooms: {kb.get('bathrooms', {}).get('value', '')}  Max occupancy: {kb.get('max_occupancy', {}).get('value', '')}
+Name: {(kb.get('name') or {}).get('value', 'the property')}
+Location: {(kb.get('city') or {}).get('value', '')} {(kb.get('state') or {}).get('value', '')}
+Type: {(kb.get('property_type') or {}).get('value', 'vacation rental')}
+Bedrooms: {(kb.get('bedrooms') or {}).get('value', '')}  Bathrooms: {(kb.get('bathrooms') or {}).get('value', '')}  Max occupancy: {(kb.get('max_occupancy') or {}).get('value', '')}
 Description from intake: {(kb.get('description', {}) or {}).get('value', '')[:800]}
 Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:20] if a.get('value')])}
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
@@ -176,10 +176,10 @@ What to avoid: party language, entertainment-as-social-spectacle, group activity
         "user": lambda kb, keywords: f"""Write marketing copy for this vacation rental property.
 
 PROPERTY DATA:
-Name: {kb.get('name', {}).get('value', 'the property')}
-Location: {kb.get('city', {}).get('value', '')} {kb.get('state', {}).get('value', '')}
-Type: {kb.get('property_type', {}).get('value', 'vacation rental')}
-Bedrooms: {kb.get('bedrooms', {}).get('value', '')}  Bathrooms: {kb.get('bathrooms', {}).get('value', '')}
+Name: {(kb.get('name') or {}).get('value', 'the property')}
+Location: {(kb.get('city') or {}).get('value', '')} {(kb.get('state') or {}).get('value', '')}
+Type: {(kb.get('property_type') or {}).get('value', 'vacation rental')}
+Bedrooms: {(kb.get('bedrooms') or {}).get('value', '')}  Bathrooms: {(kb.get('bathrooms') or {}).get('value', '')}
 Description from intake: {(kb.get('description', {}) or {}).get('value', '')[:800]}
 Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:20] if a.get('value')])}
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
@@ -207,10 +207,10 @@ What to avoid: romantic language, sedentary luxury framing, excessive focus on i
         "user": lambda kb, keywords: f"""Write marketing copy for this vacation rental property.
 
 PROPERTY DATA:
-Name: {kb.get('name', {}).get('value', 'the property')}
-Location: {kb.get('city', {}).get('value', '')} {kb.get('state', {}).get('value', '')}
-Type: {kb.get('property_type', {}).get('value', 'vacation rental')}
-Bedrooms: {kb.get('bedrooms', {}).get('value', '')}  Bathrooms: {kb.get('bathrooms', {}).get('value', '')}  Max occupancy: {kb.get('max_occupancy', {}).get('value', '')}
+Name: {(kb.get('name') or {}).get('value', 'the property')}
+Location: {(kb.get('city') or {}).get('value', '')} {(kb.get('state') or {}).get('value', '')}
+Type: {(kb.get('property_type') or {}).get('value', 'vacation rental')}
+Bedrooms: {(kb.get('bedrooms') or {}).get('value', '')}  Bathrooms: {(kb.get('bathrooms') or {}).get('value', '')}  Max occupancy: {(kb.get('max_occupancy') or {}).get('value', '')}
 Description from intake: {(kb.get('description', {}) or {}).get('value', '')[:800]}
 Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:20] if a.get('value')])}
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
@@ -238,10 +238,10 @@ What to avoid: quiet and solitary language, wellness retreat framing, romantic-c
         "user": lambda kb, keywords: f"""Write marketing copy for this vacation rental property.
 
 PROPERTY DATA:
-Name: {kb.get('name', {}).get('value', 'the property')}
-Location: {kb.get('city', {}).get('value', '')} {kb.get('state', {}).get('value', '')}
-Type: {kb.get('property_type', {}).get('value', 'vacation rental')}
-Bedrooms: {kb.get('bedrooms', {}).get('value', '')}  Bathrooms: {kb.get('bathrooms', {}).get('value', '')}  Max occupancy: {kb.get('max_occupancy', {}).get('value', '')}
+Name: {(kb.get('name') or {}).get('value', 'the property')}
+Location: {(kb.get('city') or {}).get('value', '')} {(kb.get('state') or {}).get('value', '')}
+Type: {(kb.get('property_type') or {}).get('value', 'vacation rental')}
+Bedrooms: {(kb.get('bedrooms') or {}).get('value', '')}  Bathrooms: {(kb.get('bathrooms') or {}).get('value', '')}  Max occupancy: {(kb.get('max_occupancy') or {}).get('value', '')}
 Description from intake: {(kb.get('description', {}) or {}).get('value', '')[:800]}
 Amenities: {', '.join([a.get('value', '') for a in (kb.get('amenities') or [])[:20] if a.get('value')])}
 Unique features: {', '.join([u.get('value', '') for u in (kb.get('unique_features') or [])[:8] if u.get('value')])}
