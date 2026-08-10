@@ -53,8 +53,11 @@ from core.elevenlabs import (
     async_generate_tts,
 )
 
-RUNWAYML_API_SECRET = os.environ.get("RUNWAYML_API_SECRET", "")
-RUNWAY_MODEL        = "gen4_turbo"
+from core.runway import (
+    RUNWAYML_API_SECRET,
+    RUNWAY_MODEL_TURBO as RUNWAY_MODEL,
+    RUNWAY_COST_PER_SEC,
+)
 RUNWAY_CREDITS_PER_SECOND = 5   # Gen-4 Turbo: 5 credits/second
 
 CREATOMATE_API_KEY  = os.environ.get("CREATOMATE_API_KEY", "")
