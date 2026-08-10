@@ -60,8 +60,10 @@ from core.runway import (
 )
 RUNWAY_CREDITS_PER_SECOND = 5   # Gen-4 Turbo: 5 credits/second
 
-CREATOMATE_API_KEY  = os.environ.get("CREATOMATE_API_KEY", "")
-CREATOMATE_API_BASE = "https://api.creatomate.com/v2"
+from core.creatomate import (
+    CREATOMATE_API_KEY,
+    CREATOMATE_API_BASE,
+)
 
 # ── Voice Configuration ───────────────────────────────────────────────────
 # VIBE_VOICE_IDS imported from core.elevenlabs (all 7 vibes).
