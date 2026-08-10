@@ -94,6 +94,12 @@ _OPTIONAL_MODULE_LABELS: frozenset = frozenset({"Amenities & Extras"})
 
 # Ordered section names when LLM curation is active — single source of truth in llm_curator.
 from agents.agent3.llm_curator import CURATED_SECTION_NAMES as _CURATION_SECTION_ORDER  # noqa: E402
+from agents.agent3.llm_curator import CURATED_SECTIONS as _CURATED_SECTIONS  # noqa: E402
+
+# Map tour section name → set of GCV category keys for gallery filtering.
+_SECTION_TO_GCV_CATS: dict[str, list[str]] = {
+    s["name"]: s["gcv_categories"] for s in _CURATED_SECTIONS
+}
 
 # Per-module label preferences and penalties used by _module_quality_score.
 # Keys must match display labels in _CATEGORY_MODULES exactly.
@@ -1652,17 +1658,22 @@ def _build_category_modules(gallery_items: list) -> dict:
     return result
 
 
+_MAX_VISIBLE_SUPPORTING = 3   # max supporting images rendered in-grid (420px / 3 ≈ 137px each)
+
 def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
     """
-    Render the Photo Tour section: one hero + up to two supporting images per
-    category module. Clicking any image opens the full gallery lightbox at the
-    correct position. A 'View all photos' anchor scrolls to the full gallery.
+    Render the Photo Tour section: 1 hero + up to 3 supporting images per
+    category module. When a section has more than 4 total photos (1 hero +
+    3 supporting), a "View all N photos" button opens the gallery modal
+    filtered to that section's categories.
 
     Layout per module (desktop):
       ┌────────────────────────────┬──────────────┐
       │  hero (2fr, 420px tall)    │ supporting 1 │
       │                            │──────────────│
       │                            │ supporting 2 │
+      │                            │──────────────│
+      │                            │ supporting 3 │
       └────────────────────────────┴──────────────┘
 
     Layout falls back to stacked single-column on mobile.
@@ -1676,7 +1687,12 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
     modules_html = ""
     for label, module in modules.items():
         hero = module["hero"]
-        supporting = module["supporting"]
+        all_supporting = module["supporting"]
+        all_items = module.get("all") or ([hero] + all_supporting)
+        section_total = len(all_items)
+
+        # Display at most _MAX_VISIBLE_SUPPORTING in the grid
+        visible_supporting = all_supporting[:_MAX_VISIBLE_SUPPORTING]
 
         h_idx = lightbox_idx.get(hero["url"], 0)
         hero_html = (
@@ -1685,7 +1701,7 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
         )
 
         sup_html = ""
-        for img in supporting:
+        for img in visible_supporting:
             i_idx = lightbox_idx.get(img["url"], 0)
             sup_html += (
                 f'<img src="{_esc(img["url"])}" alt="{_esc(img["alt"])}" loading="lazy" '
@@ -1693,17 +1709,34 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
             )
 
         # If no supporting images, hero spans full width (no 2-column grid)
-        if supporting:
+        if visible_supporting:
             grid_class = "cat-module-grid"
             grid_inner = hero_html + f'<div class="cat-module-supporting">{sup_html}</div>'
         else:
             grid_class = "cat-module-grid cat-module-grid--solo"
             grid_inner = hero_html
 
+        # Per-section "View all N photos" button when more than 4 visible
+        section_btn = ""
+        if section_total > _MAX_VISIBLE_SUPPORTING + 1:
+            # Map section label → GCV category keys for gallery filtering
+            gcv_cats = _SECTION_TO_GCV_CATS.get(label)
+            if not gcv_cats:
+                # Fallback: collect unique categories from the section's own items
+                gcv_cats = list({item.get("category") or "uncategorised" for item in all_items})
+            cats_js = ",".join(f"'{_esc_js(c)}'" for c in gcv_cats)
+            section_btn = (
+                f'<div class="cat-module-more">'
+                f'<a href="#gallery" class="cat-module-more-btn" '
+                f'onclick="if(window.openGalleryFiltered){{event.preventDefault();'
+                f'openGalleryFiltered([{cats_js}]);}}">'
+                f'View all {section_total} photos</a></div>'
+            )
+
         modules_html += f"""
     <div class="cat-module">
       <h3 class="cat-module-label">{_esc(label)}</h3>
-      <div class="{grid_class}">{grid_inner}</div>
+      <div class="{grid_class}">{grid_inner}</div>{section_btn}
     </div>"""
 
     return f"""
@@ -2173,6 +2206,17 @@ def _build_lightbox_gallery_js(gallery_items: list) -> str:
       document.body.style.overflow = 'hidden';
     }};
 
+    window.openGalleryFiltered = function(cats) {{
+      galActiveCat = '__multi__';
+      galFiltered = PHOTOS.filter(function(p) {{ return cats.indexOf(p.cat) !== -1; }});
+      if (galFiltered.length === 0) galFiltered = PHOTOS.slice();
+      galIdx = 0;
+      buildTabs();
+      showGal(0);
+      if (galDialog && !galDialog.open) galDialog.showModal();
+      document.body.style.overflow = 'hidden';
+    }};
+
     if (galDialog) {{
       document.getElementById('gal-close').onclick = function() {{ galDialog.close(); }};
       document.getElementById('gal-prev').onclick  = function() {{ showGal(galIdx - 1); }};
@@ -2524,6 +2568,9 @@ def _page_css() -> str:
                         cursor: pointer; display: block; transition: opacity .2s; }
     .cat-module-hero:hover, .cat-module-thumb:hover { opacity: .85; }
     .view-all-wrap { margin-top: 2.5rem; text-align: center; }
+    .cat-module-more { margin-top: .75rem; text-align: center; }
+    .cat-module-more-btn { font-size: .85rem; color: var(--color-muted); text-decoration: underline;
+                           cursor: pointer; }
 
     /* Gallery (full / secondary) */
     .gallery-grid { display: grid;

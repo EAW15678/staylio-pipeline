@@ -62,7 +62,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v11_640x480_cells"
+_CURATION_VERSION = "curation_v12_room_dedupe"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
@@ -1516,16 +1516,33 @@ def _select_photo_tour(
     tour_ids: set = set()
 
     def _pick_for_section(scored: list[tuple], threshold: float, section_max: int) -> list[dict]:
-        """Select up to section_max images above threshold, one per duplicate_group."""
+        """Select up to section_max images above threshold, one per physical room.
+
+        Dedupe key priority:
+          1. physical_room_id — reliable, populated 120/120 on live data
+          2. duplicate_group  — fallback when physical_room_id is null (74/120)
+        Both are checked: an image sharing EITHER key with an already-selected
+        image is skipped (unless the key is null/missing).
+
+        NOTE: visual_duplicate_of is NOT consumed here — it contains batch-local
+        labels ("E08", "J01") that cannot be resolved outside their curation batch.
+        This is a known prompt defect for later cleanup.
+        """
         selected: list[dict] = []
+        seen_rooms: set = set()
         seen_groups: set = set()
         for sc, img in scored:
             if sc < threshold:
                 break
+            room = img.get("physical_room_id")
+            if room and room in seen_rooms:
+                continue
             dg = img.get("duplicate_group")
             if dg and dg in seen_groups:
                 continue
             selected.append(img)
+            if room:
+                seen_rooms.add(room)
             if dg:
                 seen_groups.add(dg)
             if len(selected) == section_max:
