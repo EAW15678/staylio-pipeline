@@ -55,17 +55,20 @@ def populate_shot_inventory(property_id: str) -> int:
         logger.warning("[ShotInventory] per_image_results is not a list — skipping")
         return 0
 
-    # ── Load media_assets to determine read_basis per image ──────────────
+    # ── Load media_assets for read_basis and tonal_signature derivation ──
     assets_resp = (
         sb.table("media_assets")
-        .select("asset_url_original,asset_url_enhanced")
+        .select("asset_url_original,asset_url_enhanced,brightness,dominant_colors")
         .eq("property_id", property_id)
         .execute()
     )
     enhanced_lookup: set[str] = set()
+    media_asset_map: dict[str, dict] = {}  # asset_url_original → row
     for row in (assets_resp.data or []):
+        url = row.get("asset_url_original", "")
         if row.get("asset_url_enhanced"):
-            enhanced_lookup.add(row.get("asset_url_original", ""))
+            enhanced_lookup.add(url)
+        media_asset_map[url] = row
 
     # ── Supersede old inventory rows ─────────────────────────────────────
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -106,13 +109,10 @@ def populate_shot_inventory(property_id: str) -> int:
         # Focal point from visual_summary
         focal_point = img.get("visual_summary") or None
 
-        # Tonal signature — STUB for GCV color derivation
-        # TODO: derive from GCV dominant color annotations
-        tonal_signature = {
-            "hue": "neutral",
-            "brightness": "medium",
-            "contrast": "medium",
-        }
+        # Tonal signature — derived from GCV data on media_assets.
+        # brightness and dominant_colors are set by vision_tagger.py from
+        # Google Vision's image_properties_annotation.
+        tonal_signature = _derive_tonal_signature(asset_id, media_asset_map)
 
         # Determine read_basis: did the curation read enhanced or original?
         read_basis = "enhanced" if asset_id in enhanced_lookup else "original"
@@ -165,6 +165,83 @@ def populate_shot_inventory(property_id: str) -> int:
     except Exception as exc:
         logger.error("[ShotInventory] Upsert failed for property %s: %s", property_id, exc)
         return 0
+
+
+def _derive_tonal_signature(asset_id: str, media_asset_map: dict) -> dict:
+    """
+    Derive tonal_signature from GCV data on media_assets.
+
+    brightness: from media_assets.brightness (float 0-1, set by vision_tagger
+    from Google Vision's image_properties_annotation).
+
+    hue: colour-temperature heuristic from dominant_colors hex values.
+    Warm = red/orange/yellow bias, cool = blue/cyan bias, neutral = balanced.
+
+    contrast: NOT reliably derivable from GCV output. GCV returns dominant
+    colors and pixel fractions, but not luminance range or histogram data.
+    Set to None rather than a constant — an explicit null is honest.
+    """
+    asset = media_asset_map.get(asset_id) or {}
+    brightness_val = asset.get("brightness")
+    dominant_colors = asset.get("dominant_colors") or []
+
+    # Brightness: map 0-1 float to categorical
+    if brightness_val is not None:
+        if brightness_val < 0.3:
+            brightness = "low"
+        elif brightness_val < 0.6:
+            brightness = "medium"
+        else:
+            brightness = "high"
+    else:
+        brightness = None
+
+    # Hue: colour-temperature from dominant colors
+    hue = _classify_hue(dominant_colors) if dominant_colors else None
+
+    return {
+        "hue": hue,
+        "brightness": brightness,
+        "contrast": None,  # Not derivable from GCV — see docstring
+    }
+
+
+def _classify_hue(hex_colors: list[str]) -> str:
+    """
+    Classify overall hue as warm / cool / neutral from hex color list.
+    Uses average colour temperature across the dominant colors.
+    """
+    if not hex_colors:
+        return "neutral"
+
+    warm_score = 0.0
+    cool_score = 0.0
+
+    for hex_str in hex_colors:
+        hex_clean = hex_str.lstrip("#")
+        if len(hex_clean) != 6:
+            continue
+        try:
+            r = int(hex_clean[0:2], 16) / 255.0
+            g = int(hex_clean[2:4], 16) / 255.0
+            b = int(hex_clean[4:6], 16) / 255.0
+        except ValueError:
+            continue
+
+        # Warm bias: red and yellow channels dominate
+        # Cool bias: blue channel dominates
+        warm_score += (r + g * 0.5) - b
+        cool_score += b - (r * 0.3 + g * 0.3)
+
+    n = len(hex_colors) or 1
+    avg_warm = warm_score / n
+    avg_cool = cool_score / n
+
+    if avg_warm > 0.3 and avg_warm > avg_cool:
+        return "warm"
+    elif avg_cool > 0.1 and avg_cool > avg_warm:
+        return "cool"
+    return "neutral"
 
 
 def _derive_located_amenities(img: dict) -> list[dict]:

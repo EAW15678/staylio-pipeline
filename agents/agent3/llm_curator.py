@@ -43,8 +43,12 @@ logger = logging.getLogger(__name__)
 # ── Config ────────────────────────────────────────────────────────────────────
 
 _MODEL              = "claude-sonnet-4-6"
-_CELL_W             = 320       # px per thumbnail cell
-_CELL_H             = 240       # px per thumbnail cell (landscape-friendly)
+# Cell size raised from 320x240 → 640x480 at v11 (1edd6b5 resolution
+# comparison). 320x240 missed "reflections" on exterior_b; 640x480
+# caught it. motion_risk drives Stage 6 model routing — a miss there
+# is a visible quality loss. Cost delta: ~$0.01/property (larger base64).
+_CELL_W             = 640       # px per thumbnail cell
+_CELL_H             = 480       # px per thumbnail cell (landscape-friendly)
 _CELL_PAD           = 6         # px between cells
 _GRID_COLS          = 3
 _GRID_ROWS          = 4
@@ -58,7 +62,7 @@ _REDIS_TTL          = 7 * 24 * 3600  # 7 days
 # Bump this string whenever the taxonomy or curation rules change.
 # It is prepended to the URL list before hashing, so existing cached curations
 # (keyed on old hash) are automatically bypassed and a fresh LLM call is made.
-_CURATION_VERSION = "curation_v10_shot_inventory"
+_CURATION_VERSION = "curation_v11_640x480_cells"
 
 # ── Canonical section taxonomy ─────────────────────────────────────────────────
 # Single source of truth. agent5/page_builder.py imports CURATED_SECTION_NAMES.
