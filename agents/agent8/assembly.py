@@ -21,6 +21,11 @@ import subprocess
 import tempfile
 from typing import Optional
 
+# ── FFmpeg availability check on module load ─────────────────────────────
+# Logged once so the missing-binary gap is visible in deploy logs rather
+# than surfacing only when the first master renders with flat audio.
+_FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+
 from pipeline_emitter import emit_media_cost
 
 from core.creatomate import (
@@ -31,6 +36,15 @@ from core.creatomate import (
 )
 
 logger = logging.getLogger(__name__)
+
+if not _FFMPEG_AVAILABLE:
+    logger.error(
+        "[Agent 8 Stage 7] ⚠️ FFmpeg is NOT installed on this container. "
+        "Audio ducking (SOC-23b) and Stage 9 platform adaptation will NOT work. "
+        "Ensure railpack.json declares ffmpeg in deploy.aptPackages."
+    )
+else:
+    logger.info("[Agent 8 Stage 7] FFmpeg detected: audio ducking available.")
 
 # ── Master canvas dimensions ──────────────────────────────────────────────
 MASTER_W, MASTER_H = 1080, 1920
@@ -195,9 +209,17 @@ def _apply_audio_ducking(
     if not narration_present:
         return master_bytes, False
 
-    # Check FFmpeg availability
+    # Check FFmpeg availability — a missing binary produces flat audio
+    # and nobody is told unless this check is loud. SOC-23b: flat
+    # narration over music is the most audible tell of automated video.
     if not shutil.which("ffmpeg"):
-        logger.warning("[Agent 8 Stage 7] FFmpeg not available — skipping audio ducking")
+        logger.error(
+            "[Agent 8 Stage 7] FFmpeg NOT FOUND on this container. "
+            "Audio ducking is impossible without it. Check that railpack.json "
+            "declares ffmpeg in deploy.aptPackages and that the last deploy "
+            "built from a commit that includes it. "
+            "has_audio_ducking will be False for ALL masters until this is fixed."
+        )
         return master_bytes, False
 
     try:
