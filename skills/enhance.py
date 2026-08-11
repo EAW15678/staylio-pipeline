@@ -26,6 +26,7 @@ import httpx
 from skills.contract import (
     SkillResult, get_substrate, require_env,
     record_run, record_step, complete_step, complete_run, emit_cost,
+    skills_r2_upload,
 )
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,8 @@ def enhance(
         require_env("R2_ENDPOINT_URL", "R2 storage for enhanced renditions")
         require_env("R2_ACCESS_KEY_ID", "R2 storage for enhanced renditions")
         require_env("R2_SECRET_ACCESS_KEY", "R2 storage for enhanced renditions")
+        require_env("STAGING_R2_BUCKET", "R2 bucket for skill outputs")
+        require_env("STAGING_R2_PUBLIC_URL", "R2 public URL for skill outputs")
     except EnvironmentError as e:
         return SkillResult.failed(str(e))
 
@@ -162,14 +165,10 @@ def enhance(
             enhanced_bytes = asyncio.run(_enhance())
 
             if enhanced_bytes:
-                # Upload to R2 — no fallback, R2 is required
-                from core.r2_storage import upload_photo_enhanced
+                # Upload to skills R2 bucket — env-driven, no hardcoded bucket
                 content_hash = hashlib.sha256(img_bytes).hexdigest()
-                r2_url = upload_photo_enhanced(
-                    property_id=property_id,
-                    photo_bytes=enhanced_bytes,
-                    filename=f"enhanced_{content_hash[:8]}.jpg",
-                )
+                key = f"{property_id}/enhanced/{pid}.jpg"
+                r2_url = skills_r2_upload(key, enhanced_bytes, "image/jpeg")
 
                 # Measure enhanced dimensions
                 try:

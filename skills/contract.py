@@ -204,6 +204,46 @@ def emit_cost(sb, run_id: str, property_id: str, vendor: str, service: str,
     }).execute()
 
 
+# ── Skills R2 storage ────────────────────────────────────────────────────
+# Skills use env-driven bucket + public URL — no hardcoded bucket names.
+# STAGING_R2_BUCKET and STAGING_R2_PUBLIC_URL are set by Erick.
+
+_skills_r2_client = None
+
+
+def _get_skills_r2_client():
+    """Get an S3-compatible client for the skills R2 bucket."""
+    global _skills_r2_client
+    if _skills_r2_client is not None:
+        return _skills_r2_client
+    import boto3
+    from botocore.config import Config
+    _skills_r2_client = boto3.client(
+        "s3",
+        endpoint_url=os.environ["R2_ENDPOINT_URL"],
+        aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
+        aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
+        config=Config(signature_version="s3v4"),
+        region_name="auto",
+    )
+    return _skills_r2_client
+
+
+def skills_r2_upload(key: str, data: bytes, content_type: str = "image/jpeg") -> str:
+    """Upload to the skills R2 bucket. Returns the public CDN URL.
+
+    Bucket and public base are env-driven (STAGING_R2_BUCKET, STAGING_R2_PUBLIC_URL).
+    No hardcoded bucket name reachable from any skill.
+    """
+    bucket = require_env("STAGING_R2_BUCKET", "R2 bucket for skill outputs")
+    public_base = require_env("STAGING_R2_PUBLIC_URL", "R2 public URL for skill outputs")
+    client = _get_skills_r2_client()
+    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
+    url = f"{public_base.rstrip('/')}/{key}"
+    logger.info("[r2] Uploaded %s → %s (%d bytes)", key, url[:60], len(data))
+    return url
+
+
 def escalate_billing(sb, property_id: str, vendor: str, error_message: str):
     """Ruling 6: billing/auth errors write exactly one hitl_queue_items row and stop.
     No retry. Human must fix the billing issue before the skill can run.
