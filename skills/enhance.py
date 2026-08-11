@@ -51,7 +51,10 @@ def enhance(
     except EnvironmentError as e:
         return SkillResult.failed(str(e))
 
-    claid_key = os.environ.get("CLAID_API_KEY", "")
+    try:
+        claid_key = require_env("CLAID_API_KEY", "Claid.ai photo enhancement")
+    except EnvironmentError as e:
+        return SkillResult.failed(str(e))
 
     # ── Load photographs needing enhancement ─────────────────────────────
     query = sb.table("photographs").select(
@@ -145,21 +148,6 @@ def enhance(
                 logger.warning("[enhance] pHash failed for %s: %s", pid[:8], str(exc)[:60])
 
         # ── Enhance via Claid ────────────────────────────────────────────
-        if not claid_key:
-            logger.info("[enhance] No CLAID_API_KEY — skipping enhancement, using original as enhanced")
-            # Write original URL as enhanced rendition (no vendor spend)
-            sb.table("renditions").upsert({
-                "photo_id": pid,
-                "kind": "enhanced",
-                "storage_url": original_url,
-                "format": "jpg",
-                "width": w or None,
-                "height": h or None,
-                "byte_size": len(img_bytes),
-            }, on_conflict="photo_id,kind,format").execute()
-            enhanced_count += 1
-            continue
-
         try:
             import asyncio
             from agents.agent3.claid_enhancer import enhance_photo_async
