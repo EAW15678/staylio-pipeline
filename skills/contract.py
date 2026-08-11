@@ -13,6 +13,7 @@ Skills:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -27,7 +28,16 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class SkillResult:
-    """Typed result from any skill. Never None, never silent."""
+    """Typed result from any skill. Never None, never silent.
+
+    Ruling 6 semantics (target-architecture.md, Erick 2026-08-11):
+      ok       = whole job done, or nothing-to-do (noop)
+      failed   = partial or total vendor failure — includes
+                 {attempted, succeeded, failed, error_class, human_required}
+      held     = judgment gates only (compliance, quality review)
+
+    billing/auth error_class → no retry, write hitl_queue_items, stop.
+    """
     status: str  # "ok", "held", "failed"
     data: Any = None
     reason: Optional[str] = None
@@ -40,16 +50,40 @@ class SkillResult:
                            cost_events=cost_events or [], steps=steps or [])
 
     @staticmethod
+    def noop(reason: str, data: Any = None) -> "SkillResult":
+        """Nothing to do — idempotent converge, already done."""
+        d = {"noop": True, "reason": reason}
+        if isinstance(data, dict):
+            d.update(data)
+        return SkillResult(status="ok", data=d)
+
+    @staticmethod
     def held(reason: str, data: Any = None) -> "SkillResult":
         return SkillResult(status="held", reason=reason, data=data)
 
     @staticmethod
-    def failed(reason: str) -> "SkillResult":
-        return SkillResult(status="failed", reason=reason)
+    def failed(reason: str, attempted: int = 0, succeeded: int = 0,
+               failed_count: int = 0, error_class: str = None,
+               human_required: bool = False) -> "SkillResult":
+        return SkillResult(
+            status="failed",
+            reason=reason,
+            data={
+                "attempted": attempted,
+                "succeeded": succeeded,
+                "failed": failed_count,
+                "error_class": error_class,
+                "human_required": human_required,
+            },
+        )
 
     @property
     def is_ok(self) -> bool:
         return self.status == "ok"
+
+    @property
+    def is_billing_error(self) -> bool:
+        return (self.data or {}).get("error_class") == "billing"
 
 
 # ── Substrate connection ─────────────────────────────────────────────────
@@ -168,3 +202,24 @@ def emit_cost(sb, run_id: str, property_id: str, vendor: str, service: str,
         "generation_reason": generation_reason,
         "discriminator": discriminator,
     }).execute()
+
+
+def escalate_billing(sb, property_id: str, vendor: str, error_message: str):
+    """Ruling 6: billing/auth errors write exactly one hitl_queue_items row and stop.
+    No retry. Human must fix the billing issue before the skill can run.
+    """
+    sb.table("hitl_queue_items").insert({
+        "property_id": property_id,
+        "queue_type": "billing_error",
+        "reason_code": f"{vendor}_billing",
+        "title": f"{vendor} billing error — credits depleted or auth invalid",
+        "description": error_message[:500],
+        "priority": "urgent",
+        "status": "pending",
+        "payload": json.dumps({"vendor": vendor, "error": error_message[:200]}),
+        "created_by_type": "agent",
+    }).execute()
+    logger.warning(
+        "[contract] Billing escalation: vendor=%s property=%s — hitl_queue_items row created",
+        vendor, property_id[:12],
+    )

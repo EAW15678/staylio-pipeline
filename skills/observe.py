@@ -89,18 +89,16 @@ def observe(
     if not photo_url_map:
         return SkillResult.failed("No rendition URLs found for photographs")
 
-    # Check for existing observations (skip if not forcing)
+    # Check for existing observations — Ruling 6: nothing-to-do = ok(noop)
     if not force:
         existing = sb.table("observations").select("observation_id", count="exact").eq(
             "property_id", property_id
         ).is_("superseded_at", "null").limit(0).execute()
         if existing.count > 0 and not photo_ids:
-            return SkillResult.ok({
-                "observations_written": 0,
-                "observations_existing": existing.count,
-                "skipped": True,
-                "reason": "Observations already exist. Use force=True to re-observe.",
-            })
+            return SkillResult.noop(
+                f"Observations already exist ({existing.count} active). Use force=True to re-observe.",
+                {"observations_existing": existing.count},
+            )
 
     # ── Record the run ───────────────────────────────────────────────────
     run_id = record_run(sb, property_id, "onboard")
@@ -118,6 +116,7 @@ def observe(
     # curation — that's the 1,954-line llm_curator.py which ports intact later.
     # This smoke test demonstrates the contract: vendor call → observation → cost_event.)
     observations_written = 0
+    failed_count = 0
     total_cost = 0.0
 
     for photo in photos:
@@ -221,20 +220,52 @@ def observe(
             )
 
         except Exception as exc:
-            logger.error("[observe] Photo %s failed: %s", pid[:8], exc)
+            error_str = str(exc)
+            failed_count += 1
+
+            # Ruling 6: billing/auth errors → escalate, no retry, stop
+            if "credit balance" in error_str or "authentication" in error_str.lower():
+                logger.error("[observe] BILLING ERROR on photo %s: %s", pid[:8], error_str[:120])
+                from skills.contract import escalate_billing
+                escalate_billing(sb, property_id, "anthropic", error_str)
+                complete_step(sb, step_id, status="failed",
+                              error_message=f"Billing error: {error_str[:200]}")
+                complete_run(sb, run_id, status="failed",
+                             error_summary=f"Anthropic billing error after {observations_written} observations")
+                return SkillResult.failed(
+                    reason=f"Anthropic billing error: {error_str[:200]}",
+                    attempted=len(photos),
+                    succeeded=observations_written,
+                    failed_count=failed_count,
+                    error_class="billing",
+                    human_required=True,
+                )
+
+            logger.error("[observe] Photo %s failed: %s", pid[:8], error_str[:120])
             continue
 
     # ── Complete the run ─────────────────────────────────────────────────
-    complete_step(sb, step_id, status="complete", metadata={
+    status = "complete" if observations_written > 0 else "failed"
+    complete_step(sb, step_id, status=status, metadata={
         "observations_written": observations_written,
         "photos_processed": len(photos),
         "cost_usd": round(total_cost, 4),
     })
-    complete_run(sb, run_id, status="complete")
+    complete_run(sb, run_id, status=status)
+
+    if observations_written == 0 and failed_count > 0:
+        return SkillResult.failed(
+            reason=f"All {failed_count} vendor calls failed",
+            attempted=len(photos),
+            succeeded=0,
+            failed_count=failed_count,
+            error_class="vendor",
+        )
 
     return SkillResult.ok({
         "observations_written": observations_written,
         "photos_processed": len(photos),
+        "failed_count": failed_count,
         "cost_usd": round(total_cost, 4),
         "run_id": run_id,
     })
