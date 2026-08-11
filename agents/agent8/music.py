@@ -248,6 +248,8 @@ def render_music(
         asset["prompt_text"] = prompt_text
     if composition_plan:
         asset["composition_plan"] = composition_plan
+    # Store the raw music_brief for the `brief` column
+    asset["brief"] = music_brief
 
     # ── Check cache ──────────────────────────────────────────────────────
     if not force:
@@ -303,9 +305,9 @@ def render_music(
     if not asset["duration_seconds"] and audio_bytes:
         asset["duration_seconds"] = round(len(audio_bytes) / (128 * 1024 / 8), 1)
 
-    # Cost estimate: $0.15/minute, pro-rated
+    # Cost — emitted via emit_media_cost below, not stored on music_assets
+    # (music_assets schema has no cost_estimate_usd column)
     dur = asset.get("duration_seconds") or 0
-    asset["cost_estimate_usd"] = round(dur / 60.0 * _MUSIC_COST_PER_MINUTE_USD, 4)
 
     emit_media_cost(
         vendor="elevenlabs",

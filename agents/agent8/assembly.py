@@ -172,7 +172,7 @@ def _build_render_payload(
         r2_url = clip.get("r2_url", "")
         if r2_url:
             mods[f"clip_{i + 1}.source"] = r2_url
-        duration = clip.get("duration")
+        duration = clip.get("duration_seconds")
         if duration:
             mods[f"clip_{i + 1}.duration"] = str(duration)
 
@@ -357,8 +357,8 @@ def assemble_master(
         logger.info("[Agent 8 Stage 7] No motion clips for spec %s — clean return", spec_id)
         return None
 
-    # Sort by beat_index to guarantee beat order
-    clips.sort(key=lambda c: c.get("beat_index", 0))
+    # Sort by beat_ordinal to guarantee beat order
+    clips.sort(key=lambda c: c.get("beat_ordinal", 0))
     clip_ids = [c.get("clip_id") or c.get("input_hash", "") for c in clips]
 
     # ── Load narration ──────────────────────────────────────────────────
@@ -398,7 +398,7 @@ def assemble_master(
     )
 
     # ── Estimate duration from clips ────────────────────────────────────
-    total_duration = sum(c.get("duration", 0) for c in clips)
+    total_duration = sum(c.get("duration_seconds", 0) for c in clips)
     cost_estimate = round(
         (total_duration / 60.0) * CREATOMATE_COST_PER_RENDER_MINUTE, 4
     )
@@ -551,7 +551,7 @@ def _load_spec(spec_id: str) -> Optional[dict]:
 
 
 def _load_motion_clips(spec_id: str) -> list[dict]:
-    """Load ready motion_clips for this spec, ordered by beat_index."""
+    """Load ready motion_clips for this spec, ordered by beat_ordinal."""
     try:
         from core.supabase_store import get_supabase
         result = (
@@ -561,7 +561,7 @@ def _load_motion_clips(spec_id: str) -> list[dict]:
             .eq("spec_id", spec_id)
             .eq("status", "ready")
             .is_("superseded_at", "null")
-            .order("beat_index")
+            .order("beat_ordinal")
             .execute()
         )
         return result.data or []

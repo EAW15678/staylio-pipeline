@@ -146,7 +146,7 @@ def render_beats(
     inventory_by_url = {}
     if inventory:
         for row in inventory:
-            url = row.get("image_url") or row.get("source_image_url") or ""
+            url = row.get("source_asset_id") or ""
             if url:
                 inventory_by_url[url] = row
 
@@ -170,14 +170,13 @@ def render_beats(
         clip: dict = {
             "property_id": property_id,
             "spec_id": spec_id,
-            "concept_id": concept_id,
-            "beat_index": idx,
+            "beat_ordinal": idx,
             "source_image_url": source_image_url,
             "technique": technique,
             "requested_motion": requested_motion,
             "vendor": "runway",
             "model": model,
-            "duration": duration,
+            "duration_seconds": duration,
             "input_hash": input_hash,
             "cost_estimate_usd": round(duration * RUNWAY_COST_PER_SEC[model], 4),
             "persistence_check": "unchecked",
@@ -316,7 +315,7 @@ def _load_shot_inventory(property_id: str) -> Optional[list[dict]]:
         result = (
             get_supabase()
             .table("shot_inventory")
-            .select("image_url, source_image_url, motion_risk")
+            .select("source_asset_id, motion_risk")
             .eq("property_id", property_id)
             .execute()
         )

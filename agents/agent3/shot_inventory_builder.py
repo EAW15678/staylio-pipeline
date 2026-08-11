@@ -12,6 +12,7 @@ rows for the same property are marked superseded (superseded_at = now()).
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 
 _MODEL = "claude-sonnet-4-6"
 _INVENTORY_VERSION = 1
+
+# Namespace for deterministic shot_id generation.  uuid5(NAMESPACE, source_asset_id)
+# produces the same UUID for the same photograph across re-runs, making the
+# superseded_at lifecycle meaningful.
+_SHOT_ID_NAMESPACE = uuid.UUID("b7e8c4a1-9f2d-4e3b-a1c6-5d8f7e2b4a9c")
 
 
 def populate_shot_inventory(property_id: str) -> int:
@@ -38,7 +44,7 @@ def populate_shot_inventory(property_id: str) -> int:
         .eq("property_id", property_id)
         .eq("status", "complete")
         .is_("superseded_at", "null")
-        .order("completed_at", desc=True)
+        .order("created_at", desc=True)
         .limit(1)
         .execute()
     )
@@ -58,7 +64,7 @@ def populate_shot_inventory(property_id: str) -> int:
     # ── Load media_assets for read_basis and tonal_signature derivation ──
     assets_resp = (
         sb.table("media_assets")
-        .select("asset_url_original,asset_url_enhanced,brightness,dominant_colors")
+        .select("asset_url_original,asset_url_enhanced,brightness,dominant_colors,source_phash")
         .eq("property_id", property_id)
         .execute()
     )
@@ -117,16 +123,28 @@ def populate_shot_inventory(property_id: str) -> int:
         # Determine read_basis: did the curation read enhanced or original?
         read_basis = "enhanced" if asset_id in enhanced_lookup else "original"
 
+        # Deterministic shot_id: same photograph → same UUID across re-runs.
+        # source_asset_id is the R2 URL from curation (asset_id).
+        # ⚠️ DEBT: R2 URLs change every pipeline run.  If photos are re-uploaded,
+        # shot_id changes and supersession breaks.  The production fix is
+        # content-hash-based identity (see production-architecture.md Q1).
+        shot_id = str(uuid.uuid5(_SHOT_ID_NAMESPACE, asset_id))
+
+        # Carry phash from media_assets if available
+        media_row = media_asset_map.get(asset_id, {})
+        phash_val = media_row.get("source_phash") if media_row else None
+
         row = {
             "property_id":        property_id,
-            "asset_url":          asset_id,
+            "shot_id":            shot_id,
+            "source_asset_id":    asset_id,
             "inventory_version":  _INVENTORY_VERSION,
             "model":              _MODEL,
             "read_basis":         read_basis,
             "superseded_at":      None,
-            # ── Pass-through fields from curation (v10) ──────────────────
-            "physical_room_id":    img.get("physical_room_id"),
-            "visual_duplicate_of": img.get("visual_duplicate_of"),
+            "phash":              phash_val,
+            "persistence_manifest": [],
+            # ── Pass-through fields from curation ────────────────────────
             "depth_structure":     img.get("depth_structure"),
             "foreground_elements": img.get("foreground_elements") or [],
             "frame_element":       img.get("frame_element"),
@@ -155,7 +173,7 @@ def populate_shot_inventory(property_id: str) -> int:
     try:
         sb.table("shot_inventory").upsert(
             rows,
-            on_conflict="property_id,asset_url,superseded_at",
+            on_conflict="property_id,shot_id,superseded_at",
         ).execute()
         logger.info(
             "[ShotInventory] Wrote %d shot_inventory rows for property %s",
