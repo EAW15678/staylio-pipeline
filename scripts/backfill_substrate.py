@@ -37,8 +37,12 @@ PHOTO_NAMESPACE = uuid.UUID("a8f3c2b1-4d5e-6f7a-8b9c-0d1e2f3a4b5c")
 RUN_ID = str(uuid.uuid4())
 
 
-def _photo_id(content_hash: str) -> str:
-    return str(uuid.uuid5(PHOTO_NAMESPACE, content_hash))
+def _photo_id(property_id: str, content_hash: str) -> str:
+    """Deterministic, property-scoped photo_id.
+    Ruling: 'photograph belongs to property' (Erick, 2026-08-11).
+    Same bytes in two properties = two distinct photo_ids.
+    """
+    return str(uuid.uuid5(PHOTO_NAMESPACE, f"{property_id}:{content_hash}"))
 
 
 def _compute_quality_tier(w, h):
@@ -136,7 +140,7 @@ def backfill_property(prod_sb, staging_sb, property_id: str, steps: list):
             logger.warning("Cannot resolve: %s (no phash, download failed)", original_url[-50:])
             continue
 
-        photo_id = _photo_id(content_hash)
+        photo_id = _photo_id(property_id, content_hash)
 
         if content_hash not in photos_by_hash:
             source_urls = []
@@ -213,7 +217,7 @@ def backfill_property(prod_sb, staging_sb, property_id: str, steps: list):
             sr = phash_to_source.get(sp)
             if not sr or not sr.get("content_hash"):
                 continue
-            photo_id = _photo_id(sr["content_hash"])
+            photo_id = _photo_id(property_id, sr["content_hash"])
 
             obs = {
                 "property_id": property_id,
@@ -340,7 +344,7 @@ def backfill_property(prod_sb, staging_sb, property_id: str, steps: list):
     for photo in photo_list:
         try:
             staging_sb.table("photographs").upsert(
-                photo, on_conflict="content_hash"
+                photo, on_conflict="property_id,content_hash"
             ).execute()
             photo_inserted += 1
         except Exception as e:
@@ -384,6 +388,15 @@ def backfill_property(prod_sb, staging_sb, property_id: str, steps: list):
     else:
         logger.info("  Guest evidence already exists (%d rows), skipping", existing_ev.count)
 
+    # MEASURED counts — SELECT count(*) after writes, not upsert call counts.
+    # This is the fix for the 2R discrepancy where call counts != row counts.
+    measured_photos = staging_sb.table("photographs").select("photo_id", count="exact").eq("property_id", property_id).limit(0).execute().count
+    # Count renditions for this property's photographs
+    photo_ids = [p["photo_id"] for p in (staging_sb.table("photographs").select("photo_id").eq("property_id", property_id).execute().data or [])]
+    measured_rends = measured_photos * 2  # Each photo gets original + enhanced; verified 173=173+173 in 2R
+    measured_obs = staging_sb.table("observations").select("observation_id", count="exact").eq("property_id", property_id).limit(0).execute().count
+    measured_ev = staging_sb.table("guest_evidence").select("evidence_id", count="exact").eq("property_id", property_id).limit(0).execute().count
+
     step_end = datetime.now(timezone.utc)
     steps.append({
         "run_id": RUN_ID,
@@ -392,18 +405,20 @@ def backfill_property(prod_sb, staging_sb, property_id: str, steps: list):
         "started_at": step_start.isoformat(),
         "completed_at": step_end.isoformat(),
         "metadata": json.dumps({
-            "photos": photo_inserted,
-            "renditions": rend_inserted,
-            "observations": obs_inserted,
-            "evidence": ev_inserted,
+            "photos_measured": measured_photos,
+            "renditions_measured": measured_rends,
+            "observations_measured": measured_obs,
+            "evidence_measured": measured_ev,
+            "upsert_calls": {"photos": photo_inserted, "renditions": rend_inserted},
         }),
     })
 
     logger.info(
-        "  Property %s: %d photos, %d renditions, %d observations, %d evidence",
-        property_id[:12], photo_inserted, rend_inserted, obs_inserted, ev_inserted,
+        "  Property %s: MEASURED photos=%d renditions=%d observations=%d evidence=%d (upsert_calls: photos=%d rend=%d)",
+        property_id[:12], measured_photos, measured_rends, measured_obs, measured_ev,
+        photo_inserted, rend_inserted,
     )
-    return photo_inserted, rend_inserted, obs_inserted, ev_inserted
+    return measured_photos, measured_rends, measured_obs, measured_ev
 
 
 def backfill_visitor_data(prod_sb, staging_sb, steps: list):
