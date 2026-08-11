@@ -4,8 +4,10 @@ Agent 1 populates these models from scraped + intake data.
 All downstream agents read from these models.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 from datetime import datetime
 from enum import Enum
 
@@ -82,7 +84,7 @@ class PropertyField:
     Wraps any data field with provenance tracking.
     Intake portal data always wins over scraped data.
     """
-    value: Optional[str | int | float | list | bool]
+    value: Optional[Union[str, int, float, list, bool]]
     source: DataSource
     confidence: float = 1.0    # 0.0–1.0; Claude-parsed fields may be lower
 
