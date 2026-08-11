@@ -181,25 +181,47 @@ def acquire_listing(
         logger.warning("[acquire] LOW PHOTO COUNT: only %d photos from %s", len(photo_urls), source_url)
 
     # ── Update property fields from extraction ───────────────────────────
+    # Ruling 1: Owner-supplied intake data OUTRANKS scraped listing text.
+    # Owner-territory fields (name, city, state, postal_code, booking_url)
+    # are set by ingest_intake from the owner's portal answers. The scrape
+    # fills them ONLY when null — never overwrites owner-supplied values.
+    #
+    # Fields classified as owner-territory:
+    #   name          — owner named it at intake
+    #   city          — owner entered it
+    #   state_region  — owner entered it
+    #   postal_code   — owner entered it
+    #   booking_url   — owner designated their booking page
+    #
+    # Fields the scrape may set freely:
+    #   property_type — inferred from listing, owner rarely sets this
     if extracted_fields:
+        # Re-read current property to check which fields are null
+        current = sb.table("properties").select(
+            "name, city, state_region, postal_code, booking_url, property_type"
+        ).eq("id", property_id).limit(1).execute()
+        current_vals = current.data[0] if current.data else {}
+
         prop_update = {}
+
+        # Owner-territory: fill only when null
         for ext_key, prop_key in [
             ("property_name", "name"), ("city", "city"),
             ("state", "state_region"), ("zip_code", "postal_code"),
-            ("property_type", "property_type"),
+            ("booking_url", "booking_url"),
         ]:
             v = extracted_fields.get(ext_key)
-            if v and isinstance(v, str) and v.strip():
+            if v and isinstance(v, str) and v.strip() and not current_vals.get(prop_key):
                 prop_update[prop_key] = v.strip()
 
-        if extracted_fields.get("bedrooms"):
-            pass  # Properties table doesn't have bedrooms — stored in copy
-        if extracted_fields.get("booking_url"):
-            prop_update["booking_url"] = extracted_fields["booking_url"]
+        # Scrape-territory: always update
+        v = extracted_fields.get("property_type")
+        if v and isinstance(v, str) and v.strip():
+            prop_update["property_type"] = v.strip()
 
         if prop_update:
             sb.table("properties").update(prop_update).eq("id", property_id).execute()
-            logger.info("[acquire] Updated %d property fields from extraction", len(prop_update))
+            logger.info("[acquire] Updated %d property fields (owner-territory: only nulls filled)", len(prop_update))
 
     # ── Download photos and write photographs + renditions ───────────────
     photos_new = 0
