@@ -27,6 +27,7 @@ import httpx
 from skills.contract import (
     SkillResult, get_substrate, require_env,
     record_run, record_step, complete_step, complete_run, emit_cost,
+    skills_r2_upload,
 )
 
 logger = logging.getLogger(__name__)
@@ -238,16 +239,12 @@ def acquire_listing(
                 if qt == "low":
                     low_res_count += 1
 
-                # Upload to R2
+                # Upload to skills R2 bucket — env-driven, no hardcoded bucket
                 try:
-                    from core.r2_storage import upload_photo_original
-                    r2_url = upload_photo_original(
-                        property_id=property_id,
-                        photo_bytes=img_bytes,
-                        filename=f"photo_{content_hash[:8]}.jpg",
-                    )
+                    key = f"{property_id}/original/photo_{content_hash[:8]}.jpg"
+                    r2_url = skills_r2_upload(key, img_bytes, "image/jpeg")
                 except Exception:
-                    # R2 not configured in local env — use the source URL as storage_url
+                    # Use source URL as storage_url if R2 not configured
                     r2_url = url
 
                 # Write photograph
