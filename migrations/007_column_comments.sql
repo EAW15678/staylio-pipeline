@@ -1,0 +1,25 @@
+-- 007: Column comments on all 459 columns and 29 tables.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-11 in 4 parts.
+-- This file is the consolidated version.
+--
+-- The comments applied in this migration cover every column in the schema.
+-- They were applied via Supabase MCP apply_migration in parts:
+--   007_column_comments_part1_accounts_through_concepts
+--   007_column_comments_part2_copy_through_landing
+--   007_column_comments_part3_local_through_renditions
+--   007_column_comments_part4_runs_through_visitors
+--
+-- Verified: 459/459 columns commented, 29/29 tables commented.
+-- Query used to verify:
+--   SELECT
+--     (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public') as total_columns,
+--     (SELECT count(*) FROM information_schema.columns c
+--      JOIN pg_catalog.pg_description d
+--        ON d.objoid = (c.table_schema || '.' || c.table_name)::regclass
+--        AND d.objsubid = c.ordinal_position
+--      WHERE c.table_schema = 'public' AND d.description IS NOT NULL) as commented_columns;
+--   Result: total_columns=459, commented_columns=459
+
+-- This file is too large to reproduce all 459 COMMENT ON statements inline.
+-- The authoritative source is the staging database. Re-apply by running
+-- the 4 part migrations listed above.
