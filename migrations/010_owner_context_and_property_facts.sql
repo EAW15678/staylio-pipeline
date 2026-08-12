@@ -1,0 +1,5 @@
+-- 010: Owner context entity + property fact columns.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-12.
+-- See the apply_migration call for full SQL.
+-- Creates owner_context table + adds bedrooms, bathrooms, max_occupancy,
+-- description, amenities columns to properties.

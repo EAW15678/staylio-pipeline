@@ -190,6 +190,60 @@ def ingest_intake(
     else:
         logger.info("[ingest_intake] Guest evidence already exists (%d rows), skipping", existing_ev.count)
 
+    # ── Property facts (amenities, bedrooms from intake) ─────────────────
+    amenities = _list("amenities")
+    if amenities:
+        prop_facts = {"amenities": amenities}
+        sb.table("properties").update(prop_facts).eq("id", property_id).execute()
+        logger.info("[ingest_intake] Set %d amenities on properties", len(amenities))
+
+    # ── Owner context (all 26 narrative/seasonal/guest keys) ─────────────
+    existing_ctx = sb.table("owner_context").select("context_id", count="exact").eq(
+        "property_id", property_id
+    ).is_("superseded_at", "null").limit(0).execute()
+
+    context_written = False
+    if existing_ctx.count == 0 or force:
+        if force and existing_ctx.count > 0:
+            from datetime import datetime, timezone as tz
+            sb.table("owner_context").update(
+                {"superseded_at": datetime.now(tz.utc).isoformat()}
+            ).eq("property_id", property_id).is_("superseded_at", "null").execute()
+
+        ctx = {
+            "property_id": property_id,
+            "owner_story": _str("owner_story"),
+            "wow_factor": _str("wow_factor"),
+            "hidden_gems": _str("hidden_gems"),
+            "guest_love": _str("guest_love"),
+            "arrival_info": _str("arrival_info"),
+            "extra_notes": _str("extra_notes"),
+            "seasonal_notes": _str("seasonal_notes"),
+            "best_seasons": _list("best_seasons"),
+            "local_events": _str("local_events"),
+            "off_season_notes": _str("off_season_notes"),
+            "area_vibe": _str("area_vibe"),
+            "dont_miss": _str("dont_miss"),
+            "surround_areas": _str("surround_areas"),
+            "guest_types": _list("guest_types"),
+            "group_size": _str("group_size"),
+            "stay_length": _str("stay_length"),
+            "host_style": _str("host_style"),
+            "owner_years": _str("owner_years"),
+            "vibe_q1_answer": _str("vibe_q1_answer"),
+            "vibe_q2_answer": _str("vibe_q2_answer"),
+            "vibe_notes": _str("vibe_notes"),
+        }
+        # Only write if there's actual content
+        has_content = any(v for k, v in ctx.items() if k != "property_id" and v)
+        if has_content:
+            sb.table("owner_context").insert(ctx).execute()
+            context_written = True
+            logger.info("[ingest_intake] Owner context written (%d non-null fields)",
+                       sum(1 for k, v in ctx.items() if k != "property_id" and v))
+    else:
+        logger.info("[ingest_intake] Owner context already exists, skipping")
+
     # ── Complete ─────────────────────────────────────────────────────────
     complete_step(sb, step_id, status="complete", metadata={
         "fields_updated": len(prop_update),

@@ -78,11 +78,11 @@ def write_copy(
         "property_type": _pf(prop.get("property_type")),
         "vibe_profile": prop.get("vibe_profile") or "romantic_escape",
         "booking_url": prop.get("booking_url") or "#",
-        "bedrooms": _pf(None),
-        "bathrooms": _pf(None),
-        "max_occupancy": _pf(None),
-        "description": _pf(None),
-        "amenities": [],
+        "bedrooms": _pf(prop.get("bedrooms")),
+        "bathrooms": _pf(prop.get("bathrooms")),
+        "max_occupancy": _pf(prop.get("max_occupancy")),
+        "description": _pf(prop.get("description")),
+        "amenities": [{"value": a} for a in (prop.get("amenities") or [])],
         "unique_features": [],
         "neighborhood_description": _pf(None),
         "owner_story": None,
@@ -90,6 +90,26 @@ def write_copy(
         "hidden_gems": None,
         "seasonal_notes": None,
     }
+
+    # Load owner_context
+    ctx_resp = sb.table("owner_context").select("*").eq(
+        "property_id", property_id
+    ).is_("superseded_at", "null").order("version", desc=True).limit(1).execute()
+    if ctx_resp.data:
+        ctx = ctx_resp.data[0]
+        kb["owner_story"] = ctx.get("owner_story") or None
+        kb["wow_factor"] = ctx.get("wow_factor") or None
+        kb["hidden_gems"] = ctx.get("hidden_gems") or None
+        kb["seasonal_notes"] = ctx.get("seasonal_notes") or None
+        # Additional context for richer copy
+        if ctx.get("guest_love"):
+            kb["guest_love"] = ctx["guest_love"]
+        if ctx.get("arrival_info"):
+            kb["arrival_info"] = ctx["arrival_info"]
+        if ctx.get("area_vibe"):
+            kb["neighborhood_description"] = _pf(ctx["area_vibe"])
+        if ctx.get("dont_miss"):
+            kb["dont_miss"] = ctx["dont_miss"]
 
     # Load guest evidence
     ev_resp = sb.table("guest_evidence").select("*").eq("property_id", property_id).execute()

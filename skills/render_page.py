@@ -50,9 +50,9 @@ def render_page(property_id: str) -> SkillResult:
         "property_type": {"value": prop.get("property_type")},
         "vibe_profile": prop.get("vibe_profile") or "",
         "booking_url": prop.get("booking_url") or "#",
-        "bedrooms": {"value": None},
-        "bathrooms": {"value": None},
-        "max_occupancy": {"value": None},
+        "bedrooms": {"value": prop.get("bedrooms")},
+        "bathrooms": {"value": prop.get("bathrooms")},
+        "max_occupancy": {"value": prop.get("max_occupancy")},
         "slug": slug,
         "latitude": {"value": prop.get("latitude")},
         "longitude": {"value": prop.get("longitude")},
@@ -63,6 +63,19 @@ def render_page(property_id: str) -> SkillResult:
         "hidden_gems": None,
         "seasonal_notes": None,
     }
+
+    # ── Load owner_context ───────────────────────────────────────────────
+    ctx_resp = sb.table("owner_context").select("*").eq(
+        "property_id", property_id
+    ).is_("superseded_at", "null").order("version", desc=True).limit(1).execute()
+    if ctx_resp.data:
+        ctx = ctx_resp.data[0]
+        kb["owner_story"] = ctx.get("owner_story")
+        kb["wow_factor"] = ctx.get("wow_factor")
+        kb["hidden_gems"] = ctx.get("hidden_gems")
+        kb["seasonal_notes"] = ctx.get("seasonal_notes")
+        if ctx.get("area_vibe"):
+            kb["neighborhood_description"] = {"value": ctx["area_vibe"]}
 
     # ── Load guest evidence → kb.guest_reviews ───────────────────────────
     ev_resp = sb.table("guest_evidence").select("*").eq("property_id", property_id).execute()
