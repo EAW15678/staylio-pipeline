@@ -599,9 +599,11 @@ async def substrate_onboard(
             "data": result.data,
             "reason": result.reason,
         }
-    except Exception as exc:
-        logger.error(f"Substrate onboard failed: {exc}")
-        raise HTTPException(status_code=500, detail=str(exc))
+    except BaseException as exc:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Substrate onboard failed: {tb}")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {str(exc)[:500]}")
 
 
 @app.post("/run")
