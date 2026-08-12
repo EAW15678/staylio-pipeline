@@ -72,6 +72,99 @@ def _quality_tier(w, h):
     return None
 
 
+def acquire_owner_photos(
+    property_id: str,
+    photo_urls: list,
+    *,
+    run_id: str = None,
+) -> dict:
+    """Download owner-uploaded photos and write as photographs + renditions.
+
+    Owner photos have source_systems=['intake_portal'] and are treated
+    with owner precedence (Ruling 1: owner outranks scraped).
+    Returns {photos_new, photos_existing, photos_failed}.
+    """
+    try:
+        sb = get_substrate()
+    except EnvironmentError:
+        return {"photos_new": 0, "photos_existing": 0, "photos_failed": 0}
+
+    photos_new = 0
+    photos_existing = 0
+    photos_failed = 0
+
+    with httpx.Client(timeout=30, follow_redirects=True) as client:
+        for url_entry in photo_urls:
+            url = url_entry if isinstance(url_entry, str) else (url_entry.get("url") if isinstance(url_entry, dict) else None)
+            if not url:
+                continue
+
+            try:
+                resp = client.get(url)
+                resp.raise_for_status()
+                img_bytes = resp.content
+                content_hash = hashlib.sha256(img_bytes).hexdigest()
+                pid = _photo_id(property_id, content_hash)
+
+                existing = sb.table("photographs").select("photo_id").eq("photo_id", pid).limit(1).execute()
+                if existing.data:
+                    photos_existing += 1
+                    continue
+
+                try:
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(img_bytes))
+                    width, height = img.width, img.height
+                except Exception:
+                    width, height = None, None
+
+                # Upload to staging R2
+                try:
+                    key = f"{property_id}/original/owner_{content_hash[:8]}.jpg"
+                    r2_url = skills_r2_upload(key, img_bytes, "image/jpeg")
+                except Exception:
+                    r2_url = url
+
+                sb.table("photographs").insert({
+                    "photo_id": pid,
+                    "property_id": property_id,
+                    "content_hash": content_hash,
+                    "source_urls": [url],
+                    "source_systems": ["intake_portal"],
+                    "is_canonical": True,
+                    "image_width": width,
+                    "image_height": height,
+                    "quality_tier": _quality_tier(width, height),
+                }).execute()
+
+                sb.table("renditions").insert({
+                    "photo_id": pid,
+                    "kind": "original",
+                    "storage_url": r2_url,
+                    "format": "jpg",
+                    "width": width,
+                    "height": height,
+                    "byte_size": len(img_bytes),
+                }).execute()
+
+                photos_new += 1
+                logger.info("[acquire_owner] Owner photo %s: %dx%d", content_hash[:8], width or 0, height or 0)
+
+            except Exception as exc:
+                logger.warning("[acquire_owner] Failed: %s — %s", str(url)[-40:], str(exc)[:60])
+                photos_failed += 1
+
+    if run_id and (photos_new > 0 or photos_failed > 0):
+        emit_cost(sb, run_id, property_id,
+                  vendor="supabase_storage", service="owner_photo_download",
+                  units=photos_new, unit_name="photos",
+                  unit_cost=0, total_cost=0,
+                  workflow_name="acquire_listing", generation_reason="owner_upload")
+
+    logger.info("[acquire_owner] Owner photos: %d new, %d existing, %d failed", photos_new, photos_existing, photos_failed)
+    return {"photos_new": photos_new, "photos_existing": photos_existing, "photos_failed": photos_failed}
+
+
 def acquire_listing(
     property_id: str,
     source_url: str,
@@ -151,12 +244,103 @@ def acquire_listing(
                 reason=f"Firecrawl scrape failed: {error_str[:200]}",
                 attempted=1, succeeded=0, failed_count=1, error_class="vendor",
             )
+    elif source_type == "airbnb":
+        try:
+            apify_token = require_env("APIFY_API_TOKEN", "Apify Airbnb scraping")
+            from agents.agent1.apify_scraper import _scrape_airbnb
+            from models.property import PropertyKnowledgeBase, DataSource
+            # Build minimal KB for the scraper
+            temp_kb = PropertyKnowledgeBase(property_id=property_id)
+            temp_kb = _scrape_airbnb(source_url, temp_kb)
+            # Extract photos and reviews
+            for p in temp_kb.photos:
+                photo_urls.append(p.url)
+            for r in temp_kb.guest_reviews:
+                if r.text:
+                    sb.table("guest_evidence").insert({
+                        "property_id": property_id,
+                        "written_text": r.text or "",
+                        "verbal_text": "",
+                        "reviewer_name": r.reviewer_name,
+                        "stay_date": r.stay_date,
+                        "source": "airbnb",
+                        "is_guest_book": False,
+                        "star_rating": r.star_rating,
+                    }).execute()
+            # Extract property fields
+            extracted_fields = {}
+            if temp_kb.name and temp_kb.name.value:
+                extracted_fields["property_name"] = temp_kb.name.value
+            if temp_kb.bedrooms and temp_kb.bedrooms.value:
+                extracted_fields["bedrooms"] = temp_kb.bedrooms.value
+            if temp_kb.bathrooms and temp_kb.bathrooms.value:
+                extracted_fields["bathrooms"] = temp_kb.bathrooms.value
+
+            apify_cost = 0.05
+            total_cost += apify_cost
+            emit_cost(sb, run_id, property_id,
+                      vendor="apify", service="airbnb_listing",
+                      units=1, unit_name="runs",
+                      unit_cost=0.05, total_cost=round(apify_cost, 4),
+                      workflow_name="acquire_listing", generation_reason="airbnb_scrape")
+            logger.info("[acquire] Airbnb: %d photos, %d reviews", len(photo_urls), len(temp_kb.guest_reviews))
+        except Exception as exc:
+            error_str = str(exc)
+            logger.error("[acquire] Airbnb scrape failed: %s", error_str[:120])
+            complete_step(sb, step_id, status="failed", error_message=error_str[:200])
+            complete_run(sb, run_id, status="failed")
+            return SkillResult.failed(
+                reason=f"Airbnb scrape failed: {error_str[:200]}",
+                attempted=1, succeeded=0, failed_count=1, error_class="vendor",
+            )
+
+    elif source_type == "vrbo":
+        try:
+            apify_token = require_env("APIFY_API_TOKEN", "Apify VRBO scraping")
+            from agents.agent1.apify_scraper import _scrape_vrbo
+            from models.property import PropertyKnowledgeBase, DataSource
+            temp_kb = PropertyKnowledgeBase(property_id=property_id)
+            temp_kb = _scrape_vrbo(source_url, temp_kb)
+            for p in temp_kb.photos:
+                photo_urls.append(p.url)
+            for r in temp_kb.guest_reviews:
+                if r.text:
+                    sb.table("guest_evidence").insert({
+                        "property_id": property_id,
+                        "written_text": r.text or "",
+                        "verbal_text": "",
+                        "reviewer_name": r.reviewer_name,
+                        "stay_date": r.stay_date,
+                        "source": "vrbo",
+                        "is_guest_book": False,
+                    }).execute()
+            extracted_fields = {}
+            if temp_kb.name and temp_kb.name.value:
+                extracted_fields["property_name"] = temp_kb.name.value
+
+            apify_cost = 0.05
+            total_cost += apify_cost
+            emit_cost(sb, run_id, property_id,
+                      vendor="apify", service="vrbo_listing",
+                      units=1, unit_name="runs",
+                      unit_cost=0.05, total_cost=round(apify_cost, 4),
+                      workflow_name="acquire_listing", generation_reason="vrbo_scrape")
+            logger.info("[acquire] VRBO: %d photos, %d reviews", len(photo_urls), len(temp_kb.guest_reviews))
+        except Exception as exc:
+            error_str = str(exc)
+            logger.error("[acquire] VRBO scrape failed: %s", error_str[:120])
+            complete_step(sb, step_id, status="failed", error_message=error_str[:200])
+            complete_run(sb, run_id, status="failed")
+            return SkillResult.failed(
+                reason=f"VRBO scrape failed: {error_str[:200]}",
+                attempted=1, succeeded=0, failed_count=1, error_class="vendor",
+            )
+
     else:
-        # Airbnb/VRBO — for now, return failed with guidance
-        complete_step(sb, step_id, status="failed", error_message=f"{source_type} scraping not yet ported to substrate")
+        complete_step(sb, step_id, status="failed", error_message=f"Unknown source type: {source_type}")
         complete_run(sb, run_id, status="failed")
         return SkillResult.failed(
-            reason=f"{source_type} scraping not yet ported. Use PMC URLs for now.",
+            reason=f"Unknown source type: {source_type}",
             attempted=0, succeeded=0, failed_count=0,
         )
 

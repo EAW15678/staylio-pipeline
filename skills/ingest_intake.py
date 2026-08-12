@@ -16,6 +16,7 @@ Usage:
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 
 from skills.contract import (
@@ -119,6 +120,30 @@ def ingest_intake(
                     prop_update["airbnb_url"] = url
                 elif "vrbo" in url_lower or "vacationrentals" in url_lower:
                     prop_update["vrbo_url"] = url
+
+    # Geocode city/state → lat/lng if coordinates are missing
+    city = prop_update.get("city") or _str("city")
+    state = prop_update.get("state_region") or _str("state")
+    if city and state:
+        # Check if lat/lng already set
+        current_prop = sb.table("properties").select("latitude, longitude").eq("id", property_id).limit(1).execute()
+        has_coords = current_prop.data and current_prop.data[0].get("latitude")
+        if not has_coords:
+            try:
+                import httpx
+                geocode_resp = httpx.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": f"{city}, {state}", "key": os.environ.get("GOOGLE_PLACES_API_KEY", "")},
+                    timeout=10,
+                )
+                geocode_data = geocode_resp.json()
+                if geocode_data.get("results"):
+                    loc = geocode_data["results"][0]["geometry"]["location"]
+                    prop_update["latitude"] = loc["lat"]
+                    prop_update["longitude"] = loc["lng"]
+                    logger.info("[ingest_intake] Geocoded %s, %s → %.4f, %.4f", city, state, loc["lat"], loc["lng"])
+            except Exception as exc:
+                logger.warning("[ingest_intake] Geocoding failed: %s", str(exc)[:80])
 
     if prop_update:
         sb.table("properties").update(prop_update).eq("id", property_id).execute()

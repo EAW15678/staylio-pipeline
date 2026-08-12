@@ -88,25 +88,45 @@ def onboard(
         )
 
     # ── 2. Acquire listing(s) ────────────────────────────────────────────
-    if source_urls:
-        for url in source_urls:
-            from skills.acquire_listing import acquire_listing
-            r = _run_skill(f"acquire_listing", acquire_listing, property_id, url, force=force)
-            if not r.is_ok and r.status != "held":
-                return SkillResult.failed(
-                    reason=f"Workflow halted at acquire_listing: {r.reason}",
-                )
-    else:
-        # Try to find source URLs from properties
+    # Multi-source: try all URLs, log failures but don't halt on individual sources.
+    # At least one source must succeed, or we halt.
+    acquire_urls = list(source_urls) if source_urls else []
+    if not acquire_urls:
         prop = sb.table("properties").select("primary_listing_url, airbnb_url, vrbo_url").eq("id", property_id).execute()
         if prop.data:
             p = prop.data[0]
-            urls_to_try = [u for u in [p.get("primary_listing_url"), p.get("airbnb_url"), p.get("vrbo_url")] if u]
-            for url in urls_to_try:
-                from skills.acquire_listing import acquire_listing
-                r = _run_skill("acquire_listing", acquire_listing, property_id, url, force=force)
-                if not r.is_ok and r.status != "held":
-                    return SkillResult.failed(reason=f"Workflow halted at acquire_listing: {r.reason}")
+            acquire_urls = [u for u in [p.get("primary_listing_url"), p.get("airbnb_url"), p.get("vrbo_url")] if u]
+
+    sources_succeeded = 0
+    sources_failed = 0
+    for url in acquire_urls:
+        from skills.acquire_listing import acquire_listing
+        r = _run_skill("acquire_listing", acquire_listing, property_id, url, force=force)
+        if r.is_ok:
+            sources_succeeded += 1
+        else:
+            sources_failed += 1
+            logger.warning("[onboard] acquire_listing failed for %s — continuing with other sources", url[:40])
+
+    # ── 2b. Owner photos ─────────────────────────────────────────────────
+    # Check for uploaded_photo_urls in intake answers
+    owner_answers = sb.table("intake_answers").select("answer_json").eq(
+        "property_id", property_id
+    ).eq("question_key", "uploaded_photo_urls").order("answered_at", desc=True).limit(1).execute()
+    if owner_answers.data:
+        owner_urls = owner_answers.data[0].get("answer_json") or []
+        if owner_urls:
+            from skills.acquire_listing import acquire_owner_photos
+            step_id = record_step(sb, run_id, "acquire_owner_photos")
+            owner_result = acquire_owner_photos(property_id, owner_urls, run_id=run_id)
+            complete_step(sb, step_id, status="complete", metadata={
+                "skill_status": "ok",
+                "photos_new": owner_result.get("photos_new", 0),
+                "photos_existing": owner_result.get("photos_existing", 0),
+            })
+            skills_run.append(("acquire_owner_photos", "ok", owner_result))
+            logger.info("[onboard] acquire_owner_photos → %d new, %d existing",
+                       owner_result.get("photos_new", 0), owner_result.get("photos_existing", 0))
 
     # ── 3. Enhance ───────────────────────────────────────────────────────
     from skills.enhance import enhance
