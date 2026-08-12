@@ -578,14 +578,15 @@ class SubstrateOnboardRequest(BaseModel):
 
 
 @app.post("/substrate/onboard")
-async def substrate_onboard(
+def substrate_onboard(
     request: SubstrateOnboardRequest,
     x_portal_secret: str | None = Header(default=None),
 ):
     """Run the substrate onboard workflow (skills-based pipeline).
 
     Requires X-Portal-Secret header matching PORTAL_API_SECRET.
-    Synchronous — returns when all skills complete.
+    Synchronous def (not async) — FastAPI runs it in a threadpool so
+    the blocking Supabase/httpx calls don't stall the event loop.
     Use force=False to converge (noops on completed work).
     """
     if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
@@ -599,10 +600,9 @@ async def substrate_onboard(
             "data": result.data,
             "reason": result.reason,
         }
-    except BaseException as exc:
+    except Exception as exc:
         import traceback
-        tb = traceback.format_exc()
-        logger.error(f"Substrate onboard failed: {tb}")
+        logger.error(f"Substrate onboard failed: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {str(exc)[:500]}")
 
 
