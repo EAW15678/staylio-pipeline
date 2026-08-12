@@ -474,8 +474,8 @@ def build_landing_page_html(
   <!-- ── LOCAL AREA GUIDE ─────────────────────────────────────────── -->
   {_build_local_guide_section(area_introduction, dont_miss_picks, primary_recs, location_str) if (area_introduction or primary_recs) else ""}
 
-  <!-- ── SURROUNDING AREAS ────────────────────────────────────────── -->
-  {_build_surrounding_areas_section(kb.get("surround_areas")) if kb.get("surround_areas") else ""}
+  <!-- surround_areas removed (Erick ruling FIX-4): inert cards, no guest value.
+       surround_areas is now a guide search parameter, not a rendered section. -->
 
   <!-- ── OWNER STORY ───────────────────────────────────────────────── -->
   {_build_owner_story_section(owner_story) if owner_story else ""}
@@ -1940,31 +1940,9 @@ def _build_local_guide_section(
   </section>"""
 
 
-def _build_surrounding_areas_section(surround_areas: str) -> str:
-    """Render the Explore Surrounding Areas section from owner's area list."""
-    if not surround_areas:
-        return ""
-    # Parse newline or comma-separated areas
-    import re
-    areas = [a.strip() for a in re.split(r"[\n,]+", surround_areas) if a.strip()]
-    if not areas:
-        return ""
-
-    cards = ""
-    for area in areas:
-        cards += f"""
-        <div class="surround-card">
-          <h3>{_esc(area)}</h3>
-        </div>"""
-
-    return f"""
-  <section class="surrounding-areas" id="surrounding-areas">
-    <div class="container">
-      <h2>Explore the Surrounding Areas</h2>
-      <div class="surround-grid">{cards}
-      </div>
-    </div>
-  </section>"""
+## _build_surrounding_areas_section REMOVED (Erick ruling FIX-4):
+# Inert cards with no guest value; comma-splitting rendered "NC" as a standalone card.
+# surround_areas is now a guide search parameter — see build_guide.py:parse_search_anchors.
 
 
 def _build_owner_story_section(story: str) -> str:
@@ -2717,11 +2695,7 @@ def _page_css() -> str:
     .story-text { max-width: 680px; }
     .story-text p { font-size: 1.05rem; line-height: 1.85; color: #444; }
 
-    /* Surrounding Areas */
-    .surround-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-                     gap: 1rem; }
-    .surround-card { padding: 1.25rem; border: 1px solid #e8e8e4; text-align: center; }
-    .surround-card h3 { font-family: var(--font-serif); font-size: 1.1rem; font-weight: 400; }
+    /* Surrounding Areas — REMOVED (FIX-4) */
 
     /* FAQs */
     .faq-list { max-width: 720px; }

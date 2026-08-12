@@ -14,6 +14,9 @@ Usage:
 import json
 import logging
 import os
+import re
+
+import httpx
 
 from skills.contract import (
     SkillResult, get_substrate, require_env,
@@ -21,6 +24,70 @@ from skills.contract import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def parse_search_anchors(surround_areas: str) -> list:
+    """Parse owner's surround_areas into named search anchors.
+
+    Splits on NEWLINES and SLASHES only — NOT commas.
+    "Carolina Beach, NC" is ONE place; "Wilmington / Southport" is TWO.
+
+    Returns a list of non-empty stripped strings.
+    """
+    if not surround_areas:
+        return []
+    # Split on newlines and slashes, preserve commas (city, state pairs)
+    parts = re.split(r"[\n/]+", surround_areas)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def geocode_anchors(anchors: list, api_key: str) -> list:
+    """Geocode each named anchor to (lat, lng, name).
+
+    Returns list of {"name": str, "lat": float, "lng": float} dicts.
+    Anchors that fail geocoding are silently dropped.
+    """
+    results = []
+    if not api_key:
+        return results
+    with httpx.Client(timeout=10) as client:
+        for anchor in anchors:
+            try:
+                resp = client.get(
+                    "https://maps.googleapis.com/maps/api/geocode/json",
+                    params={"address": anchor, "key": api_key},
+                )
+                data = resp.json()
+                if data.get("results"):
+                    loc = data["results"][0]["geometry"]["location"]
+                    results.append({
+                        "name": anchor,
+                        "lat": loc["lat"],
+                        "lng": loc["lng"],
+                    })
+            except Exception as exc:
+                logger.warning("[build_guide] Geocode failed for '%s': %s", anchor, str(exc)[:60])
+    return results
+
+
+def merge_venues_by_place_id(venue_lists: list) -> list:
+    """Merge multiple venue lists, deduplicating by place_id.
+
+    Each venue_list is a list of dicts with at least a 'place_id' key.
+    First occurrence wins. Each venue gets an 'anchor_area' label from
+    whichever list contributed it.
+    """
+    seen = set()
+    merged = []
+    for area_name, venues in venue_lists:
+        for venue in venues:
+            pid = venue.get("place_id") or venue.get("name", "")
+            if pid in seen:
+                continue
+            seen.add(pid)
+            venue["anchor_area"] = area_name
+            merged.append(venue)
+    return merged
 
 
 def build_guide(
@@ -101,21 +168,53 @@ def build_guide(
         from agents.agent4.google_places import fetch_local_places
         from agents.agent4.guide_assembler import assemble_local_guide
 
-        # Fetch places from Google
+        # ── Load surround_areas for additional search anchors ────────────
+        ctx_resp = sb.table("owner_context").select("surround_areas").eq(
+            "property_id", property_id
+        ).is_("superseded_at", "null").order("version", desc=True).limit(1).execute()
+        surround_areas = ""
+        if ctx_resp.data:
+            surround_areas = ctx_resp.data[0].get("surround_areas") or ""
+
+        anchors = parse_search_anchors(surround_areas)
+        if anchors:
+            logger.info("[build_guide] Search anchors from surround_areas: %s", anchors)
+
+        # ── Fetch places from Google — primary coordinate + anchor coordinates
         google_places = []
+        venue_lists = []
+
         if places_key and lat and lng:
             try:
-                google_places = fetch_local_places(float(lat), float(lng))
-                logger.info("[build_guide] Google Places returned %d venues", len(google_places))
-                places_cost = 0.04
-                total_cost += places_cost
-                emit_cost(sb, run_id, property_id,
-                          vendor="google_places", service="nearby_search",
-                          units=len(google_places), unit_name="venues",
-                          unit_cost=None, total_cost=round(places_cost, 4),
-                          workflow_name="build_guide", generation_reason="venue_discovery")
+                primary_venues = fetch_local_places(float(lat), float(lng))
+                venue_lists.append((city or "Primary", primary_venues))
+                logger.info("[build_guide] Google Places (primary): %d venues", len(primary_venues))
             except Exception as exc:
-                logger.warning("[build_guide] Google Places failed: %s", str(exc)[:120])
+                logger.warning("[build_guide] Google Places (primary) failed: %s", str(exc)[:120])
+
+            # Search around each anchor coordinate
+            if anchors:
+                geocoded = geocode_anchors(anchors, places_key)
+                for anchor in geocoded:
+                    try:
+                        anchor_venues = fetch_local_places(anchor["lat"], anchor["lng"])
+                        venue_lists.append((anchor["name"], anchor_venues))
+                        logger.info("[build_guide] Google Places (%s): %d venues", anchor["name"], len(anchor_venues))
+                    except Exception as exc:
+                        logger.warning("[build_guide] Google Places (%s) failed: %s", anchor["name"], str(exc)[:80])
+
+            # Merge + dedupe by place_id
+            if venue_lists:
+                google_places = merge_venues_by_place_id(venue_lists)
+                logger.info("[build_guide] Merged venues: %d total (deduped by place_id)", len(google_places))
+
+            places_cost = 0.04 * max(1, len(venue_lists))
+            total_cost += places_cost
+            emit_cost(sb, run_id, property_id,
+                      vendor="google_places", service="nearby_search",
+                      units=len(google_places), unit_name="venues",
+                      unit_cost=None, total_cost=round(places_cost, 4),
+                      workflow_name="build_guide", generation_reason="venue_discovery")
         else:
             logger.info("[build_guide] No Google Places API key or no coordinates — skipping venue discovery")
 
