@@ -251,7 +251,7 @@ def acquire_listing(
             from models.property import PropertyKnowledgeBase, DataSource
             # Build minimal KB for the scraper
             temp_kb = PropertyKnowledgeBase(property_id=property_id)
-            temp_kb = _scrape_airbnb(source_url, temp_kb)
+            temp_kb = _scrape_airbnb(source_url, temp_kb, scrape_reviews=True)
             # Extract photos and reviews
             for p in temp_kb.photos:
                 photo_urls.append(p.url)
@@ -300,7 +300,7 @@ def acquire_listing(
             from agents.agent1.apify_scraper import _scrape_vrbo
             from models.property import PropertyKnowledgeBase, DataSource
             temp_kb = PropertyKnowledgeBase(property_id=property_id)
-            temp_kb = _scrape_vrbo(source_url, temp_kb)
+            temp_kb = _scrape_vrbo(source_url, temp_kb, scrape_reviews=True)
             for p in temp_kb.photos:
                 photo_urls.append(p.url)
             for r in temp_kb.guest_reviews:

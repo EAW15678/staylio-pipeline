@@ -107,8 +107,8 @@ class PropertyKnowledgeBase:
 
     # ── Identity ─────────────────────────────────────────────
     property_id: str               # UUID, assigned at intake submission
-    client_id: str                 # PMC or IO client UUID
-    client_channel: ClientChannel
+    client_id: str = ""            # PMC or IO client UUID (optional for substrate skills)
+    client_channel: ClientChannel = ClientChannel.IO
 
     # ── Core Property Data ───────────────────────────────────
     name: Optional[PropertyField] = None
