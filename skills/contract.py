@@ -244,22 +244,72 @@ def skills_r2_upload(key: str, data: bytes, content_type: str = "image/jpeg") ->
     return url
 
 
-def escalate_billing(sb, property_id: str, vendor: str, error_message: str):
-    """Ruling 6: billing/auth errors write exactly one hitl_queue_items row and stop.
-    No retry. Human must fix the billing issue before the skill can run.
+def escalate_halt(
+    sb,
+    property_id: str,
+    queue_type: str,
+    reason_code: str,
+    title: str,
+    detail: str,
+    *,
+    property_name: str = None,
+    run_id: str = None,
+    step_name: str = None,
+    extra_payload: dict = None,
+):
+    """Write a halt-class hitl_queue_items row AND send an email alert.
+
+    Ruling 3-R: halt class = billing/auth, slug collision, zero-photo,
+    unresolvable, cross-property contamination, legal-risk compliance.
+    Quality annotations (needs_review) do NOT trigger alerts.
     """
-    sb.table("hitl_queue_items").insert({
+    payload = extra_payload or {}
+    payload["detail"] = detail[:500]
+
+    result = sb.table("hitl_queue_items").insert({
         "property_id": property_id,
-        "queue_type": "billing_error",
-        "reason_code": f"{vendor}_billing",
-        "title": f"{vendor} billing error — credits depleted or auth invalid",
-        "description": error_message[:500],
+        "queue_type": queue_type,
+        "reason_code": reason_code,
+        "title": title,
+        "description": detail[:500],
         "priority": "urgent",
         "status": "pending",
-        "payload": json.dumps({"vendor": vendor, "error": error_message[:200]}),
+        "payload": json.dumps(payload),
         "created_by_type": "agent",
     }).execute()
-    logger.warning(
-        "[contract] Billing escalation: vendor=%s property=%s — hitl_queue_items row created",
-        vendor, property_id[:12],
+
+    hitl_row_id = result.data[0]["id"] if result.data else None
+    logger.warning("[contract] HALT escalation: %s — %s (hitl=%s)",
+                   queue_type, title[:60], hitl_row_id[:12] if hitl_row_id else "?")
+
+    # Send email alert
+    if hitl_row_id:
+        try:
+            from skills.notify import send_halt_alert
+            send_halt_alert(
+                sb, hitl_row_id, property_id,
+                property_name=property_name or property_id[:12],
+                error_class=reason_code,
+                detail=detail,
+                run_id=run_id,
+                step_name=step_name,
+            )
+        except Exception as exc:
+            logger.warning("[contract] Alert send failed: %s", str(exc)[:80])
+
+    return hitl_row_id
+
+
+def escalate_billing(sb, property_id: str, vendor: str, error_message: str,
+                     run_id: str = None, step_name: str = None):
+    """Convenience wrapper for billing/auth halts."""
+    return escalate_halt(
+        sb, property_id,
+        queue_type="billing_error",
+        reason_code=f"{vendor}_billing",
+        title=f"{vendor} billing error — credits depleted or auth invalid",
+        detail=error_message[:500],
+        extra_payload={"vendor": vendor},
+        run_id=run_id,
+        step_name=step_name,
     )

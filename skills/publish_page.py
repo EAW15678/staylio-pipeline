@@ -91,18 +91,16 @@ def publish_page(
     # ── Slug collision check (Ruling 3-R) ────────────────────────────────
     collision = sb.table("properties").select("id").eq("slug", slug).neq("id", property_id).execute()
     if collision.data:
-        from skills.contract import escalate_billing  # reuse for urgent hitl
-        sb.table("hitl_queue_items").insert({
-            "property_id": property_id,
-            "queue_type": "publish_halt",
-            "reason_code": "slug_collision",
-            "title": f"Slug '{slug}' collides with property {collision.data[0]['id'][:12]}",
-            "description": f"Cannot publish — slug '{slug}' is already owned by another property.",
-            "priority": "urgent",
-            "status": "pending",
-            "payload": json.dumps({"slug": slug, "colliding_property": collision.data[0]["id"]}),
-            "created_by_type": "agent",
-        }).execute()
+        from skills.contract import escalate_halt
+        escalate_halt(
+            sb, property_id,
+            queue_type="publish_halt",
+            reason_code="slug_collision",
+            title=f"Slug '{slug}' collides with property {collision.data[0]['id'][:12]}",
+            detail=f"Cannot publish — slug '{slug}' is already owned by another property.",
+            property_name=prop.get("name"),
+            extra_payload={"slug": slug, "colliding_property": collision.data[0]["id"]},
+        )
         return SkillResult.failed(
             reason=f"Slug collision: '{slug}' owned by {collision.data[0]['id'][:12]}",
             attempted=1, succeeded=0, failed_count=1,
@@ -143,15 +141,12 @@ def publish_page(
 
     # ── Ruling 3-R halt checks ───────────────────────────────────────────
     if photo_count == 0:
-        sb.table("hitl_queue_items").insert({
-            "property_id": property_id,
-            "queue_type": "publish_halt",
-            "reason_code": "zero_photos",
-            "title": f"Cannot publish — property has 0 photos",
-            "priority": "urgent",
-            "status": "pending",
-            "created_by_type": "agent",
-        }).execute()
+        from skills.contract import escalate_halt
+        escalate_halt(sb, property_id,
+            queue_type="publish_halt", reason_code="zero_photos",
+            title="Cannot publish — property has 0 photos",
+            detail="The property has no photographs. Cannot build a landing page.",
+            property_name=prop.get("name"), run_id=run_id, step_name="publish_page")
         complete_step(sb, step_id, status="failed", error_message="Zero photos")
         complete_run(sb, run_id, status="failed")
         return SkillResult.failed(
@@ -161,16 +156,13 @@ def publish_page(
         )
 
     if unresolvable > 0:
-        sb.table("hitl_queue_items").insert({
-            "property_id": property_id,
-            "queue_type": "publish_halt",
-            "reason_code": "unresolvable_photos",
-            "title": f"{unresolvable} photos could not be resolved",
-            "priority": "urgent",
-            "status": "pending",
-            "payload": json.dumps({"unresolvable": unresolvable}),
-            "created_by_type": "agent",
-        }).execute()
+        from skills.contract import escalate_halt
+        escalate_halt(sb, property_id,
+            queue_type="publish_halt", reason_code="unresolvable_photos",
+            title=f"{unresolvable} photos could not be resolved",
+            detail=f"{unresolvable} photographs have no rendition URL and cannot be displayed.",
+            property_name=prop.get("name"), run_id=run_id, step_name="publish_page",
+            extra_payload={"unresolvable": unresolvable})
         complete_step(sb, step_id, status="failed", error_message=f"{unresolvable} unresolvable photos")
         complete_run(sb, run_id, status="failed")
         return SkillResult.failed(
