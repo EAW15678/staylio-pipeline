@@ -64,9 +64,10 @@ def observe(
         return SkillResult.failed(str(e))
 
     # ── Load photographs + renditions from substrate ───────────────────
+    # Only observe canonical photographs (post-dedupe).
     query = sb.table("photographs").select(
         "photo_id, property_id, content_hash, image_width, image_height"
-    ).eq("property_id", property_id)
+    ).eq("property_id", property_id).eq("is_canonical", True)
     if photo_ids:
         query = query.in_("photo_id", photo_ids)
     photos_resp = query.limit(max_photos).execute()

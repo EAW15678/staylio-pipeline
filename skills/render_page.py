@@ -109,9 +109,10 @@ def render_page(property_id: str) -> SkillResult:
         content_package = copy_resp.data[0].get("content") or {}
 
     # ── Load photographs + renditions + observations → visual_media ──────
+    # Only render canonical photographs (post-dedupe).
     photos_resp = sb.table("photographs").select(
         "photo_id, content_hash, phash, is_canonical, image_width, image_height"
-    ).eq("property_id", property_id).execute()
+    ).eq("property_id", property_id).eq("is_canonical", True).execute()
     photos = photos_resp.data or []
 
     # Get enhanced renditions for each photo

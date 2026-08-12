@@ -74,9 +74,11 @@ def enhance(
         return SkillResult.failed(str(e))
 
     # ── Load photographs needing enhancement ─────────────────────────────
+    # G27b: enhance operates on CANONICALS ONLY, after dedupe.
+    # Never enhance a photograph a cluster is about to demote.
     query = sb.table("photographs").select(
         "photo_id, image_width, image_height, quality_tier, phash"
-    ).eq("property_id", property_id)
+    ).eq("property_id", property_id).eq("is_canonical", True)
     if photo_ids:
         query = query.in_("photo_id", photo_ids)
     photos_resp = query.execute()
