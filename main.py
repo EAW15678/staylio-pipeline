@@ -578,12 +578,19 @@ class SubstrateOnboardRequest(BaseModel):
 
 
 @app.post("/substrate/onboard")
-async def substrate_onboard(request: SubstrateOnboardRequest):
+async def substrate_onboard(
+    request: SubstrateOnboardRequest,
+    x_portal_secret: str | None = Header(default=None),
+):
     """Run the substrate onboard workflow (skills-based pipeline).
 
+    Requires X-Portal-Secret header matching PORTAL_API_SECRET.
     Synchronous — returns when all skills complete.
     Use force=False to converge (noops on completed work).
     """
+    if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+
     try:
         from workflows.onboard import onboard
         result = onboard(request.property_id, force=request.force)
