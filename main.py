@@ -213,7 +213,7 @@ def root():
         "service": "Staylio.ai Pipeline",
         "version": "2.0.0",
         "status": "running",
-        "endpoints": ["/health", "/intake", "/run", "/preview", "/status/{property_id}"],
+        "endpoints": ["/health", "/intake", "/run", "/substrate/onboard", "/preview", "/status/{property_id}"],
     }
 
 
@@ -569,6 +569,31 @@ async def intake_submission(
         raise
     except Exception as exc:
         logger.error(f"Intake submission failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class SubstrateOnboardRequest(BaseModel):
+    property_id: str
+    force: bool = False
+
+
+@app.post("/substrate/onboard")
+async def substrate_onboard(request: SubstrateOnboardRequest):
+    """Run the substrate onboard workflow (skills-based pipeline).
+
+    Synchronous — returns when all skills complete.
+    Use force=False to converge (noops on completed work).
+    """
+    try:
+        from workflows.onboard import onboard
+        result = onboard(request.property_id, force=request.force)
+        return {
+            "status": result.status,
+            "data": result.data,
+            "reason": result.reason,
+        }
+    except Exception as exc:
+        logger.error(f"Substrate onboard failed: {exc}")
         raise HTTPException(status_code=500, detail=str(exc))
 
 
