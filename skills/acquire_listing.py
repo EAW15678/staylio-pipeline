@@ -276,12 +276,12 @@ def acquire_listing(
             if temp_kb.bathrooms and temp_kb.bathrooms.value:
                 extracted_fields["bathrooms"] = temp_kb.bathrooms.value
 
-            apify_cost = 0.05
+            apify_cost = 0.004  # measured: $0.003-0.004/run
             total_cost += apify_cost
             emit_cost(sb, run_id, property_id,
                       vendor="apify", service="airbnb_listing",
                       units=1, unit_name="runs",
-                      unit_cost=0.05, total_cost=round(apify_cost, 4),
+                      unit_cost=0.004, total_cost=round(apify_cost, 4),
                       workflow_name="acquire_listing", generation_reason="airbnb_scrape")
             logger.info("[acquire] Airbnb: %d photos, %d reviews", len(photo_urls), len(temp_kb.guest_reviews))
         except Exception as exc:
@@ -318,12 +318,12 @@ def acquire_listing(
             if temp_kb.name and temp_kb.name.value:
                 extracted_fields["property_name"] = temp_kb.name.value
 
-            apify_cost = 0.05
+            apify_cost = 0.105  # measured: $0.10-0.12/run
             total_cost += apify_cost
             emit_cost(sb, run_id, property_id,
                       vendor="apify", service="vrbo_listing",
                       units=1, unit_name="runs",
-                      unit_cost=0.05, total_cost=round(apify_cost, 4),
+                      unit_cost=0.105, total_cost=round(apify_cost, 4),
                       workflow_name="acquire_listing", generation_reason="vrbo_scrape")
             logger.info("[acquire] VRBO: %d photos, %d reviews", len(photo_urls), len(temp_kb.guest_reviews))
         except Exception as exc:

@@ -169,7 +169,7 @@ def complete_step(sb, step_id: str, status: str = "complete",
     if error_message:
         update["error_message"] = error_message
     if metadata:
-        update["metadata"] = json.dumps(metadata)
+        update["metadata"] = metadata
     sb.table("run_steps").update(update).eq("step_id", step_id).execute()
 
 
@@ -266,16 +266,25 @@ def escalate_halt(
     payload = extra_payload or {}
     payload["detail"] = detail[:500]
 
+    # Look up account_id from the property
+    account_id = None
+    try:
+        prop = sb.table("properties").select("account_id").eq("id", property_id).limit(1).execute()
+        if prop.data:
+            account_id = prop.data[0].get("account_id")
+    except Exception:
+        pass
+
     result = sb.table("hitl_queue_items").insert({
         "property_id": property_id,
+        "account_id": account_id,
         "queue_type": queue_type,
         "reason_code": reason_code,
         "title": title,
         "description": detail[:500],
         "priority": "urgent",
         "status": "pending",
-        "payload": json.dumps(payload),
-        "created_by_type": "agent",
+        "payload": payload,
     }).execute()
 
     hitl_row_id = result.data[0]["id"] if result.data else None

@@ -162,7 +162,7 @@ def _mark_alert_sent(sb, hitl_row_id: str, message_id: str):
         payload["alert_sent"] = True
         payload["alert_message_id"] = message_id
         sb.table("hitl_queue_items").update(
-            {"payload": json.dumps(payload)}
+            {"payload": payload}
         ).eq("id", hitl_row_id).execute()
     except Exception as exc:
         logger.warning("[notify] Could not mark alert_sent on hitl row: %s", str(exc)[:80])
@@ -182,7 +182,7 @@ def _mark_alert_failed(sb, hitl_row_id: str, error: str):
         payload["alert_sent"] = False
         payload["alert_error"] = error[:200]
         sb.table("hitl_queue_items").update(
-            {"payload": json.dumps(payload)}
+            {"payload": payload}
         ).eq("id", hitl_row_id).execute()
     except Exception as exc:
         logger.warning("[notify] Could not mark alert_error on hitl row: %s", str(exc)[:80])
