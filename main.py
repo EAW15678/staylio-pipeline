@@ -577,6 +577,27 @@ class SubstrateOnboardRequest(BaseModel):
     force: bool = False
 
 
+@app.get("/substrate/test")
+def substrate_test(x_portal_secret: str | None = Header(default=None)):
+    """Diagnostic: test Supabase connectivity without running the workflow."""
+    if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+    steps = []
+    try:
+        steps.append("import_start")
+        from skills.contract import get_substrate
+        steps.append("import_ok")
+        sb = get_substrate()
+        steps.append("client_ok")
+        result = sb.table("properties").select("id").limit(1).execute()
+        steps.append(f"query_ok:rows={len(result.data or [])}")
+        return {"steps": steps, "status": "ok"}
+    except Exception as exc:
+        import traceback
+        return {"steps": steps, "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                "traceback": traceback.format_exc()[-500:]}
+
+
 @app.post("/substrate/onboard")
 def substrate_onboard(
     request: SubstrateOnboardRequest,
