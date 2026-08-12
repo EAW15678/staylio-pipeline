@@ -105,24 +105,17 @@ def get_substrate():
             "Skills read/write ONLY from the substrate (staging Supabase). "
             "No Redis, no production database."
         )
-    from supabase import create_client, ClientOptions
+    # Force HTTP/1.1 globally — Railway's Python 3.13 + httpx HTTP/2
+    # causes StreamReset errors against Supabase PostgREST.
     import httpx
-    # Force HTTP/1.1 — Railway's Python 3.13 + httpx HTTP/2 causes
-    # StreamReset errors against Supabase PostgREST.
-    _staging_client = create_client(url, key, options=ClientOptions(
-        postgrest_client_timeout=30,
-    ))
-    # Patch the underlying httpx client to disable HTTP/2
-    if hasattr(_staging_client, 'postgrest'):
-        pg = _staging_client.postgrest
-        if hasattr(pg, 'session') and hasattr(pg.session, '_client'):
-            old_client = pg.session._client
-            pg.session._client = httpx.Client(
-                base_url=str(old_client.base_url),
-                headers=dict(old_client.headers),
-                timeout=30,
-                http2=False,
-            )
+    _orig_client_init = httpx.Client.__init__
+    def _patched_client_init(self, *args, **kwargs):
+        kwargs['http2'] = False
+        _orig_client_init(self, *args, **kwargs)
+    httpx.Client.__init__ = _patched_client_init
+
+    from supabase import create_client
+    _staging_client = create_client(url, key)
     return _staging_client
 
 
