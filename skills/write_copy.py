@@ -110,6 +110,8 @@ def write_copy(
             kb["neighborhood_description"] = _pf(ctx["area_vibe"])
         if ctx.get("dont_miss"):
             kb["dont_miss"] = ctx["dont_miss"]
+        if ctx.get("surround_areas"):
+            kb["surround_areas"] = ctx["surround_areas"]
 
     # Load guest evidence
     ev_resp = sb.table("guest_evidence").select("*").eq("property_id", property_id).execute()

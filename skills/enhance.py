@@ -129,29 +129,16 @@ def enhance(
             skipped_low_res += 1
             continue
 
-        # High-res skip: photos already above threshold don't need Claid
+        # High-res skip: photos already above threshold don't need Claid.
+        # NO enhanced rendition written — render_page falls back to original.
+        # The skip decision is recorded in run_step metadata, not as a fake row.
         if w > 0 and h > 0:
             mp = (w * h) / 1_000_000
             if mp >= SKIP_ENHANCE_MEGAPIXELS:
-                # Promote original as enhanced rendition (no Claid spend)
-                orig_for_promote = sb.table("renditions").select("storage_url, width, height, byte_size").eq(
-                    "photo_id", pid
-                ).eq("kind", "original").limit(1).execute()
-                if orig_for_promote.data:
-                    o = orig_for_promote.data[0]
-                    sb.table("renditions").upsert({
-                        "photo_id": pid,
-                        "kind": "enhanced",
-                        "storage_url": o["storage_url"],
-                        "format": "jpg",
-                        "width": o.get("width"),
-                        "height": o.get("height"),
-                        "byte_size": o.get("byte_size"),
-                    }, on_conflict="photo_id,kind,format").execute()
-                    skipped_high_res += 1
-                    logger.info("[enhance] Promoting original as enhanced for %s: %.1fMP (≥%.1fMP threshold)",
-                               pid[:8], mp, SKIP_ENHANCE_MEGAPIXELS)
-                    continue
+                skipped_high_res += 1
+                logger.info("[enhance] Skipping %s: %.1fMP ≥ %.1fMP threshold — original is display rendition",
+                           pid[:8], mp, SKIP_ENHANCE_MEGAPIXELS)
+                continue
 
         # Get original rendition URL
         orig = sb.table("renditions").select("storage_url").eq(
@@ -224,7 +211,16 @@ def enhance(
                     "byte_size": len(enhanced_bytes),
                 }, on_conflict="photo_id,kind,format").execute()
 
-                claid_cost = 0.012
+                # Claid cost: 1 adjustment + MP-tiered upscale = 2-4 credits
+                # at $0.059/credit. Tiers: 0-4MP = 2 credits, 4-9MP = 3, 9-36MP = 4.
+                input_mp = (w * h) / 1_000_000 if w and h else 1.0
+                if input_mp >= 9:
+                    claid_credits = 4
+                elif input_mp >= 4:
+                    claid_credits = 3
+                else:
+                    claid_credits = 2
+                claid_cost = claid_credits * 0.059
                 total_cost += claid_cost
                 emit_cost(sb, run_id, property_id,
                           vendor="claid", service="enhance",
