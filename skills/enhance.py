@@ -35,6 +35,17 @@ logger = logging.getLogger(__name__)
 # produces upscaling artifacts and wastes money
 MIN_ENHANCE_DIMENSION = 200
 
+# Photos at or above this resolution are already high quality.
+# Skip Claid and promote original as the display rendition.
+# Pending Erick's ruling on the exact bar; 2MP (e.g. 1920x1080) is
+# the proposed threshold — Claid improves sub-2MP photos meaningfully
+# but adds minimal value to already-high-res images.
+# Credit projection: at 2MP threshold, Vista Azule's 7 owner photos
+# (5712x4284 = 24.5MP) would skip → saves 7 × $0.012 = $0.084/property.
+# At 0.5MP threshold, even PMC scrapes would skip → saves more but
+# may miss genuine quality improvement on medium-res photos.
+SKIP_ENHANCE_MEGAPIXELS = 2.0  # Pending Erick's ruling
+
 
 def enhance(
     property_id: str,
@@ -102,6 +113,7 @@ def enhance(
 
     enhanced_count = 0
     skipped_low_res = 0
+    skipped_high_res = 0
     phash_computed = 0
     failed_count = 0
     total_cost = 0.0
@@ -116,6 +128,30 @@ def enhance(
             logger.info("[enhance] Skipping %s: %dx%d below minimum %dpx", pid[:8], w, h, MIN_ENHANCE_DIMENSION)
             skipped_low_res += 1
             continue
+
+        # High-res skip: photos already above threshold don't need Claid
+        if w > 0 and h > 0:
+            mp = (w * h) / 1_000_000
+            if mp >= SKIP_ENHANCE_MEGAPIXELS:
+                # Promote original as enhanced rendition (no Claid spend)
+                orig_for_promote = sb.table("renditions").select("storage_url, width, height, byte_size").eq(
+                    "photo_id", pid
+                ).eq("kind", "original").limit(1).execute()
+                if orig_for_promote.data:
+                    o = orig_for_promote.data[0]
+                    sb.table("renditions").upsert({
+                        "photo_id": pid,
+                        "kind": "enhanced",
+                        "storage_url": o["storage_url"],
+                        "format": "jpg",
+                        "width": o.get("width"),
+                        "height": o.get("height"),
+                        "byte_size": o.get("byte_size"),
+                    }, on_conflict="photo_id,kind,format").execute()
+                    skipped_high_res += 1
+                    logger.info("[enhance] Promoting original as enhanced for %s: %.1fMP (≥%.1fMP threshold)",
+                               pid[:8], mp, SKIP_ENHANCE_MEGAPIXELS)
+                    continue
 
         # Get original rendition URL
         orig = sb.table("renditions").select("storage_url").eq(
@@ -222,7 +258,7 @@ def enhance(
     complete_step(sb, step_id, status="complete", metadata={
         "enhanced": enhanced_count,
         "skipped_existing": already_enhanced,
-        "skipped_low_res": skipped_low_res,
+        "skipped_low_res": skipped_low_res, "skipped_high_res": skipped_high_res,
         "phash_computed": phash_computed,
         "failed": failed_count,
         "cost_usd": round(total_cost, 4),
@@ -232,7 +268,7 @@ def enhance(
     return SkillResult.ok({
         "enhanced": enhanced_count,
         "skipped_existing": already_enhanced,
-        "skipped_low_res": skipped_low_res,
+        "skipped_low_res": skipped_low_res, "skipped_high_res": skipped_high_res,
         "phash_computed": phash_computed,
         "failed": failed_count,
         "cost_usd": round(total_cost, 4),

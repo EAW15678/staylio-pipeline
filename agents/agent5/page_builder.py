@@ -468,6 +468,9 @@ def build_landing_page_html(
   <!-- ── AMENITIES ─────────────────────────────────────────────────── -->
   {_build_amenities_section(amenity_highlights) if amenity_highlights else ""}
 
+  <!-- ── GOOD TO KNOW ─────────────────────────────────────────────── -->
+  {_build_good_to_know_section(kb.get("arrival_info"), kb.get("extra_notes")) if kb.get("arrival_info") else ""}
+
   <!-- ── LOCAL AREA GUIDE ─────────────────────────────────────────── -->
   {_build_local_guide_section(area_introduction, dont_miss_picks, primary_recs, location_str) if (area_introduction or primary_recs) else ""}
 
@@ -1856,6 +1859,24 @@ def _build_amenities_section(amenity_highlights: dict) -> str:
       <h2>Amenities</h2>
       <div class="amenities-grid">{items}
       </div>
+    </div>
+  </section>"""
+
+
+def _build_good_to_know_section(arrival_info: str, extra_notes: str = None) -> str:
+    """Render the Good to Know section — practical arrival and property details from the owner."""
+    if not arrival_info:
+        return ""
+
+    items_html = f'<p class="story-text">{_esc(arrival_info)}</p>'
+    if extra_notes:
+        items_html += f'\n      <p class="story-text" style="margin-top: 1rem;">{_esc(extra_notes)}</p>'
+
+    return f"""
+  <section class="good-to-know" id="good-to-know">
+    <div class="container">
+      <h2>Good to Know</h2>
+      {items_html}
     </div>
   </section>"""
 

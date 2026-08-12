@@ -74,6 +74,10 @@ def render_page(property_id: str) -> SkillResult:
         kb["wow_factor"] = ctx.get("wow_factor")
         kb["hidden_gems"] = ctx.get("hidden_gems")
         kb["seasonal_notes"] = ctx.get("seasonal_notes")
+        kb["arrival_info"] = ctx.get("arrival_info")
+        kb["extra_notes"] = ctx.get("extra_notes")
+        kb["dont_miss"] = ctx.get("dont_miss")
+        kb["surround_areas"] = ctx.get("surround_areas")
         if ctx.get("area_vibe"):
             kb["neighborhood_description"] = {"value": ctx["area_vibe"]}
 
@@ -195,6 +199,22 @@ def render_page(property_id: str) -> SkillResult:
             "primary_recommendations": g.get("primary_recommendations") or [],
             "dont_miss_picks": g.get("dont_miss_picks") or [],
         }
+
+    # Wire owner's dont_miss into the guide's picks
+    owner_dont_miss = kb.get("dont_miss") or ""
+    if owner_dont_miss:
+        # Parse free-text dont_miss into structured picks
+        # Owner writes newline-separated or dash-separated items
+        import re
+        items = [line.strip().lstrip("-•").strip() for line in owner_dont_miss.split("\n") if line.strip()]
+        for item in items:
+            if item and len(item) > 3:
+                # Split on " — " or " -- " to get name and description
+                parts = re.split(r"\s*[—–-]{2,}\s*|\s*—\s*", item, maxsplit=1)
+                pick = {"name": parts[0].strip()}
+                if len(parts) > 1:
+                    pick["description"] = parts[1].strip()
+                local_guide.setdefault("dont_miss_picks", []).append(pick)
 
     # ── Build the page ───────────────────────────────────────────────────
     page_url = f"https://{slug}.upliftstays.com"
