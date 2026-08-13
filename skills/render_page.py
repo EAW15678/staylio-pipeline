@@ -179,8 +179,36 @@ def render_page(property_id: str) -> SkillResult:
         hero_photo_url = (media_assets[0].get("asset_url_enhanced")
                          or media_assets[0].get("asset_url_original"))
 
+    # ── Load hero video from video_artifacts ───────────────────────────
+    hero_video_url = None
+    hero_video_resp = sb.table("video_artifacts").select("storage_url").eq(
+        "property_id", property_id
+    ).eq("kind", "master").eq("status", "ready").is_(
+        "superseded_at", "null"
+    ).order("created_at", desc=True).limit(1).execute()
+    if hero_video_resp.data:
+        hero_video_url = hero_video_resp.data[0].get("storage_url")
+        logger.info("[render_page] Hero video found: %s", hero_video_url[:60] if hero_video_url else "none")
+
+    # ── Load guest review narration audio from video_artifacts ────────
+    review_audio_urls = {}
+    narr_resp = sb.table("video_artifacts").select(
+        "storage_url, source_reference"
+    ).eq("property_id", property_id).eq("kind", "narration").eq(
+        "status", "ready"
+    ).eq("provenance", "guest_book").is_("superseded_at", "null").execute()
+    for narr in (narr_resp.data or []):
+        url = narr.get("storage_url")
+        ref = narr.get("source_reference") or {}
+        # Key by reviewer name or index for guest card matching
+        reviewer = ref.get("reviewer_name") if isinstance(ref, dict) else None
+        if url and reviewer:
+            review_audio_urls[reviewer] = url
+
     visual_media = {
         "hero_photo_url": hero_photo_url,
+        "hero_video_url": hero_video_url,
+        "review_audio_urls": review_audio_urls,
         "media_assets": media_assets,
         "category_winners": {},
     }

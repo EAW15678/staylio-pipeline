@@ -309,11 +309,12 @@ def build_landing_page_html(
         )
         category_modules = _build_category_modules(gallery_items) if media_assets else {}
 
-    # Hero video (Video 1 from Agent 3, 16:9 format for landing page)
-    hero_video_url = _get_hero_video_url(kb.get("property_id", ""))
+    # Hero video — substrate path (visual_media.hero_video_url) takes precedence;
+    # falls back to old pipeline's video_assets for backward compat.
+    hero_video_url = visual_media.get("hero_video_url") or _get_hero_video_url(kb.get("property_id", ""))
 
-    # Review audio URLs from Agent 3 (mp3s per guest review)
-    review_audio_urls = _get_review_audio_urls(kb.get("property_id", ""))
+    # Review audio — substrate path (visual_media.review_audio_urls) takes precedence.
+    review_audio_urls = visual_media.get("review_audio_urls") or _get_review_audio_urls(kb.get("property_id", ""))
 
     # Local guide
     dont_miss_picks       = local_guide.get("dont_miss_picks") or []
@@ -338,9 +339,9 @@ def build_landing_page_html(
             f' poster="{_esc(hero_photo)}" preload="auto">'
             f'<source src="{_esc(hero_video_url)}" type="video/mp4"></video>'
             '<div id="hero-cta-overlay">'
-            '<button id="hero-cta-btn" aria-label="Play hero story">'
+            '<button id="hero-cta-btn" aria-label="Play with sound">'
             '<span class="hero-cta-icon">&#9654;</span>'
-            '<span class="hero-cta-text">Hear the story behind this home</span>'
+            '<span class="hero-cta-text">Hear me</span>'
             '</button></div>'
             '<button id="hero-replay-btn" style="display:none"'
             ' aria-label="Replay hero story">&#8635; Replay</button>'
@@ -2511,8 +2512,8 @@ def _page_css() -> str:
       border: 1px solid rgba(255,255,255,0.35);
       border-radius: 50px;
       color: #fff;
-      padding: 18px 36px;
-      font-size: 1rem;
+      padding: 20px 48px;
+      font-size: 1.15rem;
       font-family: inherit;
       cursor: pointer;
       letter-spacing: 0.02em;
