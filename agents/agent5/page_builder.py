@@ -620,58 +620,75 @@ def build_landing_page_html(
 
   <!-- Staylio Audio Player -->
   <script>
+  // ── Single Audio Controller ─────────────────────────────────────
+  // ONE source at a time. Starting anything stops everything else.
+  // Hero keeps playing muted as the visual bed when interrupted.
   var StaylioAudio = (function() {{
-    var current = null;
+    var owner = null; // {{id, media, onInterrupt, onEnd}}
 
-    function stopCurrent() {{
-      if (!current) return;
-      if (current.media) {{
-        current.media.pause();
-        current.media.currentTime = 0;
+    function stopOwner() {{
+      if (!owner) return;
+      if (owner.media) {{
+        owner.media.pause();
+        owner.media.currentTime = 0;
       }}
-      if (current.onStop) current.onStop();
-      current = null;
-      StaylioAudio.current = null;
+      if (owner.onInterrupt) owner.onInterrupt();
+      owner = null;
     }}
 
     return {{
-      current: null,
-
-      _clearCurrent: function() {{
-        current = null;
-        StaylioAudio.current = null;
+      // Take ownership. Stops the current owner first.
+      take: function(id, media, callbacks) {{
+        stopOwner();
+        owner = {{
+          id: id,
+          media: media,
+          onInterrupt: callbacks.onInterrupt || null,
+          onEnd: callbacks.onEnd || null
+        }};
+        var p = media.play();
+        if (p && p.catch) p.catch(function(){{}});
       }},
 
-      play: function(media, onStop) {{
-        stopCurrent();
-        current = {{ media: media, onStop: onStop || null }};
-        StaylioAudio.current = current;
-        if (!media) return;
-        var playPromise = media.play();
-        if (playPromise !== undefined) {{
-          playPromise.catch(function() {{}});
+      // Release ownership (called when audio ends naturally)
+      release: function(id) {{
+        if (owner && owner.id === id) {{
+          if (owner.onEnd) owner.onEnd();
+          owner = null;
         }}
       }},
 
+      // Stop current owner explicitly (toggle off)
       stop: function() {{
-        stopCurrent();
+        stopOwner();
+      }},
+
+      // Check if a given id is the current owner
+      isOwner: function(id) {{
+        return owner && owner.id === id;
       }}
     }};
   }})();
 
   document.addEventListener('DOMContentLoaded', function() {{
 
-    // HERO
+    // ── HERO ──────────────────────────────────────────────────────
     var heroVideo  = document.getElementById('hero-video');
     var heroCta    = document.getElementById('hero-cta-overlay');
     var heroCtaBtn = document.getElementById('hero-cta-btn');
     var heroReplay = document.getElementById('hero-replay-btn');
 
-    function initHeroPreview() {{
+    function heroToMutedLoop() {{
       if (!heroVideo) return;
       heroVideo.muted = true;
       heroVideo.loop = true;
-      heroVideo.play().catch(function() {{}});
+      heroVideo.currentTime = 0;
+      heroVideo.play().catch(function(){{}});
+      if (heroCta) heroCta.style.display = 'flex';
+      if (heroReplay) heroReplay.style.display = 'none';
+      if (heroCtaBtn) {{
+        heroCtaBtn.setAttribute('aria-label', 'Play with sound');
+      }}
     }}
 
     function startHero() {{
@@ -681,46 +698,67 @@ def build_landing_page_html(
       heroVideo.currentTime = 0;
       if (heroCta) heroCta.style.display = 'none';
       if (heroReplay) heroReplay.style.display = 'none';
-      StaylioAudio.play(heroVideo, function() {{
-        heroVideo.pause();
-        heroVideo.currentTime = 0;
-        heroVideo.muted = true;
-        heroVideo.loop = true;
-        heroVideo.play().catch(function() {{}});
-        if (heroCta) heroCta.style.display = 'flex';
-        if (heroReplay) heroReplay.style.display = 'none';
+
+      StaylioAudio.take('hero', heroVideo, {{
+        onInterrupt: function() {{
+          // Interrupted by a guest card — return to muted loop
+          heroToMutedLoop();
+        }},
+        onEnd: function() {{
+          // Finished naturally — show replay
+          heroToMutedLoop();
+          if (heroReplay) heroReplay.style.display = 'inline-block';
+          if (heroCta) heroCta.style.display = 'none';
+        }}
       }});
+
       heroVideo.onended = function() {{
-        StaylioAudio._clearCurrent();
-        if (heroReplay) heroReplay.style.display = 'inline-block';
+        StaylioAudio.release('hero');
       }};
     }}
 
-    initHeroPreview();
+    // Init: muted loop
+    if (heroVideo) {{
+      heroVideo.muted = true;
+      heroVideo.loop = true;
+      heroVideo.play().catch(function(){{}});
+    }}
     if (heroCtaBtn) heroCtaBtn.addEventListener('click', startHero);
     if (heroReplay) heroReplay.addEventListener('click', startHero);
 
-    // GUEST REVIEWS
-    document.querySelectorAll('.audio-play-btn').forEach(function(btn) {{
+    // ── GUEST CARD AUDIO ──────────────────────────────────────────
+    document.querySelectorAll('.audio-play-btn').forEach(function(btn, idx) {{
+      var cardId = 'card-' + idx;
+
       btn.addEventListener('click', function() {{
-        var src = btn.getAttribute('data-audio-src');
-        if (StaylioAudio.current && StaylioAudio.current.media === btn._audio) {{
+        if (StaylioAudio.isOwner(cardId)) {{
+          // Toggle off — stop this card
           StaylioAudio.stop();
-          btn.textContent = '\u25b6 Play';
-        }} else {{
-          var audio = new Audio(src);
-          btn._audio = audio;
-          btn.textContent = '\u23f9 Stop';
-          StaylioAudio.play(audio, function() {{
-            btn.textContent = '\u25b6 Play';
-          }});
-          audio.onended = function() {{
-            btn.textContent = '\u25b6 Play';
-            if (StaylioAudio.current && StaylioAudio.current.media === audio) {{
-              StaylioAudio._clearCurrent();
-            }}
-          }};
+          return;
         }}
+
+        // Start this card
+        var src = btn.getAttribute('data-audio-src');
+        var audio = new Audio(src);
+        btn._audio = audio;
+        btn.textContent = '\u23f9 Stop';
+        btn.setAttribute('aria-label', 'Stop review audio');
+
+        StaylioAudio.take(cardId, audio, {{
+          onInterrupt: function() {{
+            // Another source took over — reset this button
+            btn.textContent = '\u25b6 Play';
+            btn.setAttribute('aria-label', 'Play review audio');
+          }},
+          onEnd: function() {{
+            btn.textContent = '\u25b6 Play';
+            btn.setAttribute('aria-label', 'Play review audio');
+          }}
+        }});
+
+        audio.onended = function() {{
+          StaylioAudio.release(cardId);
+        }};
       }});
     }});
 
