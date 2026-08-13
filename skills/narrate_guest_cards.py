@@ -59,6 +59,16 @@ def narrate_guest_cards(
     prop = sb.table("properties").select("vibe_profile").eq("id", property_id).limit(1).execute()
     vibe = (prop.data[0].get("vibe_profile") if prop.data else "") or ""
 
+    # Get pronunciation dictionary (Ruling 6: fail if can't attach)
+    try:
+        from skills.pronunciation import get_pronunciation_locators
+        pron_locators = get_pronunciation_locators(sb, property_id)
+    except ValueError as exc:
+        return SkillResult.failed(
+            reason=f"Pronunciation dictionary failed: {exc}",
+            error_class="vendor",
+        )
+
     # Find the hero narrator's voice_id to exclude from guest pool
     hero_voice_id = None
     hero_narr = sb.table("video_artifacts").select("voice_id").eq(
@@ -160,6 +170,7 @@ def narrate_guest_cards(
                         "similarity_boost": 0.75,
                         "style": 0.3,
                     },
+                    **({"pronunciation_dictionary_locators": pron_locators} if pron_locators else {}),
                 },
                 timeout=60,
             )

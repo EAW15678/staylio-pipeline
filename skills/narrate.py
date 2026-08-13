@@ -103,7 +103,31 @@ def narrate(
     run_id = record_run(sb, property_id, "monthly_cycle")
     step_id = record_step(sb, run_id, "narrate")
 
+    # ── Get pronunciation dictionary (Ruling 6: fail if can't attach) ───
+    try:
+        from skills.pronunciation import get_pronunciation_locators
+        pron_locators = get_pronunciation_locators(sb, property_id)
+    except ValueError as exc:
+        complete_step(sb, step_id, status="failed", error_message=str(exc)[:200])
+        complete_run(sb, run_id, status="failed")
+        return SkillResult.failed(
+            reason=f"Pronunciation dictionary failed: {exc}",
+            attempted=1, succeeded=0, failed_count=1, error_class="vendor",
+        )
+
     # ── Call ElevenLabs TTS ─────────────────────────────────────────────
+    tts_payload = {
+        "text": script,
+        "model_id": ELEVENLABS_MODEL,
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75,
+            "style": 0.3,
+        },
+    }
+    if pron_locators:
+        tts_payload["pronunciation_dictionary_locators"] = pron_locators
+
     try:
         resp = httpx.post(
             f"{ELEVENLABS_API_BASE}/text-to-speech/{voice_id}",
@@ -111,15 +135,7 @@ def narrate(
                 "xi-api-key": el_key,
                 "Content-Type": "application/json",
             },
-            json={
-                "text": script,
-                "model_id": ELEVENLABS_MODEL,
-                "voice_settings": {
-                    "stability": 0.5,
-                    "similarity_boost": 0.75,
-                    "style": 0.3,
-                },
-            },
+            json=tts_payload,
             timeout=60,
         )
         resp.raise_for_status()
