@@ -106,7 +106,7 @@ def narrate_guest_cards(
             from skills.voice_buckets import resolve_guest_voice
             voice_info = resolve_guest_voice(sb, vibe, reviewer, exclude_voice_id=hero_voice_id)
             voice_id = voice_info["voice_id"]
-            voice_label = voice_info["voice_name"]
+            voice_label = voice_info["name"]
             reason = voice_info["reason"]
         except ValueError as e:
             logger.warning("[narrate_guest_cards] %s: %s", reviewer, str(e))

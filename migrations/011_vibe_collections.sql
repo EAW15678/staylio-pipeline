@@ -1,0 +1,5 @@
+-- 011: vibe_collections — maps vibe profiles to ElevenLabs collection IDs.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-13.
+-- Replaces voice_buckets (dropped — was a snapshot that drifted from truth).
+-- 7 rows. Voice selection is LIVE from ElevenLabs at call time.
+-- ElevenLabs does not expose collection names via public API.

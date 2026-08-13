@@ -75,15 +75,12 @@ def narrate(
     ).limit(1).execute()
     vibe = (prop.data[0].get("vibe_profile") if prop.data else "") or ""
 
-    # Hero voice: director picks from the vibe's pool.
-    # For now, use the first voice (typically the staylio_* narrator).
-    # The direction could specify a voice_id in future.
+    # Hero voice: first voice in the vibe's live collection.
     try:
-        from skills.voice_buckets import get_vibe_pool
-        pool = get_vibe_pool(sb, vibe)
-        # Default to first voice in pool (staylio narrator by convention)
+        from skills.voice_buckets import fetch_vibe_voices
+        pool = fetch_vibe_voices(sb, vibe)
         voice_id = pool[0]["voice_id"]
-        voice_label = pool[0]["voice_name"]
+        voice_label = pool[0]["name"]
     except (ValueError, IndexError) as e:
         return SkillResult.failed(
             reason=f"No voice pool for vibe '{vibe}': {e}",
