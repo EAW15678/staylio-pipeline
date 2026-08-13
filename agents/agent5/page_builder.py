@@ -1801,7 +1801,11 @@ def _build_guest_book_section(reviews: list, audio_urls: dict = None) -> str:
             continue
         name_str = r.get("reviewer_name") or "Guest"
         date_str = r.get("stay_date") or ""
-        audio_url = audio_urls.get(_AUDIO_KEYS[i]) if i < len(_AUDIO_KEYS) else None
+        # Substrate keys by reviewer_name; old pipeline keys by positional index
+        audio_url = (
+            audio_urls.get(name_str.strip())
+            or (audio_urls.get(_AUDIO_KEYS[i]) if i < len(_AUDIO_KEYS) else None)
+        )
         audio_btn = (
             f'<button class="audio-play-btn" data-audio-src="{_esc(audio_url)}" aria-label="Play review audio">&#9654; Play</button>'
             if audio_url else ""
