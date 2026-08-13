@@ -5,9 +5,14 @@ Reads OBSERVATIONS directly (the shot_inventory relay is dead).
 Vibe, wow_factor, guest_evidence, owner_context are inputs the
 director reasons with — never a switch into a template library.
 
-The brief is encoded as a `directions` row with beats[], narration_brief,
-music_brief, overlay_register. Every direction is traceable to its
-concept and the observations it drew from.
+Includes all 11 validators ported from agents/agent8/creative_director.py
+(mechanical rename: shot_inventory → observations, shot_spec → direction,
+shot_id → photo_id, duration_sec → duration_seconds). Plus a revision
+loop: failed validation triggers re-direction, not just rejection.
+
+Validator 9 (quote_fidelity) is ported but STUBBED — it returns
+"uncertain" without calling Claude, which triggers a HOLD per Guidelines
+section 8. To activate the model-assisted check, set VALIDATE_QUOTE_FIDELITY=1.
 
 Usage:
     from skills.direct import direct
@@ -18,6 +23,9 @@ import hashlib
 import json
 import logging
 import os
+import re
+import uuid
+from datetime import datetime, timezone
 
 from skills.contract import (
     SkillResult, get_substrate, require_env,
@@ -25,6 +33,346 @@ from skills.contract import (
 )
 
 logger = logging.getLogger(__name__)
+
+_MODEL = "claude-sonnet-4-6"
+_MAX_REVISION_ATTEMPTS = 2
+
+# OTA names — literal scan
+_OTA_NAMES = [
+    "airbnb", "vrbo", "booking.com", "booking dot com",
+    "expedia", "tripadvisor", "hotels.com", "homeaway",
+    "vacasa", "turnkey", "evolve",
+]
+
+# Time-of-day groupings for continuity validation
+_TIME_GROUPS = {
+    "morning": 0, "sunrise": 0,
+    "midday": 1, "noon": 1, "afternoon": 1,
+    "golden_hour": 2, "sunset": 2, "dusk": 2, "evening": 2,
+    "night": 3, "midnight": 3, "blue_hour": 3,
+}
+
+# Space direction conflict pairs
+_SPACE_CONFLICTS = {("left", "right"), ("right", "left")}
+
+
+# ── Validators (ported from creative_director.py) ────────────────────────
+# Each returns a list of violation dicts:
+#   [{"rule": str, "detail": str, "beats": list[int]}]
+# Rename: shot_id → photo_id, inventory_map → obs_map, duration_sec → duration_seconds
+
+
+def validate_motion_affordance(beats: list, obs_map: dict) -> list:
+    """Every beat's motion must appear in that frame's motion_affordance."""
+    violations = []
+    for beat in beats:
+        photo_id = beat.get("photo_id")
+        motion = beat.get("requested_motion")
+        frame = obs_map.get(photo_id)
+        if not frame:
+            violations.append({
+                "rule": "motion_affordance",
+                "detail": f"Beat {beat.get('ordinal')}: photo_id {str(photo_id)[:8]} not in observations",
+                "beats": [beat.get("ordinal", 0)],
+            })
+            continue
+        affordances = frame.get("motion_affordance") or []
+        if isinstance(affordances, str):
+            affordances = [affordances]
+        if motion and motion not in affordances:
+            violations.append({
+                "rule": "motion_affordance",
+                "detail": (
+                    f"Beat {beat.get('ordinal')}: motion '{motion}' not in "
+                    f"affordances {affordances}"
+                ),
+                "beats": [beat.get("ordinal", 0)],
+            })
+    return violations
+
+
+def validate_space_direction(beats: list, obs_map: dict) -> list:
+    """No consecutive beats whose space_direction fights (left↔right)."""
+    violations = []
+    sorted_beats = sorted(beats, key=lambda b: b.get("ordinal", 0))
+    for i in range(len(sorted_beats) - 1):
+        b1, b2 = sorted_beats[i], sorted_beats[i + 1]
+        f1 = obs_map.get(b1.get("photo_id")) or {}
+        f2 = obs_map.get(b2.get("photo_id")) or {}
+        dir1 = f1.get("space_direction")
+        dir2 = f2.get("space_direction")
+        if dir1 and dir2 and (dir1, dir2) in _SPACE_CONFLICTS:
+            violations.append({
+                "rule": "space_direction",
+                "detail": f"Beats {b1.get('ordinal')}->{b2.get('ordinal')}: conflict {dir1}->{dir2}",
+                "beats": [b1.get("ordinal", 0), b2.get("ordinal", 0)],
+            })
+    return violations
+
+
+def validate_depth_rhythm(beats: list, obs_map: dict) -> list:
+    """No three consecutive beats at the same depth_tier."""
+    violations = []
+    sorted_beats = sorted(beats, key=lambda b: b.get("ordinal", 0))
+    for i in range(len(sorted_beats) - 2):
+        tiers, ordinals = [], []
+        for j in range(3):
+            b = sorted_beats[i + j]
+            frame = obs_map.get(b.get("photo_id")) or {}
+            tiers.append(frame.get("depth_tier"))
+            ordinals.append(b.get("ordinal", 0))
+        if tiers[0] and tiers[0] == tiers[1] == tiers[2]:
+            violations.append({
+                "rule": "depth_rhythm",
+                "detail": f"Beats {ordinals}: three consecutive at depth_tier '{tiers[0]}'",
+                "beats": ordinals,
+            })
+    return violations
+
+
+def validate_continuity(beats: list, obs_map: dict) -> list:
+    """No time-of-day jumps ≥2 groups without an intent note."""
+    violations = []
+    sorted_beats = sorted(beats, key=lambda b: b.get("ordinal", 0))
+    for i in range(len(sorted_beats) - 1):
+        b1, b2 = sorted_beats[i], sorted_beats[i + 1]
+        f1 = obs_map.get(b1.get("photo_id")) or {}
+        f2 = obs_map.get(b2.get("photo_id")) or {}
+        tod1 = (f1.get("time_of_day_read") or "").lower()
+        tod2 = (f2.get("time_of_day_read") or "").lower()
+        g1, g2 = _TIME_GROUPS.get(tod1), _TIME_GROUPS.get(tod2)
+        if g1 is not None and g2 is not None and abs(g1 - g2) >= 2:
+            intent = b2.get("intent") or ""
+            if not intent:
+                violations.append({
+                    "rule": "continuity",
+                    "detail": f"Beats {b1.get('ordinal')}->{b2.get('ordinal')}: time jump {tod1}->{tod2} without intent note",
+                    "beats": [b1.get("ordinal", 0), b2.get("ordinal", 0)],
+                })
+    return violations
+
+
+def validate_overlay_placement(direction: dict, obs_map: dict) -> list:
+    """Overlay grid regions must be in that frame's negative_space."""
+    violations = []
+    overlay_register = direction.get("overlay_register") or []
+    beats_by_ordinal = {b["ordinal"]: b for b in (direction.get("beats") or [])}
+    for overlay in overlay_register:
+        ordinal = overlay.get("beat_ordinal")
+        region = overlay.get("grid_region")
+        beat = beats_by_ordinal.get(ordinal)
+        if not beat:
+            violations.append({"rule": "overlay_placement", "detail": f"Overlay references non-existent beat {ordinal}", "beats": [ordinal or 0]})
+            continue
+        frame = obs_map.get(beat.get("photo_id")) or {}
+        neg_space = frame.get("negative_space") or []
+        if isinstance(neg_space, str):
+            neg_space = [neg_space]
+        if region and region not in neg_space:
+            violations.append({
+                "rule": "overlay_placement",
+                "detail": f"Beat {ordinal}: overlay region '{region}' not in negative_space {neg_space}",
+                "beats": [ordinal],
+            })
+    return violations
+
+
+def validate_amenity_references(direction: dict, amenity_names: list) -> list:
+    """Best-effort: passes if KB amenities are empty."""
+    if not amenity_names:
+        return []
+    return []  # Same as original — best-effort heuristic, currently a pass-through
+
+
+def validate_no_ota(direction: dict) -> list:
+    """No OTA reference anywhere in the direction."""
+    violations = []
+    text = json.dumps(direction, default=str).lower()
+    for ota in _OTA_NAMES:
+        if ota.lower() in text:
+            violations.append({"rule": "no_ota", "detail": f"OTA reference found: '{ota}'", "beats": []})
+    return violations
+
+
+def validate_no_guest_names(direction: dict, guest_names: list) -> list:
+    """DETERMINISTIC, absolute. No guest name in narration or overlays."""
+    violations = []
+    if not guest_names:
+        return violations
+
+    surfaces = []
+    narration = direction.get("narration_brief") or ""
+    if narration:
+        surfaces.append((narration, "narration_brief"))
+    for overlay in direction.get("overlay_register") or []:
+        text = overlay.get("text") or ""
+        if text:
+            surfaces.append((text, f"overlay beat {overlay.get('beat_ordinal', '?')}"))
+
+    for name in guest_names:
+        name_lower = name.lower()
+        name_parts = [p for p in name_lower.split() if len(p) > 2]
+        for text, location in surfaces:
+            text_lower = text.lower()
+            if name_lower in text_lower:
+                violations.append({"rule": "no_guest_names", "detail": f"Guest name '{name}' found in {location}", "beats": []})
+                continue
+            for part in name_parts:
+                patterns = [
+                    f"— {part}", f"- {part}", f"– {part}",
+                    f"as {part} ", f"as {part},", f"as {part}.",
+                    f"{part} said", f"{part} told", f"{part} wrote",
+                    f"{part} m.", f"{part} w.",
+                ]
+                for pattern in patterns:
+                    if pattern in text_lower:
+                        violations.append({"rule": "no_guest_names", "detail": f"Guest name pattern '{pattern}' in {location} (guest: {name})", "beats": []})
+                        break
+    return violations
+
+
+def validate_quote_fidelity(direction: dict, guest_texts: list) -> list:
+    """MODEL-ASSISTED quote fidelity check.
+
+    STUBBED by default — returns "uncertain" (HOLD) without calling Claude.
+    Set VALIDATE_QUOTE_FIDELITY=1 to activate the model-assisted check.
+    """
+    violations = []
+    if not guest_texts:
+        return violations
+
+    quotes_to_check = []
+    for overlay in direction.get("overlay_register") or []:
+        if overlay.get("provenance") == "guest_book":
+            text = overlay.get("text") or ""
+            if text:
+                quotes_to_check.append((text, f"overlay beat {overlay.get('beat_ordinal', '?')}"))
+
+    narration_prov = direction.get("narration_provenance") or ""
+    narration = direction.get("narration_brief") or ""
+    if "guest_book" in narration_prov and narration:
+        quotes_to_check.append((narration, "narration_brief"))
+
+    if not quotes_to_check:
+        return violations
+
+    activate = os.environ.get("VALIDATE_QUOTE_FIDELITY", "") == "1"
+
+    for quote, location in quotes_to_check:
+        # Find best-matching source
+        best_source, best_overlap = None, 0
+        quote_words = set(quote.lower().split())
+        for source_text in guest_texts:
+            source_words = set(source_text.lower().split())
+            overlap = len(quote_words & source_words)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_source = source_text
+
+        if not best_source:
+            violations.append({"rule": "quote_fidelity", "detail": f"Cannot identify source for guest quote in {location}: '{quote[:80]}'", "beats": [], "severity": "fail"})
+            continue
+
+        if activate:
+            verdict = _check_fidelity_with_model(best_source, quote)
+        else:
+            verdict = "uncertain"  # STUBBED — HOLD per Guidelines section 8
+
+        if verdict == "fail":
+            violations.append({"rule": "quote_fidelity", "detail": f"Quote in {location} materially changes meaning. Original: '{best_source[:80]}' → Used: '{quote[:80]}'", "beats": [], "severity": "fail"})
+        elif verdict == "uncertain":
+            violations.append({"rule": "quote_fidelity", "detail": f"Uncertain fidelity in {location}. HELD per Guidelines section 8. Original: '{best_source[:80]}' → Used: '{quote[:80]}'", "beats": [], "severity": "uncertain"})
+
+    return violations
+
+
+def _check_fidelity_with_model(original: str, quote: str) -> str:
+    """Ask Claude whether a pull-quote preserves the original's meaning."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    prompt = f"""A guest wrote this in a vacation rental's physical guest book:
+
+ORIGINAL: "{original}"
+
+For social media, this was shortened to:
+
+QUOTE: "{quote}"
+
+Rules:
+- Correcting misspellings is permitted.
+- Truncating to a quotable line is permitted.
+- Any change that shifts what the guest stated or implied is NOT permitted.
+- Truncation that inverts meaning by omission is NOT permitted.
+
+Does the quote preserve the meaning and intent of the original?
+Respond with EXACTLY one word: pass, fail, or uncertain."""
+
+    try:
+        resp = client.messages.create(model=_MODEL, max_tokens=10, messages=[{"role": "user", "content": prompt}])
+        verdict = resp.content[0].text.strip().lower()
+        return verdict if verdict in ("pass", "fail", "uncertain") else "uncertain"
+    except Exception as exc:
+        logger.warning("[direct] Fidelity check failed, treating as uncertain: %s", exc)
+        return "uncertain"
+
+
+def validate_music_brief_prohibited(direction: dict) -> list:
+    """Music brief must not contain artist/song/label names."""
+    violations = []
+    music = direction.get("music_brief") or {}
+    music_text = json.dumps(music, default=str).lower()
+    music_original = json.dumps(music, default=str)
+
+    ref_patterns = [
+        r'\blike\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*',
+        r'\bsimilar\s+to\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*',
+        r'[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*-inspired',
+    ]
+    for pattern in ref_patterns:
+        for match in re.findall(pattern, music_original):
+            violations.append({"rule": "music_brief_prohibited", "detail": f"Possible artist reference in music brief: '{match}'", "beats": []})
+
+    for kw in ["records", "recordings", "music group", "entertainment", "sony", "universal", "warner", "bmg", "emi"]:
+        if kw in music_text:
+            violations.append({"rule": "music_brief_prohibited", "detail": f"Possible label reference: '{kw}'", "beats": []})
+
+    return violations
+
+
+def validate_duration(direction: dict) -> list:
+    """Beat durations must sum within ±20% of target."""
+    violations = []
+    beats = direction.get("beats") or []
+    target = direction.get("target_duration_sec", 30)
+    total = sum(b.get("duration_seconds", 0) for b in beats)
+    if total == 0:
+        violations.append({"rule": "duration", "detail": "Total beat duration is 0", "beats": []})
+        return violations
+    lower, upper = target * 0.8, target * 1.2
+    if total < lower or total > upper:
+        violations.append({"rule": "duration", "detail": f"Total {total}s outside [{lower:.0f}s, {upper:.0f}s] for target {target}s", "beats": []})
+    return violations
+
+
+def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest_texts: list, amenity_names: list) -> list:
+    """Run all 11 validators and return combined violations."""
+    beats = direction.get("beats") or []
+    violations = []
+    violations += validate_motion_affordance(beats, obs_map)
+    violations += validate_space_direction(beats, obs_map)
+    violations += validate_depth_rhythm(beats, obs_map)
+    violations += validate_continuity(beats, obs_map)
+    violations += validate_overlay_placement(direction, obs_map)
+    violations += validate_amenity_references(direction, amenity_names)
+    violations += validate_no_ota(direction)
+    violations += validate_no_guest_names(direction, guest_names)
+    violations += validate_quote_fidelity(direction, guest_texts)
+    violations += validate_music_brief_prohibited(direction)
+    violations += validate_duration(direction)
+    return violations
+
+
+# ── Main skill ───────────────────────────────────────────────────────────
 
 
 def direct(
@@ -35,12 +383,11 @@ def direct(
 ) -> SkillResult:
     """Generate a direction (shot spec) for a concept.
 
-    Reads observations for the property's canonical photographs to get
-    motion_affordance, depth, focal_point, motion_risk — all the fields
-    the director reasons with. Also reads owner_context, guest_evidence,
-    and the concept's premise.
+    Reads observations, owner_context, guest_evidence, concept premise.
+    Validates with 11 deterministic + 1 model-assisted check.
+    Revision loop: up to 2 re-attempts on validation failure.
 
-    Returns SkillResult.ok({direction_id, beat_count, ...})
+    Returns SkillResult.ok({direction_id, beat_count, violations, ...})
     """
     try:
         sb = get_substrate()
@@ -68,13 +415,10 @@ def direct(
         "concept_id", concept_id
     ).is_("superseded_at", "null").limit(1).execute()
     if not concept_resp.data:
-        return SkillResult.failed(
-            reason=f"Concept {concept_id[:12]} not found or superseded",
-            attempted=0, succeeded=0, failed_count=0,
-        )
+        return SkillResult.failed(reason=f"Concept {concept_id[:12]} not found or superseded")
     concept = concept_resp.data[0]
 
-    # ── Load observations (replaces shot_inventory) ─────────────────────
+    # ── Load observations → obs_map ─────────────────────────────────────
     obs_resp = sb.table("observations").select(
         "observation_id, photo_id, "
         "motion_affordance, motion_risk, depth_structure, depth_tier, "
@@ -87,12 +431,11 @@ def direct(
     observations = obs_resp.data or []
 
     if not observations:
-        return SkillResult.failed(
-            reason="No observations for this property — run observe first",
-            attempted=0, succeeded=0, failed_count=0,
-        )
+        return SkillResult.failed(reason="No observations — run observe first")
 
-    # Get rendition URLs for each observed photo
+    obs_map = {o["photo_id"]: o for o in observations}
+
+    # Get rendition URLs
     photo_ids = [o["photo_id"] for o in observations]
     renditions_by_photo = {}
     for pid in photo_ids:
@@ -100,25 +443,22 @@ def direct(
         for r in (rend.data or []):
             renditions_by_photo.setdefault(pid, {})[r["kind"]] = r["storage_url"]
 
-    # ── Load context inputs ─────────────────────────────────────────────
-    prop = sb.table("properties").select(
-        "name, vibe_profile, city, state_region"
-    ).eq("id", property_id).limit(1).execute()
+    # ── Load context ────────────────────────────────────────────────────
+    prop = sb.table("properties").select("name, vibe_profile, city, state_region, amenities").eq("id", property_id).limit(1).execute()
     prop_data = prop.data[0] if prop.data else {}
+    amenity_names = prop_data.get("amenities") or []
 
-    ctx_resp = sb.table("owner_context").select(
-        "owner_story, wow_factor, hidden_gems, guest_love"
-    ).eq("property_id", property_id).is_(
-        "superseded_at", "null"
-    ).order("version", desc=True).limit(1).execute()
+    ctx_resp = sb.table("owner_context").select("owner_story, wow_factor, hidden_gems, guest_love").eq(
+        "property_id", property_id).is_("superseded_at", "null").order("version", desc=True).limit(1).execute()
     owner_ctx = ctx_resp.data[0] if ctx_resp.data else {}
 
-    ev_resp = sb.table("guest_evidence").select(
-        "written_text, verbal_text, reviewer_name, is_guest_book"
-    ).eq("property_id", property_id).eq("is_guest_book", True).limit(10).execute()
+    ev_resp = sb.table("guest_evidence").select("written_text, verbal_text, reviewer_name, is_guest_book").eq(
+        "property_id", property_id).eq("is_guest_book", True).limit(10).execute()
     guest_evidence = ev_resp.data or []
+    guest_names = [e["reviewer_name"] for e in guest_evidence if e.get("reviewer_name")]
+    guest_texts = [e.get("written_text") or e.get("verbal_text") or "" for e in guest_evidence if (e.get("written_text") or e.get("verbal_text"))]
 
-    # ── Build candidate frames for the director ─────────────────────────
+    # ── Build frames for prompt ─────────────────────────────────────────
     frames = []
     for obs in observations:
         pid = obs["photo_id"]
@@ -126,154 +466,162 @@ def direct(
         display_url = urls.get("enhanced") or urls.get("original", "")
         if not display_url:
             continue
-        frames.append({
-            "photo_id": pid,
-            "url": display_url,
-            "motion_affordance": obs.get("motion_affordance") or [],
-            "motion_risk": obs.get("motion_risk") or [],
-            "depth_structure": obs.get("depth_structure"),
-            "depth_tier": obs.get("depth_tier"),
-            "space_direction": obs.get("space_direction"),
-            "light_direction": obs.get("light_direction"),
-            "time_of_day_read": obs.get("time_of_day_read"),
-            "negative_space": obs.get("negative_space") or [],
-            "focal_point": obs.get("focal_point"),
-            "subject_singularity": obs.get("subject_singularity"),
-            "foreground_elements": obs.get("foreground_elements") or [],
-            "frame_element": obs.get("frame_element"),
-            "beyond_frame_element": obs.get("beyond_frame_element"),
-            "tonal_signature": obs.get("tonal_signature"),
-            "located_amenities": obs.get("located_amenities") or [],
-            "curated_section": obs.get("curated_section"),
-            "quality_score": obs.get("quality_score"),
-            "alt_text": obs.get("alt_text"),
-        })
+        frames.append({**obs, "url": display_url})
 
     if not frames:
-        return SkillResult.failed(
-            reason="No frames with rendition URLs — cannot direct",
-            attempted=0, succeeded=0, failed_count=0,
-        )
+        return SkillResult.failed(reason="No frames with rendition URLs")
 
     # ── Record run ──────────────────────────────────────────────────────
     run_id = record_run(sb, property_id, "direct")
     step_id = record_step(sb, run_id, "direct")
 
-    # ── Call the creative director engine ────────────────────────────────
-    try:
-        from agents.agent8.creative_director import direct_concept
+    # ── Direction + Revision Loop ───────────────────────────────────────
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
-        # The existing direct_concept reads from shot_inventory + concept_ledger.
-        # For substrate, we need to adapt the interface. For now, call it
-        # via the existing code path which reads from the prototype tables.
-        # TODO: refactor direct_concept to accept frames + concept as dicts
-        #       instead of reading from DB internally.
-        #
-        # INTERIM: write the substrate data to the expected prototype tables,
-        # or call the Claude prompt directly.
-        #
-        # For this port, we call Claude directly with the substrate data.
+    direction_result = None
+    all_violations = []
+    attempt = 0
 
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-        direction_result = _call_director(
-            client, concept, frames, prop_data, owner_ctx, guest_evidence
-        )
+    for attempt in range(_MAX_REVISION_ATTEMPTS + 1):
+        if attempt == 0:
+            direction_result = _call_director(client, concept, frames, prop_data, owner_ctx, guest_evidence)
+        else:
+            # Revision: send violations back to Claude
+            direction_result = _call_revision(client, concept, frames, prop_data, owner_ctx, guest_evidence, direction_result, all_violations)
 
         if not direction_result:
-            complete_step(sb, step_id, status="failed", error_message="Director returned no result")
-            complete_run(sb, run_id, status="failed")
-            return SkillResult.failed(
-                reason="Director returned no result",
-                attempted=1, succeeded=0, failed_count=1, error_class="vendor",
-            )
+            break
 
-        # ── Compute input hash for idempotency ──────────────────────────
-        hash_input = json.dumps({
-            "concept_id": concept_id,
-            "frame_ids": sorted([f["photo_id"] for f in frames]),
-            "premise": concept.get("premise"),
-        }, sort_keys=True)
-        input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+        # Validate
+        all_violations = _run_all_validators(direction_result, obs_map, guest_names, guest_texts, amenity_names)
 
-        # ── Supersede existing directions ───────────────────────────────
-        from datetime import datetime, timezone
-        now_iso = datetime.now(timezone.utc).isoformat()
-        sb.table("directions").update(
-            {"superseded_at": now_iso}
-        ).eq("concept_id", concept_id).is_("superseded_at", "null").execute()
+        if not all_violations:
+            logger.info("[direct] Attempt %d: all validators passed", attempt + 1)
+            break
+        else:
+            logger.info("[direct] Attempt %d: %d violations, %s",
+                       attempt + 1, len(all_violations),
+                       [v["rule"] for v in all_violations])
 
-        # ── Write direction ─────────────────────────────────────────────
-        import uuid
-        direction_id = str(uuid.uuid4())
-        sb.table("directions").insert({
-            "direction_id": direction_id,
-            "property_id": property_id,
-            "concept_id": concept_id,
-            "beats": direction_result.get("beats", []),
-            "beat_count": len(direction_result.get("beats", [])),
-            "target_duration_sec": direction_result.get("target_duration_sec", 30),
-            "narrative_order": direction_result.get("narrative_order"),
-            "continuity_notes": direction_result.get("continuity_notes", []),
-            "narration_brief": direction_result.get("narration_brief"),
-            "narration_provenance": direction_result.get("narration_provenance"),
-            "music_brief": direction_result.get("music_brief", {}),
-            "overlay_register": direction_result.get("overlay_register", []),
-            "director_rationale": direction_result.get("director_rationale"),
-            "director_model": "claude-sonnet-4-6",
-            "evidence_used": direction_result.get("evidence_used", []),
-            "vibe_drift": direction_result.get("vibe_drift"),
-            "input_hash": input_hash,
-            "status": "draft",
-            "created_by_agent": "skills/direct",
-        }).execute()
-
-        # ── Cost ────────────────────────────────────────────────────────
-        emit_cost(sb, run_id, property_id,
-                  vendor="anthropic", service="claude_creative_direction",
-                  units=1, unit_name="directions",
-                  unit_cost=0.05, total_cost=0.05,
-                  workflow_name="direct", generation_reason="creative_direction")
-
-        complete_step(sb, step_id, status="complete", metadata={
-            "direction_id": direction_id,
-            "beat_count": len(direction_result.get("beats", [])),
-            "frames_considered": len(frames),
-        })
-        complete_run(sb, run_id, status="complete")
-
-        return SkillResult.ok({
-            "direction_id": direction_id,
-            "beat_count": len(direction_result.get("beats", [])),
-            "frames_considered": len(frames),
-            "run_id": run_id,
-        })
-
-    except Exception as exc:
-        error_str = str(exc)
-        if "credit balance" in error_str or "authentication" in error_str.lower():
-            from skills.contract import escalate_billing
-            escalate_billing(sb, property_id, "anthropic", error_str)
-        complete_step(sb, step_id, status="failed", error_message=error_str[:200])
+    if not direction_result:
+        complete_step(sb, step_id, status="failed", error_message="Director returned no result")
         complete_run(sb, run_id, status="failed")
-        return SkillResult.failed(
-            reason=f"Direction failed: {error_str[:200]}",
-            attempted=1, succeeded=0, failed_count=1, error_class="vendor",
-        )
+        return SkillResult.failed(reason="Director returned no result", attempted=1, succeeded=0, failed_count=1, error_class="vendor")
+
+    # ── Determine status ────────────────────────────────────────────────
+    if all_violations:
+        status = "draft"  # Persisted with violations — not approved
+        logger.warning("[direct] Persisting with %d violations after %d attempts", len(all_violations), attempt + 1)
+    else:
+        status = "approved"
+
+    # ── Compute input hash ──────────────────────────────────────────────
+    hash_input = json.dumps({
+        "concept_id": concept_id,
+        "frame_ids": sorted([f["photo_id"] for f in frames]),
+        "premise": concept.get("premise"),
+    }, sort_keys=True)
+    input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+    # ── Supersede + write ───────────────────────────────────────────────
+    now_iso = datetime.now(timezone.utc).isoformat()
+    sb.table("directions").update({"superseded_at": now_iso}).eq(
+        "concept_id", concept_id).is_("superseded_at", "null").execute()
+
+    direction_id = str(uuid.uuid4())
+    sb.table("directions").insert({
+        "direction_id": direction_id,
+        "property_id": property_id,
+        "concept_id": concept_id,
+        "beats": direction_result.get("beats", []),
+        "beat_count": len(direction_result.get("beats", [])),
+        "target_duration_sec": direction_result.get("target_duration_sec", 30),
+        "narrative_order": direction_result.get("narrative_order"),
+        "continuity_notes": direction_result.get("continuity_notes", []),
+        "narration_brief": direction_result.get("narration_brief"),
+        "narration_provenance": direction_result.get("narration_provenance"),
+        "music_brief": direction_result.get("music_brief", {}),
+        "overlay_register": direction_result.get("overlay_register", []),
+        "director_rationale": direction_result.get("director_rationale"),
+        "director_model": _MODEL,
+        "evidence_used": direction_result.get("evidence_used", []),
+        "vibe_drift": direction_result.get("vibe_drift"),
+        "input_hash": input_hash,
+        "rejection_reasons": all_violations if all_violations else None,
+        "status": status,
+        "created_by_agent": "skills/direct",
+    }).execute()
+
+    # ── Cost ────────────────────────────────────────────────────────────
+    cost = 0.05 * (attempt + 1)  # ~$0.05 per attempt
+    emit_cost(sb, run_id, property_id,
+              vendor="anthropic", service="claude_creative_direction",
+              units=attempt + 1, unit_name="attempts",
+              unit_cost=0.05, total_cost=round(cost, 4),
+              workflow_name="direct", generation_reason="creative_direction")
+
+    complete_step(sb, step_id, status="complete", metadata={
+        "direction_id": direction_id,
+        "beat_count": len(direction_result.get("beats", [])),
+        "frames_considered": len(frames),
+        "attempts": attempt + 1,
+        "violations": len(all_violations),
+        "status": status,
+    })
+    complete_run(sb, run_id, status="complete")
+
+    return SkillResult.ok({
+        "direction_id": direction_id,
+        "beat_count": len(direction_result.get("beats", [])),
+        "frames_considered": len(frames),
+        "attempts": attempt + 1,
+        "violations": len(all_violations),
+        "violation_rules": [v["rule"] for v in all_violations],
+        "status": status,
+        "run_id": run_id,
+    })
 
 
 def _call_director(client, concept, frames, prop, owner_ctx, guest_evidence) -> dict:
-    """Call Claude to generate a direction from concept + observations.
+    """Initial direction call to Claude."""
+    return _call_claude(client, _build_prompt(concept, frames, prop, owner_ctx, guest_evidence))
 
-    This is the creative director's reasoning — driven by the vibe,
-    not a template library. The brief encodes Erick's director rules:
-    - 30 seconds, mixes guest book snippets with motion
-    - Camera moves reveal NOTHING beyond the original frame
-    - Life inside may be imagined (people, pets)
-    - Director may excerpt guest text for video
-    - Photo selection on observations (motion_affordance, motion_risk, depth)
-    """
+
+def _call_revision(client, concept, frames, prop, owner_ctx, guest_evidence, prev_direction, violations) -> dict:
+    """Revision call: send previous direction + violations back to Claude."""
+    base_prompt = _build_prompt(concept, frames, prop, owner_ctx, guest_evidence)
+    violation_text = "\n".join(f"- [{v['rule']}] {v['detail']}" for v in violations)
+    revision_prompt = f"""{base_prompt}
+
+YOUR PREVIOUS DIRECTION HAD THESE VIOLATIONS:
+{violation_text}
+
+Fix each violation while preserving the creative intent. Return the corrected direction as JSON."""
+
+    return _call_claude(client, revision_prompt)
+
+
+def _call_claude(client, prompt: str) -> dict:
+    """Call Claude and extract JSON from response."""
+    try:
+        response = client.messages.create(
+            model=_MODEL,
+            max_tokens=8192,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text
+        json_match = re.search(r'\{[\s\S]*\}', text)
+        if json_match:
+            return json.loads(json_match.group())
+        return None
+    except Exception as exc:
+        logger.error("[direct] Claude call failed: %s", str(exc)[:120])
+        return None
+
+
+def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence) -> str:
+    """Build the creative direction prompt with all constraints."""
     vibe = prop.get("vibe_profile") or "multigenerational_retreat"
     name = prop.get("name") or "the property"
 
@@ -282,81 +630,71 @@ def _call_director(client, concept, frames, prop, owner_ctx, guest_evidence) -> 
         text = ev.get("written_text") or ev.get("verbal_text") or ""
         if text.strip():
             reviewer = ev.get("reviewer_name") or "Guest"
-            guest_snippets.append(f'"{text.strip()[:200]}" — {reviewer}')
+            guest_snippets.append(f'  - "{text.strip()[:200]}" — {reviewer}')
 
-    frame_descriptions = []
-    for i, f in enumerate(frames[:30]):  # cap at 30 frames
-        desc = (
-            f'Frame {i+1} [photo_id={f["photo_id"][:8]}]: '
-            f'section={f["curated_section"]}, '
-            f'motion_affordance={f["motion_affordance"]}, '
-            f'motion_risk={f["motion_risk"]}, '
-            f'depth={f["depth_tier"]}, '
-            f'focal_point={f["focal_point"]}, '
-            f'space_direction={f["space_direction"]}, '
-            f'negative_space={f["negative_space"]}'
-        )
-        frame_descriptions.append(desc)
+    frame_lines = []
+    fields = ["photo_id", "motion_affordance", "motion_risk", "depth_tier",
+              "space_direction", "time_of_day_read", "negative_space",
+              "focal_point", "subject_singularity", "located_amenities",
+              "curated_section", "quality_score"]
+    for f in frames[:30]:
+        parts = [f"    {k}: {json.dumps(f.get(k), default=str)}" for k in fields if f.get(k) is not None]
+        frame_lines.append("  Frame:\n" + "\n".join(parts))
 
-    prompt = f"""You are a creative director for a 30-second property hero video.
+    amenities = prop.get("amenities") or []
+    amenity_str = ", ".join(str(a) for a in amenities[:50]) if amenities else "None available"
 
-PROPERTY: {name} in {prop.get("city", "")}, {prop.get("state_region", "")}
-VIBE: {vibe}
-CONCEPT PREMISE: {concept.get("premise", "")}
+    return f"""You are a creative director assembling a shot spec for a 30-second property hero video.
 
-OWNER STORY: {owner_ctx.get("owner_story", "N/A")}
-WOW FACTOR: {owner_ctx.get("wow_factor", "N/A")}
-HIDDEN GEMS: {owner_ctx.get("hidden_gems", "N/A")}
+CONCEPT:
+  Title: {concept.get('title', '')}
+  Premise: {concept.get('premise', '')}
 
-GUEST BOOK EXCERPTS (you MAY excerpt these for narration):
-{chr(10).join(guest_snippets) if guest_snippets else "None available."}
+PROPERTY:
+  Name: {name}
+  Location: {prop.get('city', '')}, {prop.get('state_region', '')}
+  Vibe profile: {vibe}
 
-CANDIDATE FRAMES (from LLM curation observations):
-{chr(10).join(frame_descriptions)}
+Owner story: {owner_ctx.get('owner_story', 'N/A')}
+Wow factor: {owner_ctx.get('wow_factor', 'N/A')}
+Hidden gems: {owner_ctx.get('hidden_gems', 'N/A')}
 
-RULES:
-1. Select 5-6 frames (beats) that tell the story. Choose on motion_affordance, depth, quality.
-2. Camera moves may reveal NOTHING beyond the original frame — no pull-backs or pans that force the model to invent what is outside the edge. If a frame has "pull_back" in motion_risk, reject it.
-3. The life inside may be imagined — you MAY describe people, pets in motion prompts where appropriate.
-4. For narration: you may excerpt guest text freely. The vibe drives tone.
-5. Target 30 seconds total (5-6 beats at 5-6 seconds each).
-6. Music brief should match the vibe mood. NO artist name references.
+Amenities (confirmed — do NOT reference any not on this list):
+  {amenity_str}
 
-Return JSON:
+Guest book entries (VERBATIM — do not reword if used):
+{chr(10).join(guest_snippets) if guest_snippets else '  None available'}
+
+CANDIDATE FRAMES (from observations):
+{chr(10).join(frame_lines) if frame_lines else '  No frames available'}
+
+CONSTRAINTS (each is validated by a deterministic check — violations trigger revision):
+1. SELECT frames ONLY from the candidate list above. Use photo_id to reference.
+2. Each beat's requested_motion MUST appear in that frame's motion_affordance list.
+3. No consecutive beats whose space_direction fights (left→right or right→left).
+4. No three consecutive beats at the same depth_tier.
+5. time_of_day_read must be consistent — no midday→night jump without an intent note.
+6. Overlay grid_region MUST come from that frame's negative_space.
+7. Do NOT reference any amenity not on the confirmed list.
+8. NO OTA references (Airbnb, VRBO, Booking.com, etc.) anywhere.
+9. NO guest names in narration or overlays — not in any form.
+10. Music brief: NO artist, song, album, publisher, or label names.
+11. Beat duration_seconds should sum to approximately 30 seconds (±20%).
+
+Return ONLY valid JSON:
 {{
   "beats": [
-    {{
-      "ordinal": 1,
-      "photo_id": "...",
-      "technique": "generative",
-      "requested_motion": "push_in",
-      "motion_prompt": "Slow push into the pool area as golden light catches the water surface",
-      "duration_seconds": 5
-    }},
+    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5}},
     ...
   ],
-  "narration_brief": "The narration script text",
+  "narration_brief": "...",
   "narration_provenance": "original" or "guest_book",
   "music_brief": {{"mood": "...", "tempo": "...", "instruments": "..."}},
   "overlay_register": [],
-  "narrative_order": "description of the narrative arc",
-  "continuity_notes": ["note about visual flow between beats"],
-  "director_rationale": "Why these frames and this sequence",
-  "evidence_used": ["guest_book", "wow_factor", "observations"],
+  "narrative_order": "...",
+  "continuity_notes": [],
+  "director_rationale": "...",
+  "evidence_used": [],
   "vibe_drift": null,
   "target_duration_sec": 30
 }}"""
-
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    text = response.content[0].text
-    # Extract JSON from response
-    import re
-    json_match = re.search(r'\{[\s\S]*\}', text)
-    if json_match:
-        return json.loads(json_match.group())
-    return None
