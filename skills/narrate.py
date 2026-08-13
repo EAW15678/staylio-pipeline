@@ -28,17 +28,6 @@ from skills.contract import (
 
 logger = logging.getLogger(__name__)
 
-# Voice IDs by vibe — from ElevenLabs buckets.
-# Only multigenerational exists today (G45). Others must be configured
-# before use — the skill fails loudly per Ruling 6 if missing.
-VIBE_VOICE_IDS = {
-    "multigenerational_retreat": os.environ.get("VOICE_MULTIGENERATIONAL", ""),
-}
-
-VIBE_VOICE_LABELS = {
-    "multigenerational_retreat": "Multi-Generational voice",
-}
-
 ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
 ELEVENLABS_MODEL = "eleven_multilingual_v2"
 
@@ -80,20 +69,24 @@ def narrate(
     if not script.strip():
         return SkillResult.noop("No narration script in this direction.", {})
 
-    # ── Resolve voice ───────────────────────────────────────────────────
+    # ── Resolve narrator voice from voice_buckets ──────────────────────
     prop = sb.table("properties").select("vibe_profile").eq(
         "id", property_id
     ).limit(1).execute()
     vibe = (prop.data[0].get("vibe_profile") if prop.data else "") or ""
 
-    voice_id = VIBE_VOICE_IDS.get(vibe, "")
-    voice_label = VIBE_VOICE_LABELS.get(vibe, f"{vibe} voice")
-
-    if not voice_id:
-        # Fail loudly — do not substitute. Ruling 6.
+    # Hero voice: director picks from the vibe's pool.
+    # For now, use the first voice (typically the staylio_* narrator).
+    # The direction could specify a voice_id in future.
+    try:
+        from skills.voice_buckets import get_vibe_pool
+        pool = get_vibe_pool(sb, vibe)
+        # Default to first voice in pool (staylio narrator by convention)
+        voice_id = pool[0]["voice_id"]
+        voice_label = pool[0]["voice_name"]
+    except (ValueError, IndexError) as e:
         return SkillResult.failed(
-            reason=f"No voice bucket configured for vibe '{vibe}'. "
-                   f"Set VOICE_{vibe.upper()} env var with an ElevenLabs voice ID.",
+            reason=f"No voice pool for vibe '{vibe}': {e}",
             attempted=1, succeeded=0, failed_count=1,
             error_class="config", human_required=True,
         )

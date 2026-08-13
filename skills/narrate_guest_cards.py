@@ -30,36 +30,10 @@ from skills.contract import (
     record_run, record_step, complete_step, complete_run, emit_cost,
     skills_r2_upload,
 )
-from skills.direct import _split_sentences, _sentences_match
-
 logger = logging.getLogger(__name__)
 
 ELEVENLABS_API_BASE = "https://api.elevenlabs.io/v1"
 ELEVENLABS_MODEL = "eleven_multilingual_v2"
-
-# Gender-neutral patterns — voice choice is unconstrained
-_NEUTRAL_PATTERNS = ["family", "class of", "reunion", "group", "team", "club"]
-
-
-def _is_gender_neutral(reviewer_name: str) -> bool:
-    """Check if the reviewer name is gender-neutral (unconstrained voice)."""
-    name_lower = (reviewer_name or "").lower()
-    return any(p in name_lower for p in _NEUTRAL_PATTERNS)
-
-
-def _select_voice(reviewer_name: str, vibe_voice_id: str) -> tuple:
-    """Select voice for a guest entry.
-
-    Gender-neutral attributions use the vibe's default voice.
-    Gendered names would need male/female routing (not yet implemented
-    — only gender-neutral entries exist for Vista Azule).
-
-    Returns (voice_id, voice_label, reason).
-    """
-    if _is_gender_neutral(reviewer_name):
-        return vibe_voice_id, "Multi-Generational voice (gender-neutral attribution)", "unconstrained"
-    # TODO: gendered voice routing when male/female voice buckets exist
-    return vibe_voice_id, "Multi-Generational voice (default)", "no gendered bucket configured"
 
 
 def narrate_guest_cards(
@@ -81,15 +55,19 @@ def narrate_guest_cards(
     except EnvironmentError as e:
         return SkillResult.failed(str(e))
 
-    # Resolve vibe voice
+    # Resolve vibe
     prop = sb.table("properties").select("vibe_profile").eq("id", property_id).limit(1).execute()
     vibe = (prop.data[0].get("vibe_profile") if prop.data else "") or ""
-    vibe_voice_id = os.environ.get("VOICE_MULTIGENERATIONAL", "")
-    if not vibe_voice_id:
-        return SkillResult.failed(
-            reason=f"No voice bucket configured for vibe '{vibe}'.",
-            error_class="config", human_required=True,
-        )
+
+    # Find the hero narrator's voice_id to exclude from guest pool
+    hero_voice_id = None
+    hero_narr = sb.table("video_artifacts").select("voice_id").eq(
+        "property_id", property_id
+    ).eq("kind", "narration").eq("status", "ready").is_(
+        "superseded_at", "null"
+    ).not_.eq("provenance", "guest_book").limit(1).execute()
+    if hero_narr.data:
+        hero_voice_id = hero_narr.data[0].get("voice_id")
 
     # Load guest evidence
     ev_resp = sb.table("guest_evidence").select("*").eq(
@@ -123,12 +101,24 @@ def narrate_guest_cards(
         if verbal and len(verbal) > 20:
             narration_text = f"{written} {verbal}"
 
-        # ── Voice selection ─────────────────────────────────────────────
-        voice_id, voice_label, reason = _select_voice(reviewer, vibe_voice_id)
+        # ── Voice selection from voice_buckets ──────────────────────────
+        try:
+            from skills.voice_buckets import resolve_guest_voice
+            voice_info = resolve_guest_voice(sb, vibe, reviewer, exclude_voice_id=hero_voice_id)
+            voice_id = voice_info["voice_id"]
+            voice_label = voice_info["voice_name"]
+            reason = voice_info["reason"]
+        except ValueError as e:
+            logger.warning("[narrate_guest_cards] %s: %s", reviewer, str(e))
+            skipped += 1
+            voice_choices.append({"reviewer": reviewer, "voice_label": "FAILED", "reason": str(e)})
+            continue
+
         voice_choices.append({
             "reviewer": reviewer,
             "voice_label": voice_label,
             "reason": reason,
+            "gender": voice_info.get("gender"),
         })
 
         # ── Input hash ──────────────────────────────────────────────────

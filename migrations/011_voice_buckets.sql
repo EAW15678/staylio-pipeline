@@ -1,0 +1,6 @@
+-- 011: Voice buckets — voice assignments by vibe profile.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-13.
+-- Narrators are the staylio_* voices per vibe.
+-- Guest voices are selected by gender match from the same vibe pool.
+-- Data, not env vars — seeded from ElevenLabs API read.
+-- See skills/voice_buckets.py for resolution logic.
