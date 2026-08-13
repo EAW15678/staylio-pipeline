@@ -220,6 +220,7 @@ def test_quote_fidelity_exact_match_passes():
     """Exact source sentence used → passes."""
     direction = {
         "narration_brief": "The pool was incredible.",
+        "narration_script": "The pool was incredible.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -230,6 +231,7 @@ def test_quote_fidelity_paraphrase_fails():
     """Paraphrased sentence → fails."""
     direction = {
         "narration_brief": "The swimming pool was amazing.",
+        "narration_script": "The swimming pool was amazing.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -258,23 +260,19 @@ def test_duration_pass():
     direction = {
         "beats": [{"duration_seconds": 5}, {"duration_seconds": 5}, {"duration_seconds": 5},
                   {"duration_seconds": 5}, {"duration_seconds": 5}, {"duration_seconds": 5}],
-        "target_duration_sec": 30,
-    }
-    assert validate_duration(direction) == []  # 30s exactly
+        }
+    assert validate_duration(direction) == []  # 30s within [28, 32]
 
 
 def test_duration_fail_too_short():
-    direction = {
-        "beats": [{"duration_seconds": 3}],
-        "target_duration_sec": 30,
-    }
+    direction = {"beats": [{"duration_seconds": 3}]}
     violations = validate_duration(direction)
     assert len(violations) == 1
-    assert violations[0]["rule"] == "duration"
+    assert "outside hard range" in violations[0]["detail"]
 
 
 def test_duration_fail_zero():
-    direction = {"beats": [{"duration_seconds": 0}], "target_duration_sec": 30}
+    direction = {"beats": [{"duration_seconds": 0}]}
     violations = validate_duration(direction)
     assert len(violations) == 1
     assert "duration is 0" in violations[0]["detail"]

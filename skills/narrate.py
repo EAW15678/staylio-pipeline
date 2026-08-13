@@ -65,7 +65,7 @@ def narrate(
 
     # ── Load direction ──────────────────────────────────────────────────
     dir_resp = sb.table("directions").select(
-        "direction_id, concept_id, narration_brief, narration_provenance"
+        "direction_id, concept_id, narration_script, narration_brief, narration_provenance"
     ).eq("direction_id", direction_id).is_("superseded_at", "null").limit(1).execute()
 
     if not dir_resp.data:
@@ -74,10 +74,11 @@ def narrate(
             attempted=0, succeeded=0, failed_count=0,
         )
     direction = dir_resp.data[0]
-    script = direction.get("narration_brief") or ""
+    # Use narration_script (the spoken words), NOT narration_brief (instruction)
+    script = direction.get("narration_script") or ""
 
     if not script.strip():
-        return SkillResult.noop("No narration brief in this direction.", {})
+        return SkillResult.noop("No narration script in this direction.", {})
 
     # ── Resolve voice ───────────────────────────────────────────────────
     prop = sb.table("properties").select("vibe_profile").eq(

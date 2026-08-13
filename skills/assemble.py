@@ -44,12 +44,15 @@ logger = logging.getLogger(__name__)
 CREATOMATE_API_BASE = "https://api.creatomate.com/v2"
 CREATOMATE_COST_PER_RENDER_MINUTE = 0.84
 
-# Master canvas: 9:16 portrait for social
-MASTER_WIDTH = 1080
-MASTER_HEIGHT = 1920
+# Canvas dimensions by aspect ratio
+ASPECT_DIMENSIONS = {
+    "16:9": (1920, 1080),
+    "9:16": (1080, 1920),
+}
 
 
-def _build_renderscript(clips: list, narration=None, music=None) -> dict:
+def _build_renderscript(clips: list, narration=None, music=None,
+                        aspect_ratio="16:9", title_text=None, location_text=None) -> dict:
     """Build a Creatomate source-based RenderScript from artifacts.
 
     Source-based (no template_id): the JSON source object defines the
@@ -98,12 +101,93 @@ def _build_renderscript(clips: list, narration=None, music=None) -> dict:
             "volume": music_volume,
         })
 
+    width, height = ASPECT_DIMENSIONS.get(aspect_ratio, (1920, 1080))
+
+    # ── Title annotations (landing page hero only) ──────────────────────
+    # Opens and closes with property name + location.
+    # Closing treatment is lighter/more transparent per Erick's note.
+    title_elements = []
+    if title_text:
+        location_line = location_text or ""
+        # Opening title: first 3 seconds, full opacity
+        title_elements.append({
+            "type": "text",
+            "text": title_text,
+            "time": 0,
+            "duration": 3,
+            "x": "50%",
+            "y": "85%",
+            "width": "80%",
+            "font_family": "Open Sans",
+            "font_weight": "700",
+            "font_size": "48",
+            "color": "#ffffff",
+            "shadow_color": "rgba(0,0,0,0.6)",
+            "shadow_blur": "8",
+            "x_alignment": "50%",
+            "y_alignment": "50%",
+        })
+        if location_line:
+            title_elements.append({
+                "type": "text",
+                "text": location_line,
+                "time": 0,
+                "duration": 3,
+                "x": "50%",
+                "y": "92%",
+                "width": "80%",
+                "font_family": "Open Sans",
+                "font_weight": "400",
+                "font_size": "28",
+                "color": "rgba(255,255,255,0.9)",
+                "shadow_color": "rgba(0,0,0,0.5)",
+                "shadow_blur": "6",
+                "x_alignment": "50%",
+                "y_alignment": "50%",
+            })
+        # Closing title: last 3 seconds, more transparent
+        title_elements.append({
+            "type": "text",
+            "text": title_text,
+            "time": total_duration - 3,
+            "duration": 3,
+            "x": "50%",
+            "y": "85%",
+            "width": "80%",
+            "font_family": "Open Sans",
+            "font_weight": "700",
+            "font_size": "42",
+            "color": "rgba(255,255,255,0.7)",
+            "shadow_color": "rgba(0,0,0,0.4)",
+            "shadow_blur": "6",
+            "x_alignment": "50%",
+            "y_alignment": "50%",
+        })
+        if location_line:
+            title_elements.append({
+                "type": "text",
+                "text": location_line,
+                "time": total_duration - 3,
+                "duration": 3,
+                "x": "50%",
+                "y": "92%",
+                "width": "80%",
+                "font_family": "Open Sans",
+                "font_weight": "400",
+                "font_size": "24",
+                "color": "rgba(255,255,255,0.5)",
+                "shadow_color": "rgba(0,0,0,0.3)",
+                "shadow_blur": "4",
+                "x_alignment": "50%",
+                "y_alignment": "50%",
+            })
+
     return {
         "output_format": "mp4",
-        "width": MASTER_WIDTH,
-        "height": MASTER_HEIGHT,
+        "width": width,
+        "height": height,
         "duration": total_duration,
-        "elements": clip_elements + audio_elements,
+        "elements": clip_elements + audio_elements + title_elements,
     }
 
 
@@ -111,13 +195,13 @@ def assemble(
     property_id: str,
     direction_id: str,
     *,
+    aspect_ratio: str = "16:9",
     force: bool = False,
 ) -> SkillResult:
     """Assemble a master video from clips + narration + music.
 
-    Reads video_artifacts(kind='clip') for this direction, plus any
-    narration and music artifacts. Builds a source-based RenderScript
-    and renders via Creatomate.
+    aspect_ratio: "16:9" for landing page hero, "9:16" for social variants.
+    Title annotations (property name + location) are added for hero only.
 
     Returns SkillResult.ok({artifact_id, duration_seconds, cost_usd})
     """
@@ -182,8 +266,24 @@ def assemble(
     run_id = record_run(sb, property_id, "monthly_cycle")
     step_id = record_step(sb, run_id, "assemble")
 
+    # ── Load property name + location for title annotations ────────────
+    title_text = None
+    location_text = None
+    if aspect_ratio == "16:9":  # Title annotations on hero only
+        prop_resp = sb.table("properties").select("name, city, state_region").eq(
+            "id", property_id).limit(1).execute()
+        if prop_resp.data:
+            p = prop_resp.data[0]
+            title_text = p.get("name")
+            city = p.get("city") or ""
+            state = p.get("state_region") or ""
+            location_text = ", ".join(filter(None, [city, state])) or None
+
     # ── Build RenderScript ──────────────────────────────────────────────
-    renderscript = _build_renderscript(clips, narration, music)
+    renderscript = _build_renderscript(
+        clips, narration, music,
+        aspect_ratio=aspect_ratio, title_text=title_text, location_text=location_text,
+    )
     total_duration = renderscript["duration"]
 
     # ── Render via Creatomate ───────────────────────────────────────────
@@ -282,8 +382,8 @@ def assemble(
         "narration_artifact_id": narration["artifact_id"] if narration else None,
         "music_artifact_id": music["artifact_id"] if music else None,
         "has_audio_ducking": narration is not None and music is not None,
-        "aspect_ratio": "9:16",
-        "resolution": f"{MASTER_WIDTH}x{MASTER_HEIGHT}",
+        "aspect_ratio": aspect_ratio,
+        "resolution": f"{renderscript['width']}x{renderscript['height']}",
         "cost_estimate_usd": render_cost,
         "status": "ready",
         "created_by_agent": "skills/assemble",

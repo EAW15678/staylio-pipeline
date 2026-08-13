@@ -201,9 +201,10 @@ def validate_no_guest_names(direction: dict, guest_names: list) -> list:
         return violations
 
     surfaces = []
-    narration = direction.get("narration_brief") or ""
+    # Check the SCRIPT (what's spoken), not the brief (instruction)
+    narration = direction.get("narration_script") or direction.get("narration_brief") or ""
     if narration:
-        surfaces.append((narration, "narration_brief"))
+        surfaces.append((narration, "narration_script"))
     for overlay in direction.get("overlay_register") or []:
         text = overlay.get("text") or ""
         if text:
@@ -314,9 +315,10 @@ def validate_quote_fidelity(direction: dict, guest_texts: list) -> list:
                 passages_to_check.append((text, f"overlay beat {overlay.get('beat_ordinal', '?')}"))
 
     narration_prov = direction.get("narration_provenance") or ""
-    narration = direction.get("narration_brief") or ""
+    # Validator 9 checks the SCRIPT (what's spoken), not the brief (instruction)
+    narration = direction.get("narration_script") or ""
     if "guest_book" in narration_prov and narration:
-        passages_to_check.append((narration, "narration_brief"))
+        passages_to_check.append((narration, "narration_script"))
 
     if not passages_to_check:
         return violations
@@ -386,17 +388,19 @@ def validate_music_brief_prohibited(direction: dict) -> list:
 
 
 def validate_duration(direction: dict) -> list:
-    """Beat durations must sum within ±20% of target."""
+    """Beat durations must sum to 28-32 seconds (hard range).
+
+    The reason: narration must never be cut off mid-sentence.
+    The director sizes beats to fit whole spoken sentences.
+    """
     violations = []
     beats = direction.get("beats") or []
-    target = direction.get("target_duration_sec", 30)
     total = sum(b.get("duration_seconds", 0) for b in beats)
     if total == 0:
         violations.append({"rule": "duration", "detail": "Total beat duration is 0", "beats": []})
         return violations
-    lower, upper = target * 0.8, target * 1.2
-    if total < lower or total > upper:
-        violations.append({"rule": "duration", "detail": f"Total {total}s outside [{lower:.0f}s, {upper:.0f}s] for target {target}s", "beats": []})
+    if total < 28 or total > 32:
+        violations.append({"rule": "duration", "detail": f"Total {total}s outside hard range [28s, 32s]", "beats": []})
     return violations
 
 
@@ -586,6 +590,7 @@ def direct(
         "narrative_order": direction_result.get("narrative_order"),
         "continuity_notes": direction_result.get("continuity_notes", []),
         "narration_brief": direction_result.get("narration_brief"),
+        "narration_script": direction_result.get("narration_script"),
         "narration_provenance": direction_result.get("narration_provenance"),
         "music_brief": direction_result.get("music_brief", {}),
         "overlay_register": direction_result.get("overlay_register", []),
@@ -723,9 +728,19 @@ CONSTRAINTS (each is validated by a deterministic check — violations trigger r
 6. Overlay grid_region MUST come from that frame's negative_space.
 7. Do NOT reference any amenity not on the confirmed list.
 8. NO OTA references (Airbnb, VRBO, Booking.com, etc.) anywhere.
-9. NO guest names in narration or overlays — not in any form.
+9. NO guest names in narration_script or overlays — not in any form.
 10. Music brief: NO artist, song, album, publisher, or label names.
-11. Beat duration_seconds should sum to approximately 30 seconds (±20%).
+11. Beat duration_seconds MUST sum to 28-32 seconds (hard range). The reason:
+    narration must never be cut off mid-sentence. Size beats to fit whole
+    spoken sentences, not the reverse.
+
+NARRATION FIELDS — TWO SEPARATE OUTPUTS:
+- narration_brief: your INSTRUCTION to yourself about tone, pacing, approach.
+  NOT sent to TTS. Example: "Open warm, let spaces breathe, close emotional."
+- narration_script: the EXACT WORDS the narrator speaks. This is what the
+  audience hears. Write it as finished speech, not as direction.
+  If narration_provenance is "guest_book", narration_script must use whole
+  source sentences only (validated deterministically).
 
 Return ONLY valid JSON:
 {{
@@ -733,7 +748,8 @@ Return ONLY valid JSON:
     {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5}},
     ...
   ],
-  "narration_brief": "...",
+  "narration_brief": "Instruction to the director about tone and approach",
+  "narration_script": "The exact words the narrator speaks aloud",
   "narration_provenance": "original" or "guest_book",
   "music_brief": {{"mood": "...", "tempo": "...", "instruments": "..."}},
   "overlay_register": [],

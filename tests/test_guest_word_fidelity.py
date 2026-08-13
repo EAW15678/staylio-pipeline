@@ -64,7 +64,7 @@ def test_split_sentences_preserves_abbreviations():
 def test_exact_match_passes():
     """Narration uses Eileen's exact sentences → passes."""
     direction = {
-        "narration_brief": (
+        "narration_script": (
             "My family had a fantastic two weeks staying at this wonderful house. "
             "My granddaughter was in the pool every day and loved the basketball hoop."
         ),
@@ -81,7 +81,7 @@ def test_granddaughter_typo_passes():
     """Verbal text has 'grand daughter', written has 'granddaughter'.
     Narration using either spelling should match."""
     direction = {
-        "narration_brief": "My grand daughter loved the pool.",
+        "narration_script": "My grand daughter loved the pool.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -94,7 +94,7 @@ def test_granddaughter_typo_passes():
 def test_ampersand_expansion_passes():
     """Source has '&', narration uses 'and' → passes."""
     direction = {
-        "narration_brief": "This home is extremely clean and very spacious.",
+        "narration_script": "This home is extremely clean and very spacious.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -108,7 +108,7 @@ def test_dropped_word_fails():
     """'My family had a fantastic two weeks at this wonderful house.'
     — dropped 'staying' → fails."""
     direction = {
-        "narration_brief": "My family had a fantastic two weeks at this wonderful house.",
+        "narration_script": "My family had a fantastic two weeks at this wonderful house.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -123,7 +123,7 @@ def test_reordered_clause_fails():
     """'This wonderful house, my family had a fantastic two weeks staying at.'
     — reordered → fails."""
     direction = {
-        "narration_brief": "This wonderful house, my family had a fantastic two weeks staying at.",
+        "narration_script": "This wonderful house, my family had a fantastic two weeks staying at.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -138,7 +138,7 @@ def test_mid_sentence_truncation_fails():
     """'My family had a fantastic two weeks' — sentence cut mid-flow → fails.
     The director must drop the whole sentence or choose a shorter one."""
     direction = {
-        "narration_brief": "My family had a fantastic two weeks",
+        "narration_script": "My family had a fantastic two weeks",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -153,7 +153,7 @@ def test_paraphrase_fails():
     """'The family enjoyed their wonderful two-week stay at this beautiful home.'
     — paraphrased → fails."""
     direction = {
-        "narration_brief": "The family enjoyed their wonderful two-week stay at this beautiful home.",
+        "narration_script": "The family enjoyed their wonderful two-week stay at this beautiful home.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
@@ -168,7 +168,7 @@ def test_sentence_selection_passes():
     """Director selects sentences 1 and 5 from Eileen, skipping 2-4 → passes.
     Whole sentences, just fewer of them."""
     direction = {
-        "narration_brief": (
+        "narration_script": (
             "My family had a fantastic two weeks staying at this wonderful house. "
             "Already looking forward to next summer."
         ),
@@ -185,7 +185,7 @@ def test_cross_guest_sentences_pass():
     """Director uses one sentence from Eileen and one from Tom → passes.
     Both are whole source sentences."""
     direction = {
-        "narration_brief": (
+        "narration_script": (
             "My granddaughter was in the pool every day and loved the basketball hoop. "
             "Loved the pool."
         ),
@@ -201,7 +201,7 @@ def test_cross_guest_sentences_pass():
 def test_original_narration_not_checked():
     """narration_provenance='original' → validator skips entirely."""
     direction = {
-        "narration_brief": "This is completely made up narration, not from any guest.",
+        "narration_script": "This is completely made up narration, not from any guest.",
         "narration_provenance": "original",
         "overlay_register": [],
     }
@@ -214,7 +214,7 @@ def test_original_narration_not_checked():
 def test_overlay_guest_quote_checked():
     """An overlay with provenance='guest_book' and a paraphrase → fails."""
     direction = {
-        "narration_brief": "",
+        "narration_script": "",
         "narration_provenance": "original",
         "overlay_register": [
             {

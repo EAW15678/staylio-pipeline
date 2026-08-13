@@ -48,12 +48,16 @@ def generate_motion(
     property_id: str,
     direction_id: str,
     *,
+    aspect_ratio: str = "16:9",
     force: bool = False,
 ) -> SkillResult:
     """Render motion clips from a direction's beats array.
 
     Each beat becomes a video_artifacts(kind='clip') row. Frame-exit
     moves are rejected before any vendor call.
+
+    aspect_ratio: "16:9" for hero (1920x1080), "9:16" for social (1080x1920).
+    Passed to Runway at generation time — clips are rendered at this ratio.
 
     Returns SkillResult.ok({clips_rendered, clips_rejected, clips_cached, cost_usd})
     """
@@ -141,6 +145,7 @@ def generate_motion(
             "prompt": motion_prompt,
             "duration": duration,
             "model": model,
+            "aspect_ratio": aspect_ratio,
         }, sort_keys=True)
         input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
 
@@ -164,7 +169,7 @@ def generate_motion(
                 prompt_image=source_url,
                 prompt_text=motion_prompt,
                 duration=duration,
-                ratio="1280:720",
+                ratio="1920:1080" if aspect_ratio == "16:9" else "1080:1920",
             )
 
             # Poll for completion
