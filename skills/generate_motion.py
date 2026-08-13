@@ -169,7 +169,7 @@ def generate_motion(
                 prompt_image=source_url,
                 prompt_text=motion_prompt,
                 duration=duration,
-                ratio="1920:1080" if aspect_ratio == "16:9" else "1080:1920",
+                ratio="1280:720" if aspect_ratio == "16:9" else "720:1280",
             )
 
             # Poll for completion
