@@ -10,9 +10,9 @@ Includes all 11 validators ported from agents/agent8/creative_director.py
 shot_id → photo_id, duration_sec → duration_seconds). Plus a revision
 loop: failed validation triggers re-direction, not just rejection.
 
-Validator 9 (quote_fidelity) is ported but STUBBED — it returns
-"uncertain" without calling Claude, which triggers a HOLD per Guidelines
-section 8. To activate the model-assisted check, set VALIDATE_QUOTE_FIDELITY=1.
+Validator 9 (guest_word_fidelity) is DETERMINISTIC — string comparison,
+no model, no cost. Guest book narration must use the guest's own words:
+whole sentences only, typo corrections allowed, no paraphrasing.
 
 Usage:
     from skills.direct import direct
@@ -231,89 +231,135 @@ def validate_no_guest_names(direction: dict, guest_names: list) -> list:
     return violations
 
 
-def validate_quote_fidelity(direction: dict, guest_texts: list) -> list:
-    """MODEL-ASSISTED quote fidelity check.
+def _split_sentences(text: str) -> list:
+    """Split text into sentences. Handles ., !, ? followed by space or end."""
+    if not text:
+        return []
+    # Split on sentence-ending punctuation followed by whitespace or end
+    raw = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [s.strip() for s in raw if s.strip()]
 
-    STUBBED by default — returns "uncertain" (HOLD) without calling Claude.
-    Set VALIDATE_QUOTE_FIDELITY=1 to activate the model-assisted check.
+
+def _normalize_for_comparison(text: str) -> list:
+    """Normalize a sentence to a word list for typo-tolerant comparison.
+
+    Strips punctuation, lowercases, expands symbols (&→and).
+    Returns a list of words.
+    """
+    t = text.lower()
+    t = t.replace("&", "and")
+    # Remove punctuation except apostrophes in contractions
+    t = re.sub(r"[^\w\s']", " ", t)
+    # Collapse whitespace
+    return t.split()
+
+
+def _sentences_match(narrated: str, source: str) -> bool:
+    """Check if a narrated sentence matches a source sentence.
+
+    ALLOWED differences (typo/TTS normalisation only):
+      - whitespace, punctuation
+      - & → and
+      - single-word spelling corrections (e.g. "grand daughter" → "granddaughter")
+
+    FAILING differences: any word ADDED, REMOVED, or REORDERED.
+    """
+    n_words = _normalize_for_comparison(narrated)
+    s_words = _normalize_for_comparison(source)
+
+    if n_words == s_words:
+        return True
+
+    # Allow single-word spelling corrections: "grand daughter" (2 tokens)
+    # matching "granddaughter" (1 token) or vice versa. We check if
+    # concatenating adjacent word pairs produces a match.
+    def _expand_compounds(words: list) -> list:
+        """Try joining adjacent words to handle split/compound differences."""
+        expanded = set()
+        expanded.add(tuple(words))
+        for i in range(len(words) - 1):
+            merged = words[:i] + [words[i] + words[i + 1]] + words[i + 2:]
+            expanded.add(tuple(merged))
+        return expanded
+
+    n_variants = _expand_compounds(n_words)
+    s_variants = _expand_compounds(s_words)
+
+    # Match if any variant of narrated matches any variant of source
+    return bool(n_variants & s_variants)
+
+
+def validate_quote_fidelity(direction: dict, guest_texts: list) -> list:
+    """DETERMINISTIC guest word fidelity check. No model, no cost, always on.
+
+    Guest book narration MUST be the guest's own words:
+      - WHOLE SENTENCES ONLY (select which to include, not which words)
+      - Typo corrections allowed (& → and, spelling fixes)
+      - No paraphrasing, no mid-sentence cuts, no added/removed/reordered words
+
+    Every narrated sentence must match a source sentence whole-to-whole.
+    A narrated passage must never end anywhere but a source sentence boundary
+    (the mid-flow guard).
     """
     violations = []
     if not guest_texts:
         return violations
 
-    quotes_to_check = []
+    # Collect guest-attributed passages from the direction
+    passages_to_check = []
     for overlay in direction.get("overlay_register") or []:
         if overlay.get("provenance") == "guest_book":
             text = overlay.get("text") or ""
             if text:
-                quotes_to_check.append((text, f"overlay beat {overlay.get('beat_ordinal', '?')}"))
+                passages_to_check.append((text, f"overlay beat {overlay.get('beat_ordinal', '?')}"))
 
     narration_prov = direction.get("narration_provenance") or ""
     narration = direction.get("narration_brief") or ""
     if "guest_book" in narration_prov and narration:
-        quotes_to_check.append((narration, "narration_brief"))
+        passages_to_check.append((narration, "narration_brief"))
 
-    if not quotes_to_check:
+    if not passages_to_check:
         return violations
 
-    activate = os.environ.get("VALIDATE_QUOTE_FIDELITY", "") == "1"
+    # Build the pool of all source sentences
+    source_sentences = []
+    for text in guest_texts:
+        source_sentences.extend(_split_sentences(text))
 
-    for quote, location in quotes_to_check:
-        # Find best-matching source
-        best_source, best_overlap = None, 0
-        quote_words = set(quote.lower().split())
-        for source_text in guest_texts:
-            source_words = set(source_text.lower().split())
-            overlap = len(quote_words & source_words)
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_source = source_text
+    for passage, location in passages_to_check:
+        narrated_sentences = _split_sentences(passage)
 
-        if not best_source:
-            violations.append({"rule": "quote_fidelity", "detail": f"Cannot identify source for guest quote in {location}: '{quote[:80]}'", "beats": [], "severity": "fail"})
+        if not narrated_sentences:
             continue
 
-        if activate:
-            verdict = _check_fidelity_with_model(best_source, quote)
-        else:
-            verdict = "uncertain"  # STUBBED — HOLD per Guidelines section 8
+        for ns in narrated_sentences:
+            # Check if this narrated sentence matches ANY source sentence
+            matched = False
+            for ss in source_sentences:
+                if _sentences_match(ns, ss):
+                    matched = True
+                    break
 
-        if verdict == "fail":
-            violations.append({"rule": "quote_fidelity", "detail": f"Quote in {location} materially changes meaning. Original: '{best_source[:80]}' → Used: '{quote[:80]}'", "beats": [], "severity": "fail"})
-        elif verdict == "uncertain":
-            violations.append({"rule": "quote_fidelity", "detail": f"Uncertain fidelity in {location}. HELD per Guidelines section 8. Original: '{best_source[:80]}' → Used: '{quote[:80]}'", "beats": [], "severity": "uncertain"})
+            if not matched:
+                violations.append({
+                    "rule": "guest_word_fidelity",
+                    "detail": (
+                        f"Narrated sentence in {location} has no whole-sentence match "
+                        f"in source: '{ns[:80]}'"
+                    ),
+                    "beats": [],
+                })
+
+        # ── Mid-flow guard: passage must end at a source sentence boundary ──
+        # The last narrated sentence must match a source sentence exactly
+        # (already checked above). Additionally, if the source text continues
+        # beyond the last matched sentence, the narration must not end mid-
+        # sentence. This is structurally guaranteed by the sentence-level
+        # matching: since every narrated sentence is a WHOLE source sentence,
+        # the passage can only end at a sentence boundary. A mid-sentence
+        # truncation would fail the word-level match above.
 
     return violations
-
-
-def _check_fidelity_with_model(original: str, quote: str) -> str:
-    """Ask Claude whether a pull-quote preserves the original's meaning."""
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    prompt = f"""A guest wrote this in a vacation rental's physical guest book:
-
-ORIGINAL: "{original}"
-
-For social media, this was shortened to:
-
-QUOTE: "{quote}"
-
-Rules:
-- Correcting misspellings is permitted.
-- Truncating to a quotable line is permitted.
-- Any change that shifts what the guest stated or implied is NOT permitted.
-- Truncation that inverts meaning by omission is NOT permitted.
-
-Does the quote preserve the meaning and intent of the original?
-Respond with EXACTLY one word: pass, fail, or uncertain."""
-
-    try:
-        resp = client.messages.create(model=_MODEL, max_tokens=10, messages=[{"role": "user", "content": prompt}])
-        verdict = resp.content[0].text.strip().lower()
-        return verdict if verdict in ("pass", "fail", "uncertain") else "uncertain"
-    except Exception as exc:
-        logger.warning("[direct] Fidelity check failed, treating as uncertain: %s", exc)
-        return "uncertain"
 
 
 def validate_music_brief_prohibited(direction: dict) -> list:

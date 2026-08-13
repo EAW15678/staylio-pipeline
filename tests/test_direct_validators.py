@@ -208,25 +208,34 @@ def test_no_guest_names_fail_attribution():
     assert "no_guest_names" in violations[0]["rule"]
 
 
-# ── 9. Quote Fidelity (STUBBED) ──────────────────────────────────────────
+# ── 9. Guest Word Fidelity (DETERMINISTIC) ───────────────────────────────
 
 def test_quote_fidelity_no_quotes():
     """No guest-provenance quotes → no violations."""
-    direction = {"narration_brief": "Original narration", "overlay_register": []}
-    assert validate_quote_fidelity(direction, ["Some guest text"]) == []
+    direction = {"narration_brief": "Original narration", "narration_provenance": "original", "overlay_register": []}
+    assert validate_quote_fidelity(direction, ["Some guest text."]) == []
 
 
-def test_quote_fidelity_stubbed_returns_uncertain():
-    """Stubbed mode: guest-book narration → uncertain → HOLD."""
+def test_quote_fidelity_exact_match_passes():
+    """Exact source sentence used → passes."""
     direction = {
-        "narration_brief": "The pool was incredible",
+        "narration_brief": "The pool was incredible.",
         "narration_provenance": "guest_book",
         "overlay_register": [],
     }
-    violations = validate_quote_fidelity(direction, ["The pool was incredible and the beach was even better"])
-    assert len(violations) == 1
-    assert violations[0]["severity"] == "uncertain"
-    assert "HELD" in violations[0]["detail"]
+    assert validate_quote_fidelity(direction, ["The pool was incredible."]) == []
+
+
+def test_quote_fidelity_paraphrase_fails():
+    """Paraphrased sentence → fails."""
+    direction = {
+        "narration_brief": "The swimming pool was amazing.",
+        "narration_provenance": "guest_book",
+        "overlay_register": [],
+    }
+    violations = validate_quote_fidelity(direction, ["The pool was incredible."])
+    assert len(violations) >= 1
+    assert violations[0]["rule"] == "guest_word_fidelity"
 
 
 # ── 10. Music Brief Prohibited ───────────────────────────────────────────
