@@ -213,7 +213,7 @@ def root():
         "service": "Staylio.ai Pipeline",
         "version": "2.0.0",
         "status": "running",
-        "endpoints": ["/health", "/intake", "/run", "/substrate/onboard", "/preview", "/status/{property_id}"],
+        "endpoints": ["/health", "/intake", "/run", "/substrate/onboard", "/substrate/publish", "/preview", "/status/{property_id}"],
     }
 
 
@@ -575,6 +575,38 @@ async def intake_submission(
 class SubstrateOnboardRequest(BaseModel):
     property_id: str
     force: bool = False
+
+
+class SubstratePublishRequest(BaseModel):
+    property_id: str
+    force: bool = True
+
+
+@app.post("/substrate/publish")
+def substrate_publish(
+    request: SubstratePublishRequest,
+    x_portal_secret: str | None = Header(default=None),
+):
+    """Publish a property page only — no scrape, no enhance, no observe.
+
+    Requires X-Portal-Secret header matching PORTAL_API_SECRET.
+    Calls publish_page directly with its own run + run_step.
+    """
+    if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+
+    try:
+        from skills.publish_page import publish_page
+        result = publish_page(request.property_id, force=request.force)
+        return {
+            "status": result.status,
+            "data": result.data,
+            "reason": result.reason,
+        }
+    except Exception as exc:
+        import traceback
+        logger.error(f"Substrate publish failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {str(exc)[:500]}")
 
 
 @app.post("/substrate/onboard")
