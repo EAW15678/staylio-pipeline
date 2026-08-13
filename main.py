@@ -213,7 +213,7 @@ def root():
         "service": "Staylio.ai Pipeline",
         "version": "2.0.0",
         "status": "running",
-        "endpoints": ["/health", "/intake", "/run", "/substrate/onboard", "/substrate/publish", "/preview", "/status/{property_id}"],
+        "endpoints": ["/health", "/intake", "/run", "/substrate/onboard", "/substrate/publish", "/substrate/status/{run_id}", "/preview", "/status/{property_id}"],
     }
 
 
@@ -609,33 +609,107 @@ def substrate_publish(
         raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {str(exc)[:500]}")
 
 
+def _run_onboard_background(property_id: str, run_id: str, force: bool):
+    """Background worker for onboard. Updates the run row on completion or failure."""
+    try:
+        from workflows.onboard import onboard
+        result = onboard(property_id, force=force, run_id=run_id)
+        # onboard already calls complete_run — but guard against orphan status
+        from skills.contract import get_substrate
+        sb = get_substrate()
+        row = sb.table("runs").select("status").eq("run_id", run_id).limit(1).execute()
+        if row.data and row.data[0].get("status") == "running":
+            # Workflow returned without completing the run — close it
+            from skills.contract import complete_run
+            status = "complete" if result.is_ok else "failed"
+            complete_run(sb, run_id, status=status,
+                         error_summary=result.reason if not result.is_ok else None)
+    except Exception as exc:
+        # Workflow raised — mark run as failed, never leave it "running"
+        import traceback
+        logger.error(f"Background onboard failed: {traceback.format_exc()}")
+        try:
+            from skills.contract import get_substrate, complete_run
+            sb = get_substrate()
+            complete_run(sb, run_id, status="failed",
+                         error_summary=f"{type(exc).__name__}: {str(exc)[:300]}")
+        except Exception:
+            logger.error(f"Could not mark run {run_id} as failed")
+
+
 @app.post("/substrate/onboard")
 def substrate_onboard(
     request: SubstrateOnboardRequest,
+    background_tasks: BackgroundTasks,
     x_portal_secret: str | None = Header(default=None),
 ):
-    """Run the substrate onboard workflow (skills-based pipeline).
+    """Fire the substrate onboard workflow in the background.
 
-    Requires X-Portal-Secret header matching PORTAL_API_SECRET.
-    Synchronous def (not async) — FastAPI runs it in a threadpool so
-    the blocking Supabase/httpx calls don't stall the event loop.
-    Use force=False to converge (noops on completed work).
+    Returns immediately with {run_id, status: "started"}.
+    The run row exists BEFORE the response returns — safe to poll instantly.
+    Poll progress via GET /substrate/status/{run_id}.
     """
     if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized.")
 
-    try:
-        from workflows.onboard import onboard
-        result = onboard(request.property_id, force=request.force)
-        return {
-            "status": result.status,
-            "data": result.data,
-            "reason": result.reason,
-        }
-    except Exception as exc:
-        import traceback
-        logger.error(f"Substrate onboard failed: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"{type(exc).__name__}: {str(exc)[:500]}")
+    # Create the run row NOW, before returning — prevents poll race
+    from skills.contract import get_substrate, record_run
+    sb = get_substrate()
+    run_id = record_run(sb, request.property_id, "onboard")
+
+    # Fire workflow in background
+    background_tasks.add_task(
+        _run_onboard_background, request.property_id, run_id, request.force
+    )
+
+    return {
+        "run_id": run_id,
+        "status": "started",
+        "property_id": request.property_id,
+    }
+
+
+@app.get("/substrate/status/{run_id}")
+def substrate_status(
+    run_id: str,
+    x_portal_secret: str | None = Header(default=None),
+):
+    """Poll run progress. Returns run status + per-step detail.
+
+    Pure read of runs + run_steps tables. $0, fast.
+    """
+    if not PORTAL_API_SECRET or x_portal_secret != PORTAL_API_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized.")
+
+    from skills.contract import get_substrate
+    sb = get_substrate()
+
+    run = sb.table("runs").select("run_id, property_id, workflow, status, started_at, completed_at, error_summary").eq("run_id", run_id).limit(1).execute()
+    if not run.data:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found.")
+
+    r = run.data[0]
+
+    steps = sb.table("run_steps").select("step_name, status, started_at, completed_at, metadata, error_message").eq("run_id", run_id).order("started_at").execute()
+
+    return {
+        "run_id": r["run_id"],
+        "property_id": r["property_id"],
+        "status": r["status"],
+        "started_at": r["started_at"],
+        "completed_at": r.get("completed_at"),
+        "error_summary": r.get("error_summary"),
+        "steps": [
+            {
+                "name": s["step_name"],
+                "status": s["status"],
+                "started_at": s["started_at"],
+                "completed_at": s.get("completed_at"),
+                "error": s.get("error_message"),
+            }
+            for s in (steps.data or [])
+        ],
+    }
 
 
 @app.post("/run")

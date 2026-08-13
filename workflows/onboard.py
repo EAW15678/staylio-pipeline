@@ -31,12 +31,16 @@ def onboard(
     source_urls: list = None,
     *,
     force: bool = False,
+    run_id: str = None,
 ) -> SkillResult:
     """Run the full onboarding workflow for a property.
 
     Each skill runs in sequence. Any failed result halts the workflow.
     Noop results continue (the skill's work is already done).
     The substrate is the state — no in-memory passing between skills.
+
+    If run_id is provided, uses that existing run row (for fire-and-poll
+    where the caller creates the run before returning to the client).
     """
     try:
         sb = get_substrate()
@@ -44,7 +48,8 @@ def onboard(
         return SkillResult.failed(str(e))
 
     # ── One run for the whole workflow ────────────────────────────────────
-    run_id = record_run(sb, property_id, "onboard")
+    if not run_id:
+        run_id = record_run(sb, property_id, "onboard")
     logger.info("[onboard] Starting workflow for property %s, run=%s", property_id[:12], run_id[:12])
 
     skills_run = []  # [(name, status, data)]
