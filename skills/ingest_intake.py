@@ -177,12 +177,14 @@ def ingest_intake(
             if not written and not verbal:
                 continue
 
+            gender = entry.get("gender")  # female|male|neutral from portal dropdown
             sb.table("guest_evidence").insert({
                 "property_id": property_id,
                 "written_text": written,
                 "verbal_text": verbal,
                 "reviewer_name": name,
                 "stay_date": date,
+                "gender": gender,
                 "source": "intake_portal",
                 "is_guest_book": True,
             }).execute()

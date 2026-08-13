@@ -104,7 +104,11 @@ def narrate_guest_cards(
         # ── Voice selection from voice_buckets ──────────────────────────
         try:
             from skills.voice_buckets import resolve_guest_voice
-            voice_info = resolve_guest_voice(sb, vibe, reviewer, exclude_voice_id=hero_voice_id)
+            # Pass gender from guest_evidence (owner-supplied, authoritative)
+            reviewer_gender = entry.get("gender")  # female|male|neutral|None
+            voice_info = resolve_guest_voice(sb, vibe, reviewer,
+                                             exclude_voice_id=hero_voice_id,
+                                             reviewer_gender=reviewer_gender)
             voice_id = voice_info["voice_id"]
             voice_label = voice_info["name"]
             reason = voice_info["reason"]
