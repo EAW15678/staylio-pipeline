@@ -118,7 +118,7 @@ def narrate(
             )
 
     # ── Record run ──────────────────────────────────────────────────────
-    run_id = record_run(sb, property_id, "narrate")
+    run_id = record_run(sb, property_id, "monthly_cycle")
     step_id = record_step(sb, run_id, "narrate")
 
     # ── Call ElevenLabs TTS ─────────────────────────────────────────────

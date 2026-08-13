@@ -97,7 +97,7 @@ def generate_motion(
             renditions.setdefault(pid, {})[r["kind"]] = r["storage_url"]
 
     # ── Record run ──────────────────────────────────────────────────────
-    run_id = record_run(sb, property_id, "generate_motion")
+    run_id = record_run(sb, property_id, "monthly_cycle")
     step_id = record_step(sb, run_id, "generate_motion")
 
     clips_rendered = 0

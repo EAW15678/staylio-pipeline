@@ -49,7 +49,7 @@ MASTER_WIDTH = 1080
 MASTER_HEIGHT = 1920
 
 
-def _build_renderscript(clips: list, narration: dict | None, music: dict | None) -> dict:
+def _build_renderscript(clips: list, narration=None, music=None) -> dict:
     """Build a Creatomate source-based RenderScript from artifacts.
 
     Source-based (no template_id): the JSON source object defines the
@@ -179,7 +179,7 @@ def assemble(
             return SkillResult.noop("Master already assembled (input_hash match).", {})
 
     # ── Record run ──────────────────────────────────────────────────────
-    run_id = record_run(sb, property_id, "assemble")
+    run_id = record_run(sb, property_id, "monthly_cycle")
     step_id = record_step(sb, run_id, "assemble")
 
     # ── Build RenderScript ──────────────────────────────────────────────
