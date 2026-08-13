@@ -56,6 +56,17 @@ _TIME_GROUPS = {
 _SPACE_CONFLICTS = {("left", "right"), ("right", "left")}
 
 
+def _format_voice_candidates(voice_candidates) -> str:
+    """Format voice candidates for the director prompt."""
+    if not voice_candidates:
+        return "  No voices available"
+    lines = []
+    for v in voice_candidates:
+        gender = v.get("gender") or "unspecified"
+        lines.append(f'  voice_id={v["voice_id"]}  name="{v["name"]}"  gender={gender}')
+    return "\n".join(lines)
+
+
 # ── Validators (ported from creative_director.py) ────────────────────────
 # Each returns a list of violation dicts:
 #   [{"rule": str, "detail": str, "beats": list[int]}]
@@ -521,6 +532,18 @@ def direct(
     if not frames:
         return SkillResult.failed(reason="No frames with rendition URLs")
 
+    # ── Fetch voice candidates LIVE from ElevenLabs ─────────────────────
+    vibe = prop_data.get("vibe_profile") or ""
+    try:
+        from skills.voice_buckets import fetch_vibe_voices
+        voice_candidates = fetch_vibe_voices(sb, vibe)
+    except ValueError as e:
+        return SkillResult.failed(
+            reason=str(e),
+            attempted=1, succeeded=0, failed_count=1,
+            error_class="config", human_required=True,
+        )
+
     # ── Record run ──────────────────────────────────────────────────────
     run_id = record_run(sb, property_id, "monthly_cycle")
     step_id = record_step(sb, run_id, "direct")
@@ -535,16 +558,26 @@ def direct(
 
     for attempt in range(_MAX_REVISION_ATTEMPTS + 1):
         if attempt == 0:
-            direction_result = _call_director(client, concept, frames, prop_data, owner_ctx, guest_evidence)
+            direction_result = _call_director(client, concept, frames, prop_data, owner_ctx, guest_evidence, voice_candidates)
         else:
-            # Revision: send violations back to Claude
-            direction_result = _call_revision(client, concept, frames, prop_data, owner_ctx, guest_evidence, direction_result, all_violations)
+            direction_result = _call_revision(client, concept, frames, prop_data, owner_ctx, guest_evidence, voice_candidates, direction_result, all_violations)
 
         if not direction_result:
             break
 
-        # Validate
+        # Validate (11 content validators + voice membership check)
         all_violations = _run_all_validators(direction_result, obs_map, guest_names, guest_texts, amenity_names)
+
+        # Validate voice choice is a member of the vibe's collection
+        chosen_voice = direction_result.get("narration_voice_id")
+        if chosen_voice:
+            valid_ids = {v["voice_id"] for v in voice_candidates}
+            if chosen_voice not in valid_ids:
+                all_violations.append({
+                    "rule": "voice_membership",
+                    "detail": f"Chosen voice '{chosen_voice}' is not in the vibe's collection",
+                    "beats": [],
+                })
 
         if not all_violations:
             logger.info("[direct] Attempt %d: all validators passed", attempt + 1)
@@ -592,6 +625,8 @@ def direct(
         "narration_brief": direction_result.get("narration_brief"),
         "narration_script": direction_result.get("narration_script"),
         "narration_provenance": direction_result.get("narration_provenance"),
+        "narration_voice_id": direction_result.get("narration_voice_id"),
+        "narration_voice_rationale": direction_result.get("narration_voice_rationale"),
         "music_brief": direction_result.get("music_brief", {}),
         "overlay_register": direction_result.get("overlay_register", []),
         "director_rationale": direction_result.get("director_rationale"),
@@ -634,14 +669,14 @@ def direct(
     })
 
 
-def _call_director(client, concept, frames, prop, owner_ctx, guest_evidence) -> dict:
+def _call_director(client, concept, frames, prop, owner_ctx, guest_evidence, voice_candidates) -> dict:
     """Initial direction call to Claude."""
-    return _call_claude(client, _build_prompt(concept, frames, prop, owner_ctx, guest_evidence))
+    return _call_claude(client, _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candidates))
 
 
-def _call_revision(client, concept, frames, prop, owner_ctx, guest_evidence, prev_direction, violations) -> dict:
+def _call_revision(client, concept, frames, prop, owner_ctx, guest_evidence, voice_candidates, prev_direction, violations) -> dict:
     """Revision call: send previous direction + violations back to Claude."""
-    base_prompt = _build_prompt(concept, frames, prop, owner_ctx, guest_evidence)
+    base_prompt = _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candidates)
     violation_text = "\n".join(f"- [{v['rule']}] {v['detail']}" for v in violations)
     revision_prompt = f"""{base_prompt}
 
@@ -671,7 +706,7 @@ def _call_claude(client, prompt: str) -> dict:
         return None
 
 
-def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence) -> str:
+def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candidates=None) -> str:
     """Build the creative direction prompt with all constraints."""
     vibe = prop.get("vibe_profile") or "multigenerational_retreat"
     name = prop.get("name") or "the property"
@@ -719,6 +754,9 @@ Guest book entries (VERBATIM — do not reword if used):
 CANDIDATE FRAMES (from observations):
 {chr(10).join(frame_lines) if frame_lines else '  No frames available'}
 
+AVAILABLE NARRATOR VOICES (choose ONE for the hero narration):
+{_format_voice_candidates(voice_candidates)}
+
 CONSTRAINTS (each is validated by a deterministic check — violations trigger revision):
 1. SELECT frames ONLY from the candidate list above. Use photo_id to reference.
 2. Each beat's requested_motion MUST appear in that frame's motion_affordance list.
@@ -731,6 +769,8 @@ CONSTRAINTS (each is validated by a deterministic check — violations trigger r
 9. NO guest names in narration_script or overlays — not in any form.
 10. Music brief: NO artist, song, album, publisher, or label names.
 11. Beat duration_seconds MUST sum to 28-32 seconds (hard range). The reason:
+12. narration_voice_id MUST be one of the voice_ids from AVAILABLE NARRATOR
+    VOICES above. Choose the voice that best serves the vibe and narration tone.
     narration must never be cut off mid-sentence. Size beats to fit whole
     spoken sentences, not the reverse.
 
@@ -751,6 +791,8 @@ Return ONLY valid JSON:
   "narration_brief": "Instruction to the director about tone and approach",
   "narration_script": "The exact words the narrator speaks aloud",
   "narration_provenance": "original" or "guest_book",
+  "narration_voice_id": "the voice_id you chose from the AVAILABLE NARRATOR VOICES list",
+  "narration_voice_rationale": "one-line reason for the voice choice",
   "music_brief": {{"mood": "...", "tempo": "...", "instruments": "..."}},
   "overlay_register": [],
   "narrative_order": "...",

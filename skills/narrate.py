@@ -54,7 +54,8 @@ def narrate(
 
     # ── Load direction ──────────────────────────────────────────────────
     dir_resp = sb.table("directions").select(
-        "direction_id, concept_id, narration_script, narration_brief, narration_provenance"
+        "direction_id, concept_id, narration_script, narration_brief, "
+        "narration_provenance, narration_voice_id, narration_voice_rationale"
     ).eq("direction_id", direction_id).is_("superseded_at", "null").limit(1).execute()
 
     if not dir_resp.data:
@@ -63,30 +64,20 @@ def narrate(
             attempted=0, succeeded=0, failed_count=0,
         )
     direction = dir_resp.data[0]
-    # Use narration_script (the spoken words), NOT narration_brief (instruction)
     script = direction.get("narration_script") or ""
 
     if not script.strip():
         return SkillResult.noop("No narration script in this direction.", {})
 
-    # ── Resolve narrator voice from voice_buckets ──────────────────────
-    prop = sb.table("properties").select("vibe_profile").eq(
-        "id", property_id
-    ).limit(1).execute()
-    vibe = (prop.data[0].get("vibe_profile") if prop.data else "") or ""
-
-    # Hero voice: first voice in the vibe's live collection.
-    try:
-        from skills.voice_buckets import fetch_vibe_voices
-        pool = fetch_vibe_voices(sb, vibe)
-        voice_id = pool[0]["voice_id"]
-        voice_label = pool[0]["name"]
-    except (ValueError, IndexError) as e:
+    # ── Use the director's chosen voice (Ruling 6: fail if absent) ─────
+    voice_id = direction.get("narration_voice_id")
+    if not voice_id:
         return SkillResult.failed(
-            reason=f"No voice pool for vibe '{vibe}': {e}",
+            reason="Direction has no narration_voice_id. The director must choose a voice.",
             attempted=1, succeeded=0, failed_count=1,
             error_class="config", human_required=True,
         )
+    voice_label = direction.get("narration_voice_rationale") or voice_id
 
     # ── Input hash for idempotency ──────────────────────────────────────
     hash_input = json.dumps({
