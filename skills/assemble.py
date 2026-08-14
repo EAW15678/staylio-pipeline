@@ -196,12 +196,15 @@ def assemble(
     direction_id: str,
     *,
     aspect_ratio: str = "16:9",
+    title_cards: bool = False,
     force: bool = False,
 ) -> SkillResult:
     """Assemble a master video from clips + narration + music.
 
     aspect_ratio: "16:9" for landing page hero, "9:16" for social variants.
-    Title annotations (property name + location) are added for hero only.
+    title_cards: if True, burn in property name + location at open/close.
+      G59 ruling: landing page hero has NO title cards (page renders them
+      as HTML). Social variants keep them.
 
     Returns SkillResult.ok({artifact_id, duration_seconds, cost_usd})
     """
@@ -269,7 +272,7 @@ def assemble(
     # ── Load property name + location for title annotations ────────────
     title_text = None
     location_text = None
-    if aspect_ratio == "16:9":  # Title annotations on hero only
+    if title_cards:  # G59: landing page hero has NO title cards; social variants keep them
         prop_resp = sb.table("properties").select("name, city, state_region").eq(
             "id", property_id).limit(1).execute()
         if prop_resp.data:

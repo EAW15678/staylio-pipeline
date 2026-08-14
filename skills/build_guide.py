@@ -73,19 +73,21 @@ def geocode_anchors(anchors: list, api_key: str) -> list:
 def merge_venues_by_place_id(venue_lists: list) -> list:
     """Merge multiple venue lists, deduplicating by place_id.
 
-    Each venue_list is a list of dicts with at least a 'place_id' key.
-    First occurrence wins. Each venue gets an 'anchor_area' label from
-    whichever list contributed it.
+    Handles both dict venues and Place dataclass objects.
+    First occurrence wins.
     """
     seen = set()
     merged = []
     for area_name, venues in venue_lists:
         for venue in venues:
-            pid = venue.get("place_id") or venue.get("name", "")
+            # Handle both dicts and Place objects
+            if isinstance(venue, dict):
+                pid = venue.get("place_id") or venue.get("google_place_id") or venue.get("name", "")
+            else:
+                pid = getattr(venue, "google_place_id", None) or getattr(venue, "name", "")
             if pid in seen:
                 continue
             seen.add(pid)
-            venue["anchor_area"] = area_name
             merged.append(venue)
     return merged
 
@@ -295,7 +297,7 @@ def build_guide(
 
     # ── Write to local_guides ────────────────────────────────────────────
     location_name = guide_data.get("location_name") or f"{city or ''}, {state or ''}".strip(", ")
-    total_places = guide_data.get("total_places") or len(places)
+    total_places = guide_data.get("total_places") or len(google_places)
 
     sb.table("local_guides").upsert({
         "property_id": property_id,
