@@ -27,8 +27,14 @@ from skills.contract import (
 
 logger = logging.getLogger(__name__)
 
-# Motion types that exit the frame boundary — ALWAYS rejected
-FRAME_EXITING_MOVES = {"pull_back"}
+# Motion types that exit the frame boundary — DOWNGRADED to push_in.
+# pull_back: camera moves away from the subject, revealing what lies
+#   beyond the frame edge → Runway invents content.
+# tilt_up: camera tilts upward, re-projecting the upper frame edge →
+#   corrupts text (BEACCH from "BEACH" on Brant's water tower) and
+#   reveals sky/content that wasn't in the original frame.
+# These are NOT dropped — the shot stays in the film at push_in.
+FRAME_EXITING_MOVES = {"pull_back", "tilt_up"}
 
 # Cost per second by model
 RUNWAY_COST = {
@@ -119,12 +125,24 @@ def generate_motion(
         duration = beat.get("duration_seconds", 5)
         ordinal = beat.get("ordinal", 0)
 
-        # ── Frame-exit guard ────────────────────────────────────────────
+        # ── Frame-exit guard: downgrade, never drop ────────────────────
+        # A rejected motion keeps the shot — downgraded to push_in.
+        actual_motion = requested_motion
+        actual_prompt = motion_prompt
+        downgraded = False
         if requested_motion in FRAME_EXITING_MOVES:
-            logger.warning("[motion] REJECTED beat %d: frame-exiting move '%s'",
-                          ordinal, requested_motion)
-            clips_rejected += 1
-            continue
+            actual_motion = "push_in"
+            # Rewrite the prompt to match push_in — never send pull-back
+            # or tilt-up language with a push_in label.
+            actual_prompt = (
+                f"Slow push in toward the centre of the frame. "
+                f"Hold the existing composition steady."
+            )
+            downgraded = True
+            logger.warning(
+                "[motion] DOWNGRADED beat %d photo %s: '%s' → 'push_in' (frame-exit guard)",
+                ordinal, str(photo_id)[:8], requested_motion,
+            )
 
         # ── Model selection ─────────────────────────────────────────────
         risk = motion_risk_by_photo.get(photo_id, [])
@@ -141,8 +159,8 @@ def generate_motion(
         # ── Input hash for idempotency ──────────────────────────────────
         hash_input = json.dumps({
             "source_url": source_url,
-            "motion": requested_motion,
-            "prompt": motion_prompt,
+            "motion": actual_motion,
+            "prompt": actual_prompt,
             "duration": duration,
             "model": model,
             "aspect_ratio": aspect_ratio,
@@ -167,7 +185,7 @@ def generate_motion(
             task = runway_client.image_to_video.create(
                 model=model,
                 prompt_image=source_url,
-                prompt_text=motion_prompt,
+                prompt_text=actual_prompt,
                 duration=duration,
                 ratio="1280:720" if aspect_ratio == "16:9" else "720:1280",
             )
@@ -225,7 +243,13 @@ def generate_motion(
             "beat_ordinal": ordinal,
             "requested_motion": requested_motion,
             "technique": beat.get("technique", "generative"),
-            "motion_params": {"prompt": motion_prompt},
+            "motion_params": {
+                "prompt": actual_prompt,
+                "actual_motion": actual_motion,
+                "downgraded": downgraded,
+                "original_motion": requested_motion if downgraded else None,
+                "original_prompt": motion_prompt if downgraded else None,
+            },
             "cost_estimate_usd": clip_cost,
             "status": "ready",
             "created_by_agent": "skills/generate_motion",
@@ -241,8 +265,9 @@ def generate_motion(
                   discriminator=f"beat_{ordinal}")
 
         clips_rendered += 1
+        motion_label = f"{requested_motion}→{actual_motion}" if downgraded else actual_motion
         logger.info("[motion] Beat %d: %s %ds model=%s cost=$%.4f",
-                   ordinal, requested_motion, duration, model, clip_cost)
+                   ordinal, motion_label, duration, model, clip_cost)
 
     complete_step(sb, step_id, status="complete", metadata={
         "clips_rendered": clips_rendered,
