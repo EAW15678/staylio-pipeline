@@ -1112,6 +1112,18 @@ For each image report the following factual attributes:
                           family_accessibility: bunk room, crib, elevator, grab bars
                           practical: EV charger, garage, laundry, pantry, fenced yard
                         Record ONLY what is visible in the frame. Empty array if nothing notable.
+  shows_structure     — boolean. True when the BUILDING ITSELF is legible as a whole in the
+                        frame: its form, its scale, how it sits on its lot. The property must
+                        read as a complete structure, not a corner, not a detail, not a view
+                        FROM the property looking outward. A pool with a house edge visible
+                        behind it is NOT shows_structure unless the building reads as a whole.
+                        An aerial showing the full footprint IS shows_structure.
+                        A frame CAN be shows_structure=true AND is_setting=true AND carry
+                        located_amenities — these are independent signals.
+  structure_view      — if shows_structure is true, describe which aspect of the building is
+                        shown in your own words. E.g. "front elevation with garage and balcony",
+                        "rear from the pool deck", "aerial from above showing full footprint".
+                        null when shows_structure is false. Do NOT constrain to a vocabulary.
 
 Return ONLY valid JSON — no markdown, no prose, no code fences:
 
@@ -1188,7 +1200,9 @@ def _schema_example() -> str:
       "is_setting": false,
       "setting_subject": null,
       "placement": "indoor",
-      "located_amenities": [{"name": "kitchen island", "category": "gathering", "placement": "indoor"}]
+      "located_amenities": [{"name": "kitchen island", "category": "gathering", "placement": "indoor"}],
+      "shows_structure": false,
+      "structure_view": null
     }
   ]
 }"""
@@ -1318,6 +1332,8 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "setting_subject":          _str_or_none(img.get("setting_subject")),
             "placement":                _str_or_none(img.get("placement")) or "unknown",
             "located_amenities":        _obj_array(img.get("located_amenities")),
+            "shows_structure":          _bool(img.get("shows_structure")),
+            "structure_view":           _str_or_none(img.get("structure_view")),
             # ── Visibility / eligibility (Sprint 1) ──────────────────────
             # gallery_visible: always True from LLM path — LLM exclude does NOT
             #   hide images from All Photos.  Only deterministic checks (e.g. missing

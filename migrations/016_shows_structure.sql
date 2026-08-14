@@ -1,0 +1,4 @@
+-- 016: shows_structure + structure_view on observations.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-14.
+-- shows_structure: true when the building itself is legible as a whole.
+-- structure_view: free text describing which aspect is shown.

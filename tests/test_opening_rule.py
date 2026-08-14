@@ -12,8 +12,19 @@ from skills.direct import validate_opening_establishes, WEAK_OPENER_WIDTH_THRESH
 OBS_EXTERIOR = {
     "curated_section": "Exterior",
     "is_setting": False,
+    "shows_structure": True,
+    "structure_view": "front elevation",
     "depth_tier": "wide",
     "subject_singularity": "single",
+}
+
+OBS_EXTERIOR_NO_STRUCTURE = {
+    "curated_section": "Exterior",
+    "is_setting": False,
+    "shows_structure": False,
+    "depth_tier": "wide",
+    "subject_singularity": "single",
+    "placement": "outdoor",
 }
 
 OBS_SETTING = {
@@ -184,6 +195,35 @@ def test_extras_outdoor_as_opener_passes():
 def test_bedroom_outdoor_still_fails():
     """Bedrooms NEVER open regardless of placement."""
     obs_map = {"photo-A": {**OBS_BEDROOM, "placement": "outdoor"}}
+    v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
+    assert len(v) >= 1
+
+
+# ── shows_structure tests ────────────────────────────────────────────────
+
+def test_property_on_structure_true_passes():
+    obs_map = {"photo-A": OBS_EXTERIOR}  # has shows_structure=True
+    v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
+    assert v == []
+
+
+def test_property_on_structure_false_fails():
+    obs_map = {"photo-A": OBS_EXTERIOR_NO_STRUCTURE}
+    v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
+    assert len(v) >= 1
+    assert "shows_structure=false" in v[0]["detail"]
+
+
+def test_feature_on_structure_false_passes():
+    """Features need NOT show the structure — a pool is a feature."""
+    obs_map = {"photo-A": {**OBS_POOL, "placement": "outdoor", "shows_structure": False}}
+    v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert v == []
+
+
+def test_bedroom_with_structure_true_still_fails():
+    """Bedrooms always fail even with shows_structure=true (defensive)."""
+    obs_map = {"photo-A": {**OBS_BEDROOM, "shows_structure": True}}
     v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
     assert len(v) >= 1
 

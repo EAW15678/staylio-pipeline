@@ -488,12 +488,11 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
             })
 
     elif opening_type == "property":
-        # The frame should read as the property as a whole
-        # (already checked against always-disqualified and outdoor-only above)
-        if section in _OPENER_ALWAYS_DISQUALIFIED:
+        # The frame must show the building as a whole (shows_structure=true)
+        if not obs.get("shows_structure"):
             violations.append({
                 "rule": "opening_establishes",
-                "detail": f"Declared opening_type='property' but frame is in '{section}'.",
+                "detail": f"Declared opening_type='property' but frame has shows_structure=false — the building must be legible as a whole.",
                 "beats": [1],
             })
 
@@ -595,7 +594,8 @@ def direct(
         "beyond_frame_element, subject_singularity, focal_point, "
         "tonal_signature, located_amenities, "
         "role, curated_section, quality_score, alt_text, "
-        "is_setting, setting_subject, placement, located_amenities"
+        "is_setting, setting_subject, placement, located_amenities, "
+        "shows_structure, structure_view"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     observations = obs_resp.data or []
 

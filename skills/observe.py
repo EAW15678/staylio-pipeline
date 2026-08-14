@@ -226,6 +226,8 @@ def observe(
                 "subject_singularity": img.get("subject_singularity"),
                 "is_setting": img.get("is_setting", False),
                 "setting_subject": img.get("setting_subject"),
+                "shows_structure": img.get("shows_structure", False),
+                "structure_view": img.get("structure_view"),
                 "focal_point": img.get("visual_summary"),
                 "tonal_signature": None,
                 "placement": img.get("placement") or "unknown",
