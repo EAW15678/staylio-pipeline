@@ -855,10 +855,14 @@ def _call_claude(client, prompt: str) -> dict:
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text
-        json_match = re.search(r'\{[\s\S]*\}', text)
-        if json_match:
-            return json.loads(json_match.group())
-        return None
+        # Find the first '{' and use raw_decode to parse exactly one
+        # JSON object, ignoring any trailing text Claude appends.
+        start = text.find('{')
+        if start == -1:
+            return None
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(text, start)
+        return obj
     except Exception as exc:
         logger.error("[direct] Claude call failed: %s", str(exc)[:120])
         return None

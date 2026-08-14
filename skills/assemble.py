@@ -33,6 +33,7 @@ import uuid
 
 import httpx
 
+from skills.bounded_motion import compute_bounded_animation
 from skills.contract import (
     SkillResult, get_substrate, require_env,
     record_run, record_step, complete_step, complete_run, emit_cost,
@@ -52,29 +53,92 @@ ASPECT_DIMENSIONS = {
 
 
 def _build_renderscript(clips: list, narration=None, music=None,
-                        aspect_ratio="16:9", title_text=None, location_text=None) -> dict:
+                        aspect_ratio="16:9", title_text=None, location_text=None,
+                        rendition_urls: dict = None, photo_dims: dict = None) -> dict:
     """Build a Creatomate source-based RenderScript from artifacts.
 
     Source-based (no template_id): the JSON source object defines the
     full composition. This is Erick's standing ruling — no Creatomate
     templates ever.
 
-    ⚠️ This RenderScript structure is based on Creatomate's documented
-    JSON source format. Timing and layering may need adjustment on
-    first real render.
+    Clips with technique='bounded' render as an image element with a
+    Creatomate pan animation on the still photograph. No Runway clip
+    is generated or used.
+
+    Clips with technique='generative' (or unset) render as a video
+    element from the Runway-generated clip.
+
+    rendition_urls: {photo_id: url} for bounded beats' source images.
+    photo_dims: {photo_id: (width, height)} for bounded beats.
     """
+    width, height = ASPECT_DIMENSIONS.get(aspect_ratio, (1920, 1080))
+    rendition_urls = rendition_urls or {}
+    photo_dims = photo_dims or {}
+
     # Build clip elements in beat order
     clip_elements = []
     time_offset = 0.0
     for clip in sorted(clips, key=lambda c: c.get("beat_ordinal", 0)):
         duration = clip.get("duration_seconds", 5)
-        clip_elements.append({
-            "type": "video",
-            "source": clip["storage_url"],
-            "time": time_offset,
-            "duration": duration,
-            "fit": "cover",
-        })
+        technique = clip.get("technique", "generative")
+        photo_id = clip.get("photo_id")
+
+        if technique == "bounded" and photo_id:
+            # ── Bounded: image + pan animation ─────────────────────
+            src_url = rendition_urls.get(photo_id, clip.get("storage_url", ""))
+            dims = photo_dims.get(photo_id)
+            requested_motion = clip.get("requested_motion", "push_in")
+
+            if dims:
+                src_w, src_h = dims
+                anim = compute_bounded_animation(
+                    requested_motion, src_w, src_h,
+                    out_w=width, out_h=height,
+                    duration=duration,
+                )
+                # Strip metadata keys before sending to Creatomate
+                creatomate_anim = {
+                    k: v for k, v in anim.items()
+                    if k not in ("reduced", "reduced_reason")
+                }
+                if anim.get("reduced"):
+                    logger.info(
+                        "[assemble] Beat %d bounded motion reduced: %s",
+                        clip.get("beat_ordinal", 0), anim.get("reduced_reason"),
+                    )
+            else:
+                # No dimensions — fall back to a safe centered push_in
+                logger.warning(
+                    "[assemble] Beat %d: no dimensions for %s, using default push_in",
+                    clip.get("beat_ordinal", 0), str(photo_id)[:8],
+                )
+                creatomate_anim = {
+                    "type": "pan",
+                    "easing": "linear",
+                    "scope": "element",
+                    "start_x": "50.0%", "end_x": "50.0%",
+                    "start_y": "50.0%", "end_y": "50.0%",
+                    "start_scale": "105%", "end_scale": "100%",
+                }
+
+            clip_elements.append({
+                "type": "image",
+                "source": src_url,
+                "time": time_offset,
+                "duration": duration,
+                "fit": "cover",
+                "animations": [creatomate_anim],
+            })
+        else:
+            # ── Generative: video from Runway clip ─────────────────
+            clip_elements.append({
+                "type": "video",
+                "source": clip["storage_url"],
+                "time": time_offset,
+                "duration": duration,
+                "fit": "cover",
+            })
+
         time_offset += duration
 
     total_duration = time_offset
@@ -282,10 +346,33 @@ def assemble(
             state = p.get("state_region") or ""
             location_text = ", ".join(filter(None, [city, state])) or None
 
+    # ── Load photo dimensions for bounded clips ──────────────────────────
+    bounded_photo_ids = [
+        c["photo_id"] for c in clips
+        if c.get("technique") == "bounded" and c.get("photo_id")
+    ]
+    photo_dims = {}
+    rendition_urls = {}
+    if bounded_photo_ids:
+        for pid in bounded_photo_ids:
+            pw_resp = sb.table("photographs").select("image_width, image_height").eq(
+                "photo_id", pid).limit(1).execute()
+            if pw_resp.data:
+                p = pw_resp.data[0]
+                w, h = p.get("image_width"), p.get("image_height")
+                if w and h:
+                    photo_dims[pid] = (w, h)
+            # Rendition URL: use the clip's storage_url (already the rendition)
+            for c in clips:
+                if c.get("photo_id") == pid and c.get("technique") == "bounded":
+                    rendition_urls[pid] = c.get("storage_url", "")
+                    break
+
     # ── Build RenderScript ──────────────────────────────────────────────
     renderscript = _build_renderscript(
         clips, narration, music,
         aspect_ratio=aspect_ratio, title_text=title_text, location_text=location_text,
+        rendition_urls=rendition_urls, photo_dims=photo_dims,
     )
     total_duration = renderscript["duration"]
 

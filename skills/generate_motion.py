@@ -125,6 +125,70 @@ def generate_motion(
         duration = beat.get("duration_seconds", 5)
         ordinal = beat.get("ordinal", 0)
 
+        technique = beat.get("technique", "generative")
+
+        # ── Source image URL (needed for both paths) ───────────────────
+        urls = renditions.get(photo_id, {})
+        source_url = urls.get("enhanced") or urls.get("original", "")
+        if not source_url:
+            logger.warning("[motion] No rendition URL for photo %s", photo_id[:8])
+            clips_rejected += 1
+            continue
+
+        # ── Bounded: no Runway call, write artifact with rendition URL ─
+        if technique == "bounded":
+            hash_input = json.dumps({
+                "source_url": source_url,
+                "motion": requested_motion,
+                "technique": "bounded",
+                "duration": duration,
+                "aspect_ratio": aspect_ratio,
+            }, sort_keys=True)
+            input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+            if not force:
+                existing = sb.table("video_artifacts").select("artifact_id", count="exact").eq(
+                    "input_hash", input_hash
+                ).eq("kind", "clip").eq("status", "ready").is_(
+                    "superseded_at", "null"
+                ).limit(0).execute()
+                if existing.count > 0:
+                    clips_cached += 1
+                    continue
+
+            artifact_id = str(uuid.uuid4())
+            sb.table("video_artifacts").insert({
+                "artifact_id": artifact_id,
+                "property_id": property_id,
+                "kind": "clip",
+                "direction_id": direction_id,
+                "concept_id": direction.get("concept_id"),
+                "photo_id": photo_id,
+                "input_hash": input_hash,
+                "storage_url": source_url,
+                "duration_seconds": duration,
+                "model": None,
+                "vendor": "creatomate",
+                "beat_ordinal": ordinal,
+                "requested_motion": requested_motion,
+                "technique": "bounded",
+                "motion_params": {
+                    "prompt": None,
+                    "actual_motion": requested_motion,
+                    "downgraded": False,
+                    "original_motion": None,
+                    "original_prompt": None,
+                },
+                "cost_estimate_usd": 0,
+                "status": "ready",
+                "created_by_agent": "skills/generate_motion",
+            }).execute()
+
+            clips_rendered += 1
+            logger.info("[motion] Beat %d: bounded %s %ds cost=$0",
+                       ordinal, requested_motion, duration)
+            continue
+
         # ── Frame-exit guard: downgrade, never drop ────────────────────
         # A rejected motion keeps the shot — downgraded to push_in.
         actual_motion = requested_motion
@@ -147,14 +211,6 @@ def generate_motion(
         # ── Model selection ─────────────────────────────────────────────
         risk = motion_risk_by_photo.get(photo_id, [])
         model = _select_model(beat, risk)
-
-        # ── Source image URL ────────────────────────────────────────────
-        urls = renditions.get(photo_id, {})
-        source_url = urls.get("enhanced") or urls.get("original", "")
-        if not source_url:
-            logger.warning("[motion] No rendition URL for photo %s", photo_id[:8])
-            clips_rejected += 1
-            continue
 
         # ── Input hash for idempotency ──────────────────────────────────
         hash_input = json.dumps({
