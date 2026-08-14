@@ -44,12 +44,13 @@ _MAX_REVISION_ATTEMPTS = 2
 # "usable for motion" based on measured Brant Cottage results.
 WEAK_OPENER_WIDTH_THRESHOLD = 768
 
-# Sections that CANNOT open a hero. No interior may lead — the guest must
-# know what the property IS before seeing a room. Exterior and Pool are
-# the only sections that qualify as openers.
-# Extras is disqualified because it is ambiguous (holds both interior
-# and exterior items) and cannot be resolved from recorded fields alone.
-_OPENER_DISQUALIFIED_SECTIONS = {"Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Extras"}
+# Sections that NEVER open a hero regardless of placement.
+_OPENER_ALWAYS_DISQUALIFIED = {"Bedrooms", "Bathrooms"}
+
+# Sections that can open ONLY if the frame's placement is 'outdoor'.
+# Kitchen, Living Areas, and Extras may contain outdoor spaces (decks,
+# outdoor kitchens) that qualify when the curator confirms placement.
+_OPENER_OUTDOOR_ONLY_SECTIONS = {"Kitchen", "Living Areas", "Extras"}
 
 # OTA names — literal scan
 _OTA_NAMES = [
@@ -449,11 +450,22 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
 
     section = obs.get("curated_section") or ""
 
-    # FAIL: beat 1 on an interior detail section regardless of declaration
-    if section in _OPENER_DISQUALIFIED_SECTIONS:
+    placement = obs.get("placement") or "unknown"
+
+    # FAIL: Bedrooms and Bathrooms NEVER open, regardless of placement
+    if section in _OPENER_ALWAYS_DISQUALIFIED:
         violations.append({
             "rule": "opening_establishes",
-            "detail": f"Beat 1 opens on '{section}' — no interior section may lead. The hero must open on the property, its setting, or an exterior feature.",
+            "detail": f"Beat 1 opens on '{section}' — Bedrooms and Bathrooms may never lead.",
+            "beats": [beat1.get("ordinal", 1)],
+        })
+        return violations
+
+    # FAIL: sections like Kitchen/Living Areas/Extras open ONLY if placement='outdoor'
+    if section in _OPENER_OUTDOOR_ONLY_SECTIONS and placement != "outdoor":
+        violations.append({
+            "rule": "opening_establishes",
+            "detail": f"Beat 1 opens on '{section}' with placement='{placement}' — only outdoor frames from this section may lead.",
             "beats": [beat1.get("ordinal", 1)],
         })
         return violations
@@ -476,12 +488,12 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
             })
 
     elif opening_type == "property":
-        # The frame should read as the property as a whole: Exterior or Pool
-        # at wide depth, or any section with subject_singularity != "cluttered"
-        if section in _OPENER_DISQUALIFIED_SECTIONS:
+        # The frame should read as the property as a whole
+        # (already checked against always-disqualified and outdoor-only above)
+        if section in _OPENER_ALWAYS_DISQUALIFIED:
             violations.append({
                 "rule": "opening_establishes",
-                "detail": f"Declared opening_type='property' but frame is in '{section}' (detail section).",
+                "detail": f"Declared opening_type='property' but frame is in '{section}'.",
                 "beats": [1],
             })
 
@@ -583,7 +595,7 @@ def direct(
         "beyond_frame_element, subject_singularity, focal_point, "
         "tonal_signature, located_amenities, "
         "role, curated_section, quality_score, alt_text, "
-        "is_setting, setting_subject"
+        "is_setting, setting_subject, placement, located_amenities"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     observations = obs_resp.data or []
 

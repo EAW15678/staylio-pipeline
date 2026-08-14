@@ -1091,6 +1091,27 @@ For each image report the following factual attributes:
   setting_subject     — if is_setting is true, name what the guest is coming for, in plain words.
                         null when is_setting is false. E.g. "Atlantic Ocean beach",
                         "Carolina Beach boardwalk", "mountain valley".
+  placement           — "indoor" | "outdoor" | "unknown". Whether this frame shows an interior
+                        or exterior space. A deck, patio, pool, yard, driveway, or any space
+                        open to the sky is outdoor. A room with walls and a ceiling is indoor.
+                        A covered porch or screened lanai is outdoor. If genuinely ambiguous,
+                        say "unknown".
+  located_amenities   — JSON array of amenities VISIBLE IN THIS FRAME. Each entry:
+                        {{"name": "free text", "category": "one of 7", "placement": "indoor|outdoor|unknown"}}
+                        name: the curator's own words for what is visible. Free text.
+                        category: exactly one of:
+                          water_wellness | gathering | recreation | gear_transport |
+                          work_connectivity | family_accessibility | practical
+                        placement: indoor|outdoor|unknown for THAT amenity.
+                        Illustrative examples (NOT exhaustive — record anything visible):
+                          water_wellness: pool, hot tub, spa, sauna, outdoor shower, home gym
+                          gathering: fire pit, outdoor kitchen, grill, deck, patio, rooftop, fireplace, wet bar
+                          recreation: pool table, game room, home theater, basketball hoop, playground
+                          gear_transport: beach chairs, bikes, kayaks, paddleboards, boat slip
+                          work_connectivity: office, desk, high-speed internet
+                          family_accessibility: bunk room, crib, elevator, grab bars
+                          practical: EV charger, garage, laundry, pantry, fenced yard
+                        Record ONLY what is visible in the frame. Empty array if nothing notable.
 
 Return ONLY valid JSON — no markdown, no prose, no code fences:
 
@@ -1165,7 +1186,9 @@ def _schema_example() -> str:
       "motion_risk": ["straight_architectural_lines", "reflections"],
       "subject_singularity": "single",
       "is_setting": false,
-      "setting_subject": null
+      "setting_subject": null,
+      "placement": "indoor",
+      "located_amenities": [{"name": "kitchen island", "category": "gathering", "placement": "indoor"}]
     }
   ]
 }"""
@@ -1293,6 +1316,8 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "subject_singularity":      _str_or_none(img.get("subject_singularity")),
             "is_setting":               _bool(img.get("is_setting")),
             "setting_subject":          _str_or_none(img.get("setting_subject")),
+            "placement":                _str_or_none(img.get("placement")) or "unknown",
+            "located_amenities":        _obj_array(img.get("located_amenities")),
             # ── Visibility / eligibility (Sprint 1) ──────────────────────
             # gallery_visible: always True from LLM path — LLM exclude does NOT
             #   hide images from All Photos.  Only deterministic checks (e.g. missing

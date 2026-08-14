@@ -82,14 +82,14 @@ def test_bedroom_opener_fails():
     obs_map = {"photo-A": OBS_BEDROOM}
     v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
     assert len(v) >= 1
-    assert "no interior section" in v[0]["detail"]
+    assert "may never lead" in v[0]["detail"]
 
 
 def test_bathroom_opener_fails():
     obs_map = {"photo-A": OBS_BATHROOM}
     v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
     assert len(v) >= 1
-    assert "no interior section" in v[0]["detail"]
+    assert "may never lead" in v[0]["detail"]
 
 
 # ── Weak opener: parallax → FAIL; push_in → PASS ────────────────────────
@@ -145,26 +145,46 @@ def test_feature_opener_passes():
     assert v == []
 
 
-def test_kitchen_as_opener_fails():
-    """Kitchen is an interior section — cannot open."""
-    obs_map = {"photo-A": OBS_KITCHEN}
+def test_kitchen_indoor_as_opener_fails():
+    """Indoor kitchen cannot open."""
+    obs_map = {"photo-A": {**OBS_KITCHEN, "placement": "indoor"}}
     v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
     assert len(v) >= 1
-    assert "no interior section" in v[0]["detail"]
+    assert "only outdoor" in v[0]["detail"]
 
 
-def test_living_areas_as_opener_fails():
-    """Living Areas is an interior section — cannot open."""
-    obs_map = {"photo-A": {"curated_section": "Living Areas", "is_setting": False}}
+def test_living_areas_indoor_as_opener_fails():
+    """Indoor living areas cannot open."""
+    obs_map = {"photo-A": {"curated_section": "Living Areas", "is_setting": False, "placement": "indoor"}}
     v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
     assert len(v) >= 1
-    assert "no interior section" in v[0]["detail"]
 
 
-def test_extras_as_opener_fails():
-    """Extras is disqualified as an opener (ambiguous interior/exterior)."""
-    obs_map = {"photo-A": {"curated_section": "Extras", "is_setting": False}}
+def test_extras_indoor_as_opener_fails():
+    """Indoor Extras cannot open."""
+    obs_map = {"photo-A": {"curated_section": "Extras", "is_setting": False, "placement": "indoor"}}
     v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert len(v) >= 1
+
+
+def test_extras_unknown_as_opener_fails():
+    """Extras with placement='unknown' cannot open."""
+    obs_map = {"photo-A": {"curated_section": "Extras", "is_setting": False, "placement": "unknown"}}
+    v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert len(v) >= 1
+
+
+def test_extras_outdoor_as_opener_passes():
+    """Extras with placement='outdoor' CAN open as an exterior feature."""
+    obs_map = {"photo-A": {"curated_section": "Extras", "is_setting": False, "placement": "outdoor"}}
+    v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert v == []
+
+
+def test_bedroom_outdoor_still_fails():
+    """Bedrooms NEVER open regardless of placement."""
+    obs_map = {"photo-A": {**OBS_BEDROOM, "placement": "outdoor"}}
+    v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
     assert len(v) >= 1
 
 

@@ -1,0 +1,5 @@
+-- 015: placement + located_amenities on observations.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-14.
+-- placement: indoor|outdoor|unknown — from curator prompt.
+-- located_amenities: populated from curator (was hardcoded []).
+-- Each entry: {name, category, placement}.
