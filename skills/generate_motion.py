@@ -36,11 +36,34 @@ logger = logging.getLogger(__name__)
 # These are NOT dropped — the shot stays in the film at push_in.
 FRAME_EXITING_MOVES = {"pull_back", "tilt_up"}
 
+# Valid technique values. The director sets one per beat.
+#   bounded    — Creatomate pan animation on the still image. $0. DEFAULT.
+#   locked     — Runway gen, camera locked, content animates (water, fire, foliage).
+#   generative — Runway gen, camera moves freely. Legacy path.
+VALID_TECHNIQUES = {"bounded", "locked", "generative"}
+
 # Cost per second by model
 RUNWAY_COST = {
     "gen4_turbo": 0.05,
     "gen4.5": 0.12,
 }
+
+# Locked-camera prompt template.
+# Provenance: MOTION-TEST clip 1 (2026-08-14) used this phrasing and Runway
+# held the camera. Erick confirmed: "NEITHER clip showed anything that is not
+# in the source photograph." Wobble suppression added per Erick's ruling.
+#
+# {content_motion} is filled from the beat's motion_prompt — the director
+# describes what should move (water, foliage, fire, etc.).
+_LOCKED_PROMPT_TEMPLATE = (
+    "Completely static camera. The camera does not move, pan, tilt, or zoom. "
+    "The framing stays exactly as it is — perfectly steady, tripod-locked, "
+    "absolutely no handheld wobble, no camera shake, no micro-drift, "
+    "no oscillation of any kind. "
+    "{content_motion} "
+    "All architecture, railings, structural elements, and fixed objects "
+    "remain perfectly motionless."
+)
 
 
 def _select_model(beat: dict, motion_risk: list) -> str:
@@ -114,6 +137,8 @@ def generate_motion(
     clips_rejected = 0
     clips_cached = 0
     total_cost = 0.0
+    technique_counts = {"bounded": 0, "locked": 0, "generative": 0}
+    technique_costs = {"bounded": 0.0, "locked": 0.0, "generative": 0.0}
 
     for beat in beats:
         photo_id = beat.get("photo_id")
@@ -125,9 +150,14 @@ def generate_motion(
         duration = beat.get("duration_seconds", 5)
         ordinal = beat.get("ordinal", 0)
 
-        technique = beat.get("technique", "generative")
+        technique = beat.get("technique", "bounded")
 
-        # ── Source image URL (needed for both paths) ───────────────────
+        if technique not in VALID_TECHNIQUES:
+            logger.error("[motion] Beat %d: unknown technique '%s'", ordinal, technique)
+            clips_rejected += 1
+            continue
+
+        # ── Source image URL (needed for all paths) ────────────────────
         urls = renditions.get(photo_id, {})
         source_url = urls.get("enhanced") or urls.get("original", "")
         if not source_url:
@@ -185,8 +215,127 @@ def generate_motion(
             }).execute()
 
             clips_rendered += 1
+            technique_counts["bounded"] += 1
             logger.info("[motion] Beat %d: bounded %s %ds cost=$0",
                        ordinal, requested_motion, duration)
+            continue
+
+        # ── Locked: Runway with locked-camera prompt ───────────────────
+        if technique == "locked":
+            content_motion = motion_prompt or "Subtle natural movement within the scene."
+            locked_prompt = _LOCKED_PROMPT_TEMPLATE.format(content_motion=content_motion)
+
+            risk = motion_risk_by_photo.get(photo_id, [])
+            model = _select_model(beat, risk)
+
+            hash_input = json.dumps({
+                "source_url": source_url,
+                "prompt": locked_prompt,
+                "technique": "locked",
+                "duration": duration,
+                "model": model,
+                "aspect_ratio": aspect_ratio,
+            }, sort_keys=True)
+            input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+            if not force:
+                existing = sb.table("video_artifacts").select("artifact_id", count="exact").eq(
+                    "input_hash", input_hash
+                ).eq("kind", "clip").eq("status", "ready").is_(
+                    "superseded_at", "null"
+                ).limit(0).execute()
+                if existing.count > 0:
+                    clips_cached += 1
+                    continue
+
+            try:
+                import runwayml
+                runway_client = runwayml.RunwayML(api_key=runway_key)
+
+                task = runway_client.image_to_video.create(
+                    model=model,
+                    prompt_image=source_url,
+                    prompt_text=locked_prompt,
+                    duration=duration,
+                    ratio="1280:720" if aspect_ratio == "16:9" else "720:1280",
+                )
+
+                import time
+                task_id = task.id
+                for _ in range(180):
+                    time.sleep(5)
+                    task_status = runway_client.tasks.retrieve(task_id)
+                    if task_status.status == "SUCCEEDED":
+                        break
+                    elif task_status.status in ("FAILED", "CANCELLED"):
+                        raise RuntimeError(f"Runway task {task_id} {task_status.status}")
+                else:
+                    raise RuntimeError(f"Runway task {task_id} timed out")
+
+                output_url = task_status.output[0] if task_status.output else None
+                if not output_url:
+                    raise RuntimeError("Runway returned no output URL")
+
+                import httpx
+                video_resp = httpx.get(output_url, timeout=60, follow_redirects=True)
+                video_resp.raise_for_status()
+                video_bytes = video_resp.content
+
+            except Exception as exc:
+                error_str = str(exc)
+                logger.warning("[motion] Runway locked failed for beat %d: %s", ordinal, error_str[:80])
+                clips_rejected += 1
+                continue
+
+            key = f"{property_id}/clips/{input_hash[:12]}.mp4"
+            r2_url = skills_r2_upload(key, video_bytes, "video/mp4")
+
+            clip_cost = round(duration * RUNWAY_COST.get(model, 0.05), 4)
+            total_cost += clip_cost
+
+            artifact_id = str(uuid.uuid4())
+            sb.table("video_artifacts").insert({
+                "artifact_id": artifact_id,
+                "property_id": property_id,
+                "kind": "clip",
+                "direction_id": direction_id,
+                "concept_id": direction.get("concept_id"),
+                "photo_id": photo_id,
+                "input_hash": input_hash,
+                "storage_url": r2_url,
+                "duration_seconds": duration,
+                "model": model,
+                "vendor": "runway",
+                "beat_ordinal": ordinal,
+                "requested_motion": requested_motion,
+                "technique": "locked",
+                "motion_params": {
+                    "prompt": locked_prompt,
+                    "actual_motion": "locked",
+                    "downgraded": False,
+                    "original_motion": None,
+                    "original_prompt": None,
+                    "content_motion": content_motion,
+                },
+                "cost_estimate_usd": clip_cost,
+                "status": "ready",
+                "created_by_agent": "skills/generate_motion",
+            }).execute()
+
+            emit_cost(sb, run_id, property_id,
+                      vendor="runway", service=model,
+                      units=duration, unit_name="seconds",
+                      unit_cost=RUNWAY_COST.get(model, 0.05),
+                      total_cost=clip_cost,
+                      workflow_name="generate_motion",
+                      generation_reason="locked_clip",
+                      discriminator=f"beat_{ordinal}")
+
+            clips_rendered += 1
+            technique_counts["locked"] += 1
+            technique_costs["locked"] += clip_cost
+            logger.info("[motion] Beat %d: locked %ds model=%s cost=$%.4f",
+                       ordinal, duration, model, clip_cost)
             continue
 
         # ── Frame-exit guard: downgrade, never drop ────────────────────
@@ -321,6 +470,8 @@ def generate_motion(
                   discriminator=f"beat_{ordinal}")
 
         clips_rendered += 1
+        technique_counts["generative"] += 1
+        technique_costs["generative"] += clip_cost
         motion_label = f"{requested_motion}→{actual_motion}" if downgraded else actual_motion
         logger.info("[motion] Beat %d: %s %ds model=%s cost=$%.4f",
                    ordinal, motion_label, duration, model, clip_cost)
@@ -330,6 +481,8 @@ def generate_motion(
         "clips_rejected": clips_rejected,
         "clips_cached": clips_cached,
         "cost_usd": round(total_cost, 4),
+        "technique_counts": technique_counts,
+        "technique_costs": {k: round(v, 4) for k, v in technique_costs.items()},
     })
     complete_run(sb, run_id, status="complete")
 

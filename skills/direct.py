@@ -543,23 +543,37 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
                 "beats": [1],
             })
 
-    # ── Text-bearing frames: push_in only at ANY beat ───────────────────
-    # Text in a frame (signage, house numbers, etc.) corrupts under
-    # parallax, pull_back, and pans. Constraint applies to every beat.
+    # ── Text-bearing frames: bounded push_in ONLY ────────────────────────
+    # Text in a frame (signage, house numbers, etc.) corrupts under any
+    # generative model — Runway re-renders letterforms and produces
+    # artefacts like BEACCH (GUARDRAIL-1). Constraint: every beat.
+    # Motion must be push_in AND technique must be bounded.
     for beat in beats:
         beat_photo = beat.get("photo_id")
         beat_obs = obs_map.get(beat_photo) or {}
         beat_motion = beat.get("requested_motion") or ""
-        if beat_obs.get("contains_text") and beat_motion != "push_in":
-            violations.append({
-                "rule": "opening_establishes",
-                "detail": (
-                    f"Beat {beat.get('ordinal', '?')}: frame contains text "
-                    f"but assigned '{beat_motion}' — only 'push_in' is permitted "
-                    f"on text-bearing frames."
-                ),
-                "beats": [beat.get("ordinal", 0)],
-            })
+        beat_technique = beat.get("technique", "bounded")
+        if beat_obs.get("contains_text"):
+            if beat_motion != "push_in":
+                violations.append({
+                    "rule": "opening_establishes",
+                    "detail": (
+                        f"Beat {beat.get('ordinal', '?')}: frame contains text "
+                        f"but assigned '{beat_motion}' — only 'push_in' is permitted "
+                        f"on text-bearing frames."
+                    ),
+                    "beats": [beat.get("ordinal", 0)],
+                })
+            if beat_technique in ("locked", "generative"):
+                violations.append({
+                    "rule": "opening_establishes",
+                    "detail": (
+                        f"Beat {beat.get('ordinal', '?')}: frame contains text "
+                        f"but technique='{beat_technique}' — generative models corrupt "
+                        f"letterforms. Text-bearing frames must be technique='bounded'."
+                    ),
+                    "beats": [beat.get("ordinal", 0)],
+                })
 
     return violations
 
@@ -955,10 +969,21 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
   If narration_provenance is "guest_book", narration_script must use whole
   source sentences only (validated deterministically).
 
+14. TECHNIQUE PER BEAT: each beat has a "technique" field:
+    - "bounded" (DEFAULT): camera pans/tilts/zooms across the still photo.
+      $0 per clip. No content animation. Use for MOST beats.
+    - "locked": camera is locked, Runway animates content ONLY (water
+      rippling, fire flickering, foliage swaying). Costs Runway rates.
+      Use ONLY for frames where real life would make a visible difference.
+      You MUST state in motion_prompt what you expect to move and why.
+    - "generative": full Runway generation with camera movement. Legacy.
+    Text-bearing frames (contains_text=true) MUST be technique="bounded"
+    with requested_motion="push_in". Never locked, never generative.
+
 Return ONLY valid JSON:
 {{
   "beats": [
-    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5}},
+    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5, "technique": "bounded"}},
     ...
   ],
   "opening_type": "property" or "setting" or "feature",
