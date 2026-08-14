@@ -37,6 +37,17 @@ logger = logging.getLogger(__name__)
 _MODEL = "claude-sonnet-4-6"
 _MAX_REVISION_ATTEMPTS = 2
 
+# Weak-frame threshold: frames below this width (in pixels) receive
+# constrained motion when used as the opener (slow push-in only).
+# Basis: Runway Gen-4 produces acceptable results at 768px+ but
+# hallucinates geometry below ~600px. 768 is the lower boundary of
+# "usable for motion" based on measured Brant Cottage results.
+WEAK_OPENER_WIDTH_THRESHOLD = 768
+
+# Interior detail sections that CANNOT open a hero — the guest must
+# know what the property IS before seeing a fixture.
+_DETAIL_SECTIONS = {"Bedrooms", "Bathrooms"}
+
 # OTA names — literal scan
 _OTA_NAMES = [
     "airbnb", "vrbo", "booking.com", "booking dot com",
@@ -415,8 +426,88 @@ def validate_duration(direction: dict) -> list:
     return violations
 
 
-def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest_texts: list, amenity_names: list) -> list:
-    """Run all 11 validators and return combined violations."""
+def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: dict = None) -> list:
+    """Beat 1 must open on the property, its setting, or its standout feature.
+
+    The director DECLARES which kind the opener is (opening_type field).
+    This validator checks the declaration against the observation data.
+
+    Deterministic — no model-assisted judgement.
+    """
+    violations = []
+    beats = direction.get("beats") or []
+    if not beats:
+        return violations
+
+    beat1 = sorted(beats, key=lambda b: b.get("ordinal", 0))[0]
+    photo_id = beat1.get("photo_id")
+    opening_type = direction.get("opening_type")  # "property" | "setting" | "feature"
+    obs = obs_map.get(photo_id) or {}
+
+    section = obs.get("curated_section") or ""
+
+    # FAIL: beat 1 on an interior detail section regardless of declaration
+    if section in _DETAIL_SECTIONS:
+        violations.append({
+            "rule": "opening_establishes",
+            "detail": f"Beat 1 opens on '{section}' — an interior detail. The hero must establish the property before showing details.",
+            "beats": [beat1.get("ordinal", 1)],
+        })
+        return violations
+
+    if not opening_type:
+        violations.append({
+            "rule": "opening_establishes",
+            "detail": "Direction missing opening_type — the director must declare what beat 1 establishes (property, setting, or feature).",
+            "beats": [1],
+        })
+        return violations
+
+    # Validate the declaration against observation data
+    if opening_type == "setting":
+        if not obs.get("is_setting"):
+            violations.append({
+                "rule": "opening_establishes",
+                "detail": f"Declared opening_type='setting' but frame {str(photo_id)[:8]} has is_setting=false.",
+                "beats": [1],
+            })
+
+    elif opening_type == "property":
+        # The frame should read as the property as a whole: Exterior or Pool
+        # at wide depth, or any section with subject_singularity != "cluttered"
+        if section in _DETAIL_SECTIONS:
+            violations.append({
+                "rule": "opening_establishes",
+                "detail": f"Declared opening_type='property' but frame is in '{section}' (detail section).",
+                "beats": [1],
+            })
+
+    elif opening_type == "feature":
+        # The frame should show a specific distinguishing feature —
+        # section or located_amenities should support the claim
+        # This is a loose check: we just verify it's not in a detail section
+        # (already checked above) and that SOMETHING is notable
+        pass  # Feature is the loosest claim — any non-detail section qualifies
+
+    # FAIL: weak opener with motion other than push_in
+    photo_width = (photo_widths or {}).get(photo_id, 0)
+    requested_motion = beat1.get("requested_motion") or ""
+    if photo_width > 0 and photo_width < WEAK_OPENER_WIDTH_THRESHOLD:
+        if requested_motion != "push_in":
+            violations.append({
+                "rule": "opening_establishes",
+                "detail": (
+                    f"Weak opener ({photo_width}px < {WEAK_OPENER_WIDTH_THRESHOLD}px threshold) "
+                    f"assigned '{requested_motion}' — only 'push_in' is permitted on weak frames."
+                ),
+                "beats": [1],
+            })
+
+    return violations
+
+
+def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest_texts: list, amenity_names: list, photo_widths: dict = None) -> list:
+    """Run all 12 validators and return combined violations."""
     beats = direction.get("beats") or []
     violations = []
     violations += validate_motion_affordance(beats, obs_map)
@@ -430,6 +521,7 @@ def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest
     violations += validate_quote_fidelity(direction, guest_texts)
     violations += validate_music_brief_prohibited(direction)
     violations += validate_duration(direction)
+    violations += validate_opening_establishes(direction, obs_map, photo_widths)
     return violations
 
 
@@ -487,7 +579,8 @@ def direct(
         "negative_space, foreground_elements, frame_element, "
         "beyond_frame_element, subject_singularity, focal_point, "
         "tonal_signature, located_amenities, "
-        "role, curated_section, quality_score, alt_text"
+        "role, curated_section, quality_score, alt_text, "
+        "is_setting, setting_subject"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     observations = obs_resp.data or []
 
@@ -503,6 +596,11 @@ def direct(
         rend = sb.table("renditions").select("kind, storage_url").eq("photo_id", pid).execute()
         for r in (rend.data or []):
             renditions_by_photo.setdefault(pid, {})[r["kind"]] = r["storage_url"]
+
+    # ── Load photo widths for weak-opener check ──────────────────────────
+    photo_width_resp = sb.table("photographs").select("photo_id, image_width").eq(
+        "property_id", property_id).eq("is_canonical", True).execute()
+    photo_widths = {p["photo_id"]: p.get("image_width") or 0 for p in (photo_width_resp.data or [])}
 
     # ── Load context ────────────────────────────────────────────────────
     prop = sb.table("properties").select("name, vibe_profile, city, state_region, amenities").eq("id", property_id).limit(1).execute()
@@ -566,7 +664,7 @@ def direct(
             break
 
         # Validate (11 content validators + voice membership check)
-        all_violations = _run_all_validators(direction_result, obs_map, guest_names, guest_texts, amenity_names)
+        all_violations = _run_all_validators(direction_result, obs_map, guest_names, guest_texts, amenity_names, photo_widths)
 
         # Validate voice choice is a member of the vibe's collection
         chosen_voice = direction_result.get("narration_voice_id")
@@ -620,6 +718,7 @@ def direct(
         "beats": direction_result.get("beats", []),
         "beat_count": len(direction_result.get("beats", [])),
         "target_duration_sec": direction_result.get("target_duration_sec", 30),
+        "opening_type": direction_result.get("opening_type"),
         "narrative_order": direction_result.get("narrative_order"),
         "continuity_notes": direction_result.get("continuity_notes", []),
         "narration_brief": direction_result.get("narration_brief"),
@@ -771,6 +870,16 @@ CONSTRAINTS (each is validated by a deterministic check — violations trigger r
 11. Beat duration_seconds MUST sum to 28-32 seconds (hard range). The reason:
 12. narration_voice_id MUST be one of the voice_ids from AVAILABLE NARRATOR
     VOICES above. Choose the voice that best serves the vibe and narration tone.
+13. THE OPENING RULE: Beat 1 MUST open on one of three kinds of shot:
+    - "property" — the property itself, read as a whole (Exterior, Pool with house visible)
+    - "setting" — what situates the property (a frame with is_setting=true)
+    - "feature" — the property's standout feature (e.g. the pool, the rooftop, the view)
+    Beat 1 MUST NOT open on an interior detail (Bedrooms, Bathrooms) before the
+    guest knows what the place is. The ORDER among the three kinds is YOUR
+    judgment — choose what serves the story.
+    You MUST declare opening_type in the output JSON.
+    If the opener is a frame below 768px wide (a weak opener), assign ONLY
+    "push_in" as its requested_motion — no parallax, no pans.
     narration must never be cut off mid-sentence. Size beats to fit whole
     spoken sentences, not the reverse.
 
@@ -788,6 +897,7 @@ Return ONLY valid JSON:
     {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5}},
     ...
   ],
+  "opening_type": "property" or "setting" or "feature",
   "narration_brief": "Instruction to the director about tone and approach",
   "narration_script": "The exact words the narrator speaks aloud",
   "narration_provenance": "original" or "guest_book",

@@ -1,0 +1,4 @@
+-- 014: opening_type on directions.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-14.
+-- The director declares what beat 1 establishes: property, setting, or feature.
+-- Validator opening_establishes enforces it deterministically.
