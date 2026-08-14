@@ -1112,6 +1112,13 @@ For each image report the following factual attributes:
                           family_accessibility: bunk room, crib, elevator, grab bars
                           practical: EV charger, garage, laundry, pantry, fenced yard
                         Record ONLY what is visible in the frame. Empty array if nothing notable.
+  contains_text       — boolean. True when LEGIBLE words are visible in the frame: signage,
+                        house numbers, business names, book spines, artwork with words, labelled
+                        packaging, a water tower carrying a town name. Decorative marks, logos
+                        without legible words, and illegible background lettering are false.
+                        The test: could a viewer READ it?
+  text_content        — if contains_text is true, the words the curator can read, verbatim.
+                        null when contains_text is false. E.g. "BEACH", "Pool Rules", "123 Ocean Ave".
   shows_structure     — boolean. True when the BUILDING ITSELF is legible as a whole in the
                         frame: its form, its scale, how it sits on its lot. The property must
                         read as a complete structure, not a corner, not a detail, not a view
@@ -1201,6 +1208,8 @@ def _schema_example() -> str:
       "setting_subject": null,
       "placement": "indoor",
       "located_amenities": [{"name": "kitchen island", "category": "gathering", "placement": "indoor"}],
+      "contains_text": false,
+      "text_content": null,
       "shows_structure": false,
       "structure_view": null
     }
@@ -1332,6 +1341,8 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "setting_subject":          _str_or_none(img.get("setting_subject")),
             "placement":                _str_or_none(img.get("placement")) or "unknown",
             "located_amenities":        _obj_array(img.get("located_amenities")),
+            "contains_text":            _bool(img.get("contains_text")),
+            "text_content":             _str_or_none(img.get("text_content")),
             "shows_structure":          _bool(img.get("shows_structure")),
             "structure_view":           _str_or_none(img.get("structure_view")),
             # ── Visibility / eligibility (Sprint 1) ──────────────────────

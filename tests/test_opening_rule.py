@@ -228,6 +228,70 @@ def test_bedroom_with_structure_true_still_fails():
     assert len(v) >= 1
 
 
+# ── Text-bearing frame tests ────────────────────────────────────────────
+
+OBS_TEXT_FRAME = {
+    "curated_section": "Exterior",
+    "is_setting": False,
+    "shows_structure": False,
+    "placement": "outdoor",
+    "contains_text": True,
+    "text_content": "BEACH",
+}
+
+
+def test_text_frame_parallax_fails():
+    obs_map = {"photo-A": OBS_EXTERIOR, "photo-B": OBS_TEXT_FRAME}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 2, "photo_id": "photo-B", "requested_motion": "parallax", "duration_seconds": 4},
+    ], "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map)
+    assert any(vv["rule"] == "opening_establishes" and "text" in vv["detail"] for vv in v)
+
+
+def test_text_frame_pull_back_fails():
+    obs_map = {"photo-A": OBS_EXTERIOR, "photo-B": OBS_TEXT_FRAME}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 3, "photo_id": "photo-B", "requested_motion": "pull_back", "duration_seconds": 4},
+    ], "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map)
+    assert any("text" in vv["detail"] for vv in v)
+
+
+def test_text_frame_push_in_passes():
+    obs_map = {"photo-A": OBS_EXTERIOR, "photo-B": OBS_TEXT_FRAME}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 5, "photo_id": "photo-B", "requested_motion": "push_in", "duration_seconds": 4},
+    ], "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map)
+    assert not any("text" in vv.get("detail", "") for vv in v)
+
+
+def test_no_text_parallax_passes():
+    """Non-text frame with parallax is fine."""
+    obs_map = {"photo-A": OBS_EXTERIOR, "photo-B": {**OBS_POOL, "placement": "outdoor", "contains_text": False}}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 2, "photo_id": "photo-B", "requested_motion": "parallax", "duration_seconds": 4},
+    ], "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map)
+    assert not any("text" in vv.get("detail", "") for vv in v)
+
+
+def test_weak_opener_with_text_single_failure():
+    """A weak opener that ALSO contains text → push_in, no double failure."""
+    obs_map = {"photo-A": {**OBS_TEXT_FRAME, "shows_structure": True}}
+    widths = {"photo-A": 500}
+    d = {"beats": [{"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4}],
+         "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map, widths)
+    # push_in satisfies both constraints — no violations
+    assert v == []
+
+
 # ── Interior sections at beats 2+ → PASS (rule only governs beat 1) ─────
 
 def test_kitchen_at_beat2_passes():

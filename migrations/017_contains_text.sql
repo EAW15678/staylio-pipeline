@@ -1,0 +1,5 @@
+-- 017: contains_text + text_content on observations.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-14.
+-- contains_text: true when legible words are visible in the frame.
+-- text_content: the words the curator can read, verbatim.
+-- Text-bearing frames constrained to push_in motion only.

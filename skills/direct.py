@@ -517,6 +517,24 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
                 "beats": [1],
             })
 
+    # ── Text-bearing frames: push_in only at ANY beat ───────────────────
+    # Text in a frame (signage, house numbers, etc.) corrupts under
+    # parallax, pull_back, and pans. Constraint applies to every beat.
+    for beat in beats:
+        beat_photo = beat.get("photo_id")
+        beat_obs = obs_map.get(beat_photo) or {}
+        beat_motion = beat.get("requested_motion") or ""
+        if beat_obs.get("contains_text") and beat_motion != "push_in":
+            violations.append({
+                "rule": "opening_establishes",
+                "detail": (
+                    f"Beat {beat.get('ordinal', '?')}: frame contains text "
+                    f"but assigned '{beat_motion}' — only 'push_in' is permitted "
+                    f"on text-bearing frames."
+                ),
+                "beats": [beat.get("ordinal", 0)],
+            })
+
     return violations
 
 
@@ -595,7 +613,7 @@ def direct(
         "tonal_signature, located_amenities, "
         "role, curated_section, quality_score, alt_text, "
         "is_setting, setting_subject, placement, located_amenities, "
-        "shows_structure, structure_view"
+        "shows_structure, structure_view, contains_text, text_content"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     observations = obs_resp.data or []
 
