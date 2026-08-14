@@ -52,6 +52,14 @@ _OPENER_ALWAYS_DISQUALIFIED = {"Bedrooms", "Bathrooms"}
 # outdoor kitchens) that qualify when the curator confirms placement.
 _OPENER_OUTDOOR_ONLY_SECTIONS = {"Kitchen", "Living Areas", "Extras"}
 
+# Common words filtered from guest name parts to avoid false positives.
+# "The Hillis Family" → parts ["hillis"] (not ["the","hillis","family"]).
+_GUEST_NAME_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "at", "in", "on", "to", "for",
+    "by", "mr", "mrs", "ms", "dr", "family", "group", "team", "guest",
+    "guests", "host", "hosts",
+}
+
 # OTA names — literal scan
 _OTA_NAMES = [
     "airbnb", "vrbo", "booking.com", "booking dot com",
@@ -178,6 +186,25 @@ def validate_continuity(beats: list, obs_map: dict) -> list:
     return violations
 
 
+def _extract_regions(neg_space) -> set:
+    """Extract region names from negative_space, handling both formats.
+
+    Dict format (current): [{"region": "top_center", "size": ..., "contrast": ...}]
+    Flat format (legacy):  ["top_center", "top_left"]
+    """
+    regions = set()
+    if not neg_space or not isinstance(neg_space, list):
+        return regions
+    for item in neg_space:
+        if isinstance(item, dict):
+            r = item.get("region")
+            if r:
+                regions.add(r)
+        elif isinstance(item, str):
+            regions.add(item)
+    return regions
+
+
 def validate_overlay_placement(direction: dict, obs_map: dict) -> list:
     """Overlay grid regions must be in that frame's negative_space."""
     violations = []
@@ -191,13 +218,11 @@ def validate_overlay_placement(direction: dict, obs_map: dict) -> list:
             violations.append({"rule": "overlay_placement", "detail": f"Overlay references non-existent beat {ordinal}", "beats": [ordinal or 0]})
             continue
         frame = obs_map.get(beat.get("photo_id")) or {}
-        neg_space = frame.get("negative_space") or []
-        if isinstance(neg_space, str):
-            neg_space = [neg_space]
-        if region and region not in neg_space:
+        regions = _extract_regions(frame.get("negative_space"))
+        if region and region not in regions:
             violations.append({
                 "rule": "overlay_placement",
-                "detail": f"Beat {ordinal}: overlay region '{region}' not in negative_space {neg_space}",
+                "detail": f"Beat {ordinal}: overlay region '{region}' not in negative_space regions {sorted(regions)}",
                 "beats": [ordinal],
             })
     return violations
@@ -238,7 +263,8 @@ def validate_no_guest_names(direction: dict, guest_names: list) -> list:
 
     for name in guest_names:
         name_lower = name.lower()
-        name_parts = [p for p in name_lower.split() if len(p) > 2]
+        name_parts = [p for p in name_lower.split()
+                      if len(p) > 2 and p not in _GUEST_NAME_STOPWORDS]
         for text, location in surfaces:
             text_lower = text.lower()
             if name_lower in text_lower:
