@@ -55,9 +55,9 @@ def deduplicate(
     except EnvironmentError as e:
         return SkillResult.failed(str(e))
 
-    # ── Load photographs with pHash ──────────────────────────────────────
+    # ── Load photographs with pHash + source_image_id ─────────────────────
     photos_resp = sb.table("photographs").select(
-        "photo_id, phash, image_width, image_height, is_canonical"
+        "photo_id, phash, image_width, image_height, is_canonical, source_image_id"
     ).eq("property_id", property_id).execute()
     photos = photos_resp.data or []
 
@@ -111,7 +111,27 @@ def deduplicate(
         if ra != rb:
             parent[ra] = rb
 
-    # Compare all pairs
+    # ── Pre-clustering: union rows with the same source_image_id ────────
+    # Rows sharing the same source identity (e.g. PMC i.<hash>) are the
+    # same photograph at different sizes. Union them BEFORE pHash, so they
+    # cluster regardless of Hamming distance. Rows with NULL source_image_id
+    # are unaffected.
+    by_source_id = defaultdict(list)
+    for p in photos_with_phash:
+        sid = p.get("source_image_id")
+        if sid:
+            by_source_id[sid].append(p["photo_id"])
+
+    source_id_unions = 0
+    for sid, photo_ids in by_source_id.items():
+        for pid in photo_ids[1:]:
+            union(photo_ids[0], pid)
+            source_id_unions += 1
+
+    if source_id_unions > 0:
+        logger.info("[deduplicate] Pre-clustered %d pairs by source_image_id", source_id_unions)
+
+    # ── pHash clustering (runs on top of pre-clusters) ──────────────────
     for i in range(len(photos_with_phash)):
         for j in range(i + 1, len(photos_with_phash)):
             p1 = photos_with_phash[i]

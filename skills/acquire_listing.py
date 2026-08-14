@@ -59,6 +59,28 @@ def _upgrade_url(url):
     return url
 
 
+# Source image identity patterns — per-host registry.
+# Each entry: (url_pattern, regex_with_one_capture_group).
+# A second PMC platform is a data addition, not a code change.
+_SOURCE_IDENTITY_PATTERNS = [
+    (re.compile(r"vacationrentalslbi\.com"), re.compile(r"/i\.([^/.]+)\.")),
+    # Add more PMC hosts here: (host_pattern, identity_regex)
+]
+
+
+def _extract_source_image_id(url: str):
+    """Extract the source system's own image identity from a URL.
+
+    Returns the identity string (e.g. the hex hash after /i.) or None.
+    """
+    for host_pattern, id_regex in _SOURCE_IDENTITY_PATTERNS:
+        if host_pattern.search(url):
+            m = id_regex.search(url)
+            if m:
+                return m.group(1)
+    return None
+
+
 def _photo_id(property_id, content_hash):
     return str(uuid.uuid5(PHOTO_NAMESPACE, f"{property_id}:{content_hash}"))
 
@@ -346,16 +368,15 @@ def acquire_listing(
 
     # ── Apply URL upgrades ───────────────────────────────────────────────
     upgraded = []
-    seen_hashes = set()
+    seen_ids = set()
     for url in photo_urls:
         u = _upgrade_url(url)
-        # Dedupe by i.<hash> if present
-        hash_match = re.search(r"/i\.([^/.]+)\.", u)
-        if hash_match:
-            h = hash_match.group(1)
-            if h in seen_hashes:
+        # Dedupe by source image identity if available
+        sid = _extract_source_image_id(u)
+        if sid:
+            if sid in seen_ids:
                 continue
-            seen_hashes.add(h)
+            seen_ids.add(sid)
         upgraded.append(u)
     photo_urls = upgraded[:max_photos]
 
@@ -453,6 +474,9 @@ def acquire_listing(
                     # Use source URL as storage_url if R2 not configured
                     r2_url = url
 
+                # Extract source image identity for pre-pHash clustering
+                source_image_id = _extract_source_image_id(url)
+
                 # Write photograph
                 sb.table("photographs").insert({
                     "photo_id": pid,
@@ -460,6 +484,7 @@ def acquire_listing(
                     "content_hash": content_hash,
                     "source_urls": [url],
                     "source_systems": [source_type],
+                    "source_image_id": source_image_id,
                     "is_canonical": True,
                     "image_width": width,
                     "image_height": height,

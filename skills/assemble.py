@@ -355,11 +355,11 @@ def assemble(
     render_cost = round((total_duration / 60) * CREATOMATE_COST_PER_RENDER_MINUTE, 4)
     artifact_id = str(uuid.uuid4())
 
-    # Supersede prior masters — clear input_hash to free the unique constraint
+    # Supersede prior masters (partial unique index means superseded rows keep their hash)
     from datetime import datetime, timezone
     now_iso = datetime.now(timezone.utc).isoformat()
     sb.table("video_artifacts").update(
-        {"superseded_at": now_iso, "input_hash": None}
+        {"superseded_at": now_iso}
     ).eq("direction_id", direction_id).eq("kind", "master").is_(
         "superseded_at", "null"
     ).execute()

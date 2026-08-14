@@ -1,0 +1,10 @@
+-- 012: source_image_id on photographs + partial unique on video_artifacts.input_hash.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-14.
+--
+-- photographs.source_image_id: source system's own image identity
+-- (e.g. PMC i.<hash>). Used for pre-pHash clustering so size variants
+-- of the same image always cluster regardless of Hamming distance.
+--
+-- video_artifacts: replaced global UNIQUE(input_hash) with partial
+-- unique WHERE superseded_at IS NULL. Superseded rows keep their hash
+-- for traceability.
