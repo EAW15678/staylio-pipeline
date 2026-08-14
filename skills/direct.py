@@ -44,9 +44,12 @@ _MAX_REVISION_ATTEMPTS = 2
 # "usable for motion" based on measured Brant Cottage results.
 WEAK_OPENER_WIDTH_THRESHOLD = 768
 
-# Interior detail sections that CANNOT open a hero — the guest must
-# know what the property IS before seeing a fixture.
-_DETAIL_SECTIONS = {"Bedrooms", "Bathrooms"}
+# Sections that CANNOT open a hero. No interior may lead — the guest must
+# know what the property IS before seeing a room. Exterior and Pool are
+# the only sections that qualify as openers.
+# Extras is disqualified because it is ambiguous (holds both interior
+# and exterior items) and cannot be resolved from recorded fields alone.
+_OPENER_DISQUALIFIED_SECTIONS = {"Bedrooms", "Bathrooms", "Kitchen", "Living Areas", "Extras"}
 
 # OTA names — literal scan
 _OTA_NAMES = [
@@ -447,10 +450,10 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
     section = obs.get("curated_section") or ""
 
     # FAIL: beat 1 on an interior detail section regardless of declaration
-    if section in _DETAIL_SECTIONS:
+    if section in _OPENER_DISQUALIFIED_SECTIONS:
         violations.append({
             "rule": "opening_establishes",
-            "detail": f"Beat 1 opens on '{section}' — an interior detail. The hero must establish the property before showing details.",
+            "detail": f"Beat 1 opens on '{section}' — no interior section may lead. The hero must open on the property, its setting, or an exterior feature.",
             "beats": [beat1.get("ordinal", 1)],
         })
         return violations
@@ -475,7 +478,7 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
     elif opening_type == "property":
         # The frame should read as the property as a whole: Exterior or Pool
         # at wide depth, or any section with subject_singularity != "cluttered"
-        if section in _DETAIL_SECTIONS:
+        if section in _OPENER_DISQUALIFIED_SECTIONS:
             violations.append({
                 "rule": "opening_establishes",
                 "detail": f"Declared opening_type='property' but frame is in '{section}' (detail section).",
@@ -871,12 +874,13 @@ CONSTRAINTS (each is validated by a deterministic check — violations trigger r
 12. narration_voice_id MUST be one of the voice_ids from AVAILABLE NARRATOR
     VOICES above. Choose the voice that best serves the vibe and narration tone.
 13. THE OPENING RULE: Beat 1 MUST open on one of three kinds of shot:
-    - "property" — the property itself, read as a whole (Exterior, Pool with house visible)
+    - "property" — the property itself, read as a whole (Exterior section)
     - "setting" — what situates the property (a frame with is_setting=true)
-    - "feature" — the property's standout feature (e.g. the pool, the rooftop, the view)
-    Beat 1 MUST NOT open on an interior detail (Bedrooms, Bathrooms) before the
-    guest knows what the place is. The ORDER among the three kinds is YOUR
-    judgment — choose what serves the story.
+    - "feature" — an EXTERIOR standout feature (Pool, deck, rooftop, view)
+    Beat 1 MUST NOT open on ANY interior section (Bedrooms, Bathrooms,
+    Kitchen, Living Areas, Extras). Interior frames are fully available
+    for beats 2 onward — this rule governs beat 1 ONLY.
+    The ORDER among the three kinds is YOUR judgment.
     You MUST declare opening_type in the output JSON.
     If the opener is a frame below 768px wide (a weak opener), assign ONLY
     "push_in" as its requested_motion — no parallax, no pans.

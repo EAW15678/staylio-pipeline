@@ -82,14 +82,14 @@ def test_bedroom_opener_fails():
     obs_map = {"photo-A": OBS_BEDROOM}
     v = validate_opening_establishes(_direction("photo-A", "property"), obs_map)
     assert len(v) >= 1
-    assert "interior detail" in v[0]["detail"]
+    assert "no interior section" in v[0]["detail"]
 
 
 def test_bathroom_opener_fails():
     obs_map = {"photo-A": OBS_BATHROOM}
     v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
     assert len(v) >= 1
-    assert "interior detail" in v[0]["detail"]
+    assert "no interior section" in v[0]["detail"]
 
 
 # ── Weak opener: parallax → FAIL; push_in → PASS ────────────────────────
@@ -145,10 +145,68 @@ def test_feature_opener_passes():
     assert v == []
 
 
-def test_kitchen_as_feature_passes():
-    """Kitchen is NOT a detail section — it can be a standout feature."""
+def test_kitchen_as_opener_fails():
+    """Kitchen is an interior section — cannot open."""
     obs_map = {"photo-A": OBS_KITCHEN}
     v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert len(v) >= 1
+    assert "no interior section" in v[0]["detail"]
+
+
+def test_living_areas_as_opener_fails():
+    """Living Areas is an interior section — cannot open."""
+    obs_map = {"photo-A": {"curated_section": "Living Areas", "is_setting": False}}
+    v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert len(v) >= 1
+    assert "no interior section" in v[0]["detail"]
+
+
+def test_extras_as_opener_fails():
+    """Extras is disqualified as an opener (ambiguous interior/exterior)."""
+    obs_map = {"photo-A": {"curated_section": "Extras", "is_setting": False}}
+    v = validate_opening_establishes(_direction("photo-A", "feature"), obs_map)
+    assert len(v) >= 1
+
+
+# ── Interior sections at beats 2+ → PASS (rule only governs beat 1) ─────
+
+def test_kitchen_at_beat2_passes():
+    obs_map = {"photo-A": OBS_EXTERIOR, "photo-B": OBS_KITCHEN}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 2, "photo_id": "photo-B", "requested_motion": "pan_left", "duration_seconds": 4},
+    ], "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map)
+    assert v == []
+
+
+def test_living_areas_at_beat3_passes():
+    obs_map = {"photo-A": OBS_EXTERIOR, "photo-C": {"curated_section": "Living Areas"}}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 3, "photo_id": "photo-C", "requested_motion": "pan_right", "duration_seconds": 4},
+    ], "opening_type": "property"}
+    v = validate_opening_establishes(d, obs_map)
+    assert v == []
+
+
+def test_bedroom_at_beat4_passes():
+    obs_map = {"photo-A": OBS_POOL, "photo-D": OBS_BEDROOM}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 4, "photo_id": "photo-D", "requested_motion": "pan_left", "duration_seconds": 3},
+    ], "opening_type": "feature"}
+    v = validate_opening_establishes(d, obs_map)
+    assert v == []
+
+
+def test_bathroom_at_beat5_passes():
+    obs_map = {"photo-A": OBS_SETTING, "photo-E": OBS_BATHROOM}
+    d = {"beats": [
+        {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 4},
+        {"ordinal": 5, "photo_id": "photo-E", "requested_motion": "tilt_up", "duration_seconds": 3},
+    ], "opening_type": "setting"}
+    v = validate_opening_establishes(d, obs_map)
     assert v == []
 
 
