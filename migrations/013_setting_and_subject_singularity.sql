@@ -1,0 +1,7 @@
+-- 013: is_setting + setting_subject on observations.
+-- Applied to staging ypvylzrotmiyypapowaa on 2026-08-14.
+-- is_setting: does this frame show what situates the property.
+-- setting_subject: what the guest is coming for, in the curator's words.
+-- subject_singularity was always in the schema but never populated by
+-- the LLM curator (it was computed by shot_inventory_builder, which the
+-- substrate never calls). Now added to the curator prompt.

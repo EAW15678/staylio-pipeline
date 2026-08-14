@@ -1079,6 +1079,18 @@ For each image report the following factual attributes:
                         repeating_geometry, straight_architectural_lines, reflections, water_surface,
                         fine_text, thin_railings, patterned_fabric. MUST include reflections and
                         water_surface where present.
+  subject_singularity — how many distinct subjects dominate this frame.
+                        "single" = one clear subject (a room, a pool, a building).
+                        "dual" = two subjects sharing the frame (house + ocean, pool + garden).
+                        "cluttered" = no dominant subject, many small elements.
+  is_setting          — boolean. Does this frame show what SITUATES the property — what makes
+                        the LOCATION worth travelling to? The thing outside the property the
+                        guest is coming for. Not limited to nature: an ocean, a mountain, a skyline,
+                        a main street, a vineyard, a lift queue all qualify. Interior-only frames
+                        are false. A wide shot of the house WITH the ocean behind it is true.
+  setting_subject     — if is_setting is true, name what the guest is coming for, in plain words.
+                        null when is_setting is false. E.g. "Atlantic Ocean beach",
+                        "Carolina Beach boardwalk", "mountain valley".
 
 Return ONLY valid JSON — no markdown, no prose, no code fences:
 
@@ -1150,7 +1162,10 @@ def _schema_example() -> str:
       "negative_space": [{"region": "top_center", "size": "large", "contrast": "high"}],
       "depth_tier": "wide",
       "motion_affordance": ["push_in", "pan_right"],
-      "motion_risk": ["straight_architectural_lines", "reflections"]
+      "motion_risk": ["straight_architectural_lines", "reflections"],
+      "subject_singularity": "single",
+      "is_setting": false,
+      "setting_subject": null
     }
   ]
 }"""
@@ -1275,6 +1290,9 @@ def _parse_and_validate(raw: str, index_map: dict[str, str]) -> Optional[dict]:
             "depth_tier":               _str_or_none(img.get("depth_tier")),
             "motion_affordance":        _str_array(img.get("motion_affordance")),
             "motion_risk":              _str_array(img.get("motion_risk")),
+            "subject_singularity":      _str_or_none(img.get("subject_singularity")),
+            "is_setting":               _bool(img.get("is_setting")),
+            "setting_subject":          _str_or_none(img.get("setting_subject")),
             # ── Visibility / eligibility (Sprint 1) ──────────────────────
             # gallery_visible: always True from LLM path — LLM exclude does NOT
             #   hide images from All Photos.  Only deterministic checks (e.g. missing

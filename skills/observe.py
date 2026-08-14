@@ -224,6 +224,8 @@ def observe(
                 "frame_element": img.get("frame_element"),
                 "beyond_frame_element": img.get("beyond_frame_element"),
                 "subject_singularity": img.get("subject_singularity"),
+                "is_setting": img.get("is_setting", False),
+                "setting_subject": img.get("setting_subject"),
                 "focal_point": img.get("visual_summary"),
                 "tonal_signature": None,
                 "located_amenities": [],
