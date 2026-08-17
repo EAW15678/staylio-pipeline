@@ -211,6 +211,20 @@ def publish_page(
         "last_built_at": "now()",
     }, on_conflict="property_id").execute()
 
+    # ── Advance properties.status to active ──────────────────────────────
+    # Publishing is what "live" means. Place this AFTER the R2 upload
+    # succeeds — a failed publish must never mark a property active.
+    current_status = prop.get("status") or ""
+    if current_status == "archived":
+        logger.warning(
+            "[publish_page] Property %s is archived — NOT advancing to active. "
+            "An archived property should not silently come back to life.",
+            property_id[:12],
+        )
+    elif current_status != "active":
+        sb.table("properties").update({"status": "active"}).eq("id", property_id).execute()
+        logger.info("[publish_page] Property %s status: %s → active", property_id[:12], current_status)
+
     # ── Complete ─────────────────────────────────────────────────────────
     complete_step(sb, step_id, status="complete", metadata={
         "slug": slug,
