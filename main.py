@@ -692,6 +692,17 @@ def substrate_status(
 
     steps = sb.table("run_steps").select("step_name, status, started_at, completed_at, metadata, error_message").eq("run_id", run_id).order("started_at").execute()
 
+    # ── Derive page_url from properties.slug (canonical) ───────────────
+    # The step metadata and landing_pages table may contain stale staging
+    # URLs from before PUBLISH_R2_BUCKET was set. properties.slug is
+    # authoritative — the Worker serves {slug}.upliftstays.com.
+    slug = None
+    page_url = None
+    prop = sb.table("properties").select("slug").eq("id", r["property_id"]).limit(1).execute()
+    if prop.data and prop.data[0].get("slug"):
+        slug = prop.data[0]["slug"]
+        page_url = f"https://{slug}.upliftstays.com"
+
     return {
         "run_id": r["run_id"],
         "property_id": r["property_id"],
@@ -699,6 +710,8 @@ def substrate_status(
         "started_at": r["started_at"],
         "completed_at": r.get("completed_at"),
         "error_summary": r.get("error_summary"),
+        "slug": slug,
+        "page_url": page_url,
         "steps": [
             {
                 "name": s["step_name"],
