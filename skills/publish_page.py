@@ -172,27 +172,31 @@ def publish_page(
         )
 
     # ── Upload to R2 ───────────────────────────────────────────────────
-    # PUBLISH_R2_BUCKET overrides STAGING_R2_BUCKET for production deploy.
-    # Production Worker expects key = "{slug}/index.html" (no prefix).
-    # Staging uses "pages/{slug}/index.html" for isolation.
+    # PUBLISH_R2_BUCKET is REQUIRED. A publish that silently goes to the
+    # staging bucket instead of production is worse than one that fails.
     import os as _os
     publish_bucket = _os.environ.get("PUBLISH_R2_BUCKET", "")
-    if publish_bucket:
-        # Production path — write directly to the Worker's bucket
-        html_bytes = html.encode("utf-8")
-        key = f"{slug}/index.html"
-        from skills.contract import _get_skills_r2_client
-        client = _get_skills_r2_client()
-        client.put_object(Bucket=publish_bucket, Key=key, Body=html_bytes,
-                          ContentType="text/html; charset=utf-8")
-        page_url = f"https://{slug}.upliftstays.com"
-        logger.info("[publish_page] Production upload %d bytes → %s (bucket=%s)",
-                    len(html_bytes), page_url, publish_bucket)
-    else:
-        # Staging path — skills_r2_upload with pages/ prefix
-        html_bytes = html.encode("utf-8")
-        key = f"pages/{slug}/index.html"
-        page_url = skills_r2_upload(key, html_bytes, "text/html; charset=utf-8")
+    if not publish_bucket:
+        complete_step(sb, step_id, status="failed",
+                      error_message="PUBLISH_R2_BUCKET not set — cannot publish to production")
+        complete_run(sb, run_id, status="failed")
+        return SkillResult.failed(
+            reason="PUBLISH_R2_BUCKET not set. Set it to the production Worker bucket (e.g. 'staylio-pages').",
+            attempted=1, succeeded=0, failed_count=1,
+            error_class="config", human_required=True,
+        )
+
+    # Production path — write directly to the Worker's bucket
+    # Key = "{slug}/index.html" (no prefix). The Worker expects this.
+    html_bytes = html.encode("utf-8")
+    key = f"{slug}/index.html"
+    from skills.contract import _get_skills_r2_client
+    client = _get_skills_r2_client()
+    client.put_object(Bucket=publish_bucket, Key=key, Body=html_bytes,
+                      ContentType="text/html; charset=utf-8")
+    page_url = f"https://{slug}.upliftstays.com"
+    logger.info("[publish_page] Production upload %d bytes → %s (bucket=%s)",
+                len(html_bytes), page_url, publish_bucket)
 
     logger.info("[publish_page] Uploaded %d bytes → %s", len(html_bytes), page_url)
 

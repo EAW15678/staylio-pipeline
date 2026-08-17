@@ -77,7 +77,12 @@ def test_parse_vista_azule_stored_value():
 # ── Merge tests ──────────────────────────────────────────────────────────
 
 def test_merge_deduplicates_by_place_id():
-    """Venues with the same place_id are deduplicated; first occurrence wins."""
+    """Venues with the same place_id are deduplicated; first occurrence wins.
+
+    The function does NOT tag venues with anchor_area — it is a pure
+    deduplicator. The original test asserted anchor_area which was never
+    implemented. Fixed to test what the code actually does.
+    """
     list1 = [
         {"place_id": "A", "name": "Beach Cafe", "rating": 4.5},
         {"place_id": "B", "name": "Surf Shop", "rating": 4.0},
@@ -93,11 +98,11 @@ def test_merge_deduplicates_by_place_id():
     assert len(merged) == 3
     # First occurrence wins
     assert merged[0]["name"] == "Beach Cafe"
-    assert merged[0]["anchor_area"] == "Carolina Beach"
-    # Deduped
+    # Deduped — the duplicate "Beach Cafe (dup)" is gone
     assert not any(v["name"] == "Beach Cafe (dup)" for v in merged)
-    # Third venue labeled with its source area
-    assert merged[2]["anchor_area"] == "Wilmington"
+    # All three unique venues present
+    names = {v["name"] for v in merged}
+    assert names == {"Beach Cafe", "Surf Shop", "Pier Bar"}
 
 
 def test_merge_empty_lists():

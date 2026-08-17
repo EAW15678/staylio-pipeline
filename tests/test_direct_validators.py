@@ -281,12 +281,36 @@ def test_duration_fail_zero():
 # ── Combined: all validators ─────────────────────────────────────────────
 
 def test_all_validators_clean_direction():
-    """A well-formed direction passes all 11 validators.
+    """A well-formed direction passes all 12 validators.
 
     Fixture avoids: space conflicts (A-left, C-center, A-left, C-center...),
     depth monotony (foreground, background alternating), and time jumps
     (morning→golden_hour is 2-group jump, so use A→B→C with intent notes).
+
+    Beat 1 must satisfy the opening rule (validator 12):
+    - opening_type declared
+    - photo-A needs curated_section=Exterior, placement=outdoor,
+      shows_structure=true in obs_map for "property" opening
     """
+    # Extend OBS_MAP with opening-rule fields for photo-A
+    obs = dict(OBS_MAP)
+    obs["photo-A"] = {
+        **obs["photo-A"],
+        "curated_section": "Exterior",
+        "placement": "outdoor",
+        "shows_structure": True,
+        "is_setting": False,
+        "contains_text": False,
+    }
+    obs["photo-C"] = {
+        **obs["photo-C"],
+        "curated_section": "Living Areas",
+        "placement": "indoor",
+        "shows_structure": False,
+        "is_setting": False,
+        "contains_text": False,
+    }
+
     direction = {
         "beats": [
             {"ordinal": 1, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 5},
@@ -296,19 +320,16 @@ def test_all_validators_clean_direction():
             {"ordinal": 5, "photo_id": "photo-A", "requested_motion": "push_in", "duration_seconds": 5},
             {"ordinal": 6, "photo_id": "photo-C", "requested_motion": "push_in", "duration_seconds": 5},
         ],
+        "opening_type": "property",
         "narration_brief": "Welcome to a beachfront paradise",
         "narration_provenance": "original",
         "music_brief": {"mood": "warm and relaxing", "tempo": "gentle"},
         "overlay_register": [],
         "target_duration_sec": 30,
     }
-    # A=left/foreground/morning, C=center/background/golden_hour
-    # No left→right conflicts (left→center is OK)
-    # No 3x same depth (foreground, background alternating)
     # Time: morning↔golden_hour is a 2-group jump — intent note needed
-    # on the RECEIVING beat (the one that follows the jump)
     for beat in direction["beats"]:
         beat["intent"] = "Intentional time transition"
 
-    violations = _run_all_validators(direction, OBS_MAP, [], [], [])
+    violations = _run_all_validators(direction, obs, [], [], [])
     assert violations == [], f"Unexpected violations: {violations}"
