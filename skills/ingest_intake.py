@@ -109,16 +109,23 @@ def ingest_intake(
     if _str("pmc_website_url"):
         prop_update["primary_listing_url"] = _str("pmc_website_url")
 
-    # Listing URLs
+    # Listing URLs — classify by HOSTNAME, not substring.
+    # "vacationrentals" as a substring matched vacationrentalslbi.com (a PMC)
+    # and misfiled it as VRBO. Parse the hostname and match domains.
     listing_urls = _list("listing_urls")
     if isinstance(listing_urls, list):
         for url_entry in listing_urls:
             url = url_entry if isinstance(url_entry, str) else (url_entry.get("url") if isinstance(url_entry, dict) else None)
             if url:
-                url_lower = url.lower()
-                if "airbnb" in url_lower:
+                try:
+                    from urllib.parse import urlparse
+                    hostname = urlparse(url).hostname or ""
+                    hostname = hostname.lower()
+                except Exception:
+                    hostname = ""
+                if "airbnb.com" in hostname:
                     prop_update["airbnb_url"] = url
-                elif "vrbo" in url_lower or "vacationrentals" in url_lower:
+                elif "vrbo.com" in hostname or "homeaway.com" in hostname or hostname == "vacationrentals.com" or hostname.endswith(".vacationrentals.com"):
                     prop_update["vrbo_url"] = url
 
     # Geocode city/state → lat/lng if coordinates are missing
