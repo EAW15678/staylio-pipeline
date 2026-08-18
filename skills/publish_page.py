@@ -109,7 +109,7 @@ def publish_page(
 
     # ── Check existing publication — noop if not forcing ─────────────────
     if not force:
-        existing = sb.table("landing_pages").select("page_id", count="exact").eq(
+        existing = sb.table("landing_pages").select("property_id", count="exact").eq(
             "property_id", property_id
         ).limit(0).execute()
         if existing.count > 0:
