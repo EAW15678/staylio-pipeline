@@ -39,7 +39,9 @@ CREATE TABLE directions (
 
 CREATE INDEX idx_directions_concept ON directions(concept_id) WHERE superseded_at IS NULL;
 
-CREATE TYPE video_artifact_kind AS ENUM ('clip', 'narration', 'music', 'production', 'variant');
+-- 2026-08-18: label corrected from 'production' to 'master' to match live databases
+-- and skills/assemble.py. The rename was applied directly to staging and never committed.
+CREATE TYPE video_artifact_kind AS ENUM ('clip', 'narration', 'music', 'master', 'variant');
 
 CREATE TABLE video_artifacts (
   artifact_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
