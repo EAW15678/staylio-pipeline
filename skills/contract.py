@@ -92,18 +92,23 @@ _staging_client = None
 
 
 def get_substrate():
-    """Get the staging Supabase client. Fails loudly if not configured."""
+    """Get the substrate Supabase client. Fails loudly if not configured.
+
+    Reads SUBSTRATE_SUPABASE_URL / SUBSTRATE_SUPABASE_KEY (honest names).
+    Falls back to STAGING_SUPABASE_URL / STAGING_SUPABASE_KEY during
+    the changeover period — remove the fallback once verified green.
+    """
     global _staging_client
     if _staging_client is not None:
         return _staging_client
 
-    url = os.environ.get("STAGING_SUPABASE_URL")
-    key = os.environ.get("STAGING_SUPABASE_KEY")
+    url = os.environ.get("SUBSTRATE_SUPABASE_URL") or os.environ.get("STAGING_SUPABASE_URL")
+    key = os.environ.get("SUBSTRATE_SUPABASE_KEY") or os.environ.get("STAGING_SUPABASE_KEY")
     if not url or not key:
         raise EnvironmentError(
-            "STAGING_SUPABASE_URL and STAGING_SUPABASE_KEY must be set. "
-            "Skills read/write ONLY from the substrate (staging Supabase). "
-            "No Redis, no production database."
+            "SUBSTRATE_SUPABASE_URL and SUBSTRATE_SUPABASE_KEY must be set "
+            "(or STAGING_SUPABASE_URL / STAGING_SUPABASE_KEY as fallback). "
+            "Skills read/write ONLY from the substrate database."
         )
     # Defensive: strip whitespace/newlines from key — Railway variable
     # paste can introduce line breaks that cause httpx header failures.
