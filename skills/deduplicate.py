@@ -27,16 +27,25 @@ logger = logging.getLogger(__name__)
 HAMMING_THRESHOLD = 8
 
 # Source priority for canonical tiebreak — lower wins.
-# Ported verbatim from skills/dedupe.py:39-47 pending Erick's
-# confirmation. Only fires on exact resolution ties. booking_com is
-# dead on the substrate path but kept for parity.
+# RULED BY ERICK: on the same image at the same size, VRBO wins.
+# This ranking is consulted ONLY as the second term of the canonical
+# sort key, i.e. only when two photographs are already in the same
+# pHash cluster (same image) AND have identical pixel counts (same
+# size). It is never a quality filter and never removes a photograph.
+# Values ported from skills/dedupe.py:39-47 (a module not called by
+# any workflow) and are now ruled rather than inherited.
 _SOURCE_PRIORITY = {
-    "intake_portal": 0,
+    "intake_portal": 0,  # unreachable in practice — owner uploads are
+                         # photographs NOT on the listing sites, so they
+                         # never cluster with a scraped photo. Retained
+                         # for the owner-vs-owner case (rank equal,
+                         # photo_id decides).
     "vrbo":          1,
     "airbnb":        2,
     "pmc_website":   3,
     "pmc":           3,
-    "booking_com":   4,
+    "booking_com":   4,  # dead on the substrate path — Booking.com is
+                         # ruled out of acquisition. Retained for parity.
     "claude_parsed": 5,
 }
 
@@ -178,8 +187,7 @@ def deduplicate(
         # Canonical selection: total ordering so result is deterministic
         # regardless of query row order.
         #   1. Megapixels descending — highest resolution wins.
-        #   2. Source priority — on exact resolution tie, better source wins.
-        #      Values ported from skills/dedupe.py pending Erick's confirmation.
+        #   2. Source priority — ruled by Erick: VRBO wins on a tie.
         #   3. photo_id ascending — unique, makes the key total.
         def _canonical_key(p):
             w = p.get("image_width") or 0
