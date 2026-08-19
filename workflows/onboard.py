@@ -7,8 +7,13 @@ state). Ruling 6 end-to-end: any failed → halt workflow, record,
 hitl if human_required; noop → continue.
 
 Sequence:
-  ingest_intake → acquire_listing (per source_url) → enhance →
-  deduplicate → observe → write_copy ∥ build_guide → publish_page
+  ingest_intake → acquire_listing (per source_url) → deduplicate →
+  observe → enhance → write_copy ∥ build_guide →
+  conceive → direct → narrate + narrate_guest_cards → score_music →
+  generate_motion → assemble → publish_page
+
+Video steps (conceive through assemble) are non-halting: if any fails,
+the page publishes without a hero video and an alert is raised.
 
 Usage:
     from workflows.onboard import onboard
@@ -166,7 +171,155 @@ def onboard(
     r = _run_skill("build_guide", build_guide, property_id, force=force)
     # guide failure is non-fatal — page can render without it
 
-    # ── 7. Publish page ──────────────────────────────────────────────────
+    # ── 7–12. Video pipeline ────────────────────────────────────────────
+    # If any video step fails, continue to publishing — a property must
+    # never be left with no page because assembly failed. The page renders
+    # without a hero (render_page degrades gracefully).
+    # On failure: create a hitl queue row + alert, then publish anyway.
+    video_failed_step = None
+    video_error = None
+    concept_id = None
+    direction_id = None
+
+    try:
+        # ── 7. Conceive ─────────────────────────────────────────────────
+        from skills.conceive import conceive
+        step_id_v = record_step(sb, run_id, "conceive")
+        r = conceive(property_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("conceive", r.status, r.data))
+
+        if r.is_ok and r.data:
+            concept_id = r.data.get("concept_id")
+
+        if not concept_id:
+            raise RuntimeError(f"conceive failed: {r.reason}")
+
+        # ── 8. Direct ───────────────────────────────────────────────────
+        from skills.direct import direct
+        step_id_v = record_step(sb, run_id, "direct")
+        r = direct(property_id, concept_id=concept_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("direct", r.status, r.data))
+
+        if r.is_ok and r.data:
+            direction_id = r.data.get("direction_id")
+
+        if not direction_id:
+            raise RuntimeError(f"direct failed: {r.reason}")
+
+        # ── 9. Narrate + Narrate guest cards ────────────────────────────
+        from skills.narrate import narrate
+        step_id_v = record_step(sb, run_id, "narrate")
+        r = narrate(property_id, direction_id=direction_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("narrate", r.status, r.data))
+        if not r.is_ok:
+            raise RuntimeError(f"narrate failed: {r.reason}")
+
+        from skills.narrate_guest_cards import narrate_guest_cards
+        step_id_v = record_step(sb, run_id, "narrate_guest_cards")
+        r = narrate_guest_cards(property_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("narrate_guest_cards", r.status, r.data))
+        # guest card failure is non-fatal — hero can render without them
+
+        # ── 10. Score music ─────────────────────────────────────────────
+        from skills.score_music import score_music
+        step_id_v = record_step(sb, run_id, "score_music")
+        r = score_music(property_id, direction_id=direction_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("score_music", r.status, r.data))
+        if not r.is_ok:
+            raise RuntimeError(f"score_music failed: {r.reason}")
+
+        # ── 11. Generate motion ─────────────────────────────────────────
+        from skills.generate_motion import generate_motion
+        step_id_v = record_step(sb, run_id, "generate_motion")
+        r = generate_motion(property_id, direction_id=direction_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("generate_motion", r.status, r.data))
+        if not r.is_ok:
+            raise RuntimeError(f"generate_motion failed: {r.reason}")
+
+        # ── 12. Assemble ────────────────────────────────────────────────
+        from skills.assemble import assemble
+        step_id_v = record_step(sb, run_id, "assemble")
+        r = assemble(property_id, direction_id=direction_id,
+                     aspect_ratio="16:9", title_cards=False, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("assemble", r.status, r.data))
+        if not r.is_ok:
+            raise RuntimeError(f"assemble failed: {r.reason}")
+
+    except Exception as video_exc:
+        video_failed_step = str(video_exc).split(" failed:")[0] if " failed:" in str(video_exc) else "video_pipeline"
+        video_error = str(video_exc)[:200]
+        logger.warning("[onboard] Video pipeline failed at %s: %s — publishing without hero",
+                       video_failed_step, video_error[:80])
+
+        # ── Alert: hitl queue row + email ───────────────────────────────
+        prop_name = prop_data.get("name") or property_id[:12] if "prop_data" in dir() else property_id[:12]
+        try:
+            prop_for_name = sb.table("properties").select("name").eq("id", property_id).limit(1).execute()
+            if prop_for_name.data:
+                prop_name = prop_for_name.data[0].get("name") or property_id[:12]
+        except Exception:
+            pass
+
+        try:
+            import uuid as _uuid
+            hitl_id = str(_uuid.uuid4())
+            sb.table("hitl_queue_items").insert({
+                "id": hitl_id,
+                "property_id": property_id,
+                "account_id": None,
+                "queue_type": "pipeline_failure",
+                "priority": "p0",
+                "status": "open",
+                "created_by_type": "system",
+                "reason_code": "video_pipeline_failure",
+                "title": f"CRITICAL: {prop_name} — {video_failed_step} failed during onboarding",
+                "description": (
+                    f"The video pipeline failed at step '{video_failed_step}' during onboarding. "
+                    f"Error: {video_error}. "
+                    f"The page was published without a hero video. "
+                    f"This property needs a video generated and the page republished."
+                ),
+                "payload": {"failed_step": video_failed_step, "error": video_error,
+                             "run_id": run_id, "property_id": property_id},
+            }).execute()
+
+            from skills.notify import send_halt_alert
+            send_halt_alert(
+                sb, hitl_id, property_id, prop_name,
+                error_class="video_pipeline_failure",
+                detail=(
+                    f"Step '{video_failed_step}' failed: {video_error}. "
+                    f"The page was published without a hero video. "
+                    f"Needs a video and a republish."
+                ),
+                run_id=run_id,
+                step_name=video_failed_step,
+            )
+        except Exception as alert_exc:
+            logger.error("[onboard] Alert failed: %s — continuing to publish", str(alert_exc)[:80])
+
+    # ── 13. Publish page ─────────────────────────────────────────────────
     from skills.publish_page import publish_page
     r = _run_skill("publish_page", publish_page, property_id, force=force)
     if not r.is_ok and r.status != "held":
