@@ -133,10 +133,13 @@ def build_page(sb, property_id: str) -> dict:
     # If a page is already live, the hold must never take it down — the existing
     # landing_pages row and R2 file are left exactly as they are.
     if not photos:
+        reason = f"No canonical photographs for property {property_id[:12]}"
+        hold_code = "no_canonical_photos"
+        raise_hold(sb, property_id, reason, hold_code)
         return {
             "ok": False, "hold": True,
-            "reason": f"No canonical photographs for property {property_id[:12]}",
-            "hold_code": "no_canonical_photos",
+            "reason": reason,
+            "hold_code": hold_code,
         }
 
     # ── Load renditions ──────────────────────────────────────────────────
@@ -157,10 +160,13 @@ def build_page(sb, property_id: str) -> dict:
     # Ruled by Erick, 2026-08-19: same hold behaviour as zero photos.
     observed_count = sum(1 for p in photos if p["photo_id"] in obs_by_photo)
     if observed_count == 0:
+        reason = f"Property {property_id[:12]} has {len(photos)} photos but 0 observations"
+        hold_code = "no_observations"
+        raise_hold(sb, property_id, reason, hold_code)
         return {
             "ok": False, "hold": True,
-            "reason": f"Property {property_id[:12]} has {len(photos)} photos but 0 observations",
-            "hold_code": "no_observations",
+            "reason": reason,
+            "hold_code": hold_code,
         }
 
     # ── Build media assets with curated_section directly ─────────────────

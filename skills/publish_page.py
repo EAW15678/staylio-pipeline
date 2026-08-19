@@ -9,7 +9,7 @@ bucket under pages/{slug}/index.html.
 
 Ruling 3-R halt conditions:
   - Slug collision with a DIFFERENT property → failed + urgent hitl
-  - Zero photos rendered → failed + urgent hitl
+  - Zero photos or zero observations → held (alerted by orchestrate.py)
   - Unresolvable > 0 → failed + urgent hitl
 
 Usage:
@@ -126,6 +126,21 @@ def publish_page(
     from skills.render_page import render_page
     render_result = render_page(property_id)
 
+    # ── Hold: the orchestrator decided the data is insufficient ──────────
+    # The alert already fired inside build_page → raise_hold at the point of
+    # discovery. Do NOT call escalate_halt here — propagate the status honestly
+    # instead of relabelling a deliberate hold as a generic failure.
+    if render_result.status == "held":
+        complete_step(sb, step_id, status="failed",
+                      error_message=render_result.reason,
+                      metadata={"skill_status": "held",
+                                "hold_code": (render_result.data or {}).get("hold_code")})
+        complete_run(sb, run_id, status="failed")
+        return SkillResult.held(
+            reason=render_result.reason,
+            data=render_result.data,
+        )
+
     if not render_result.is_ok:
         complete_step(sb, step_id, status="failed", error_message=f"render_page failed: {render_result.reason}")
         complete_run(sb, run_id, status="failed")
@@ -140,20 +155,12 @@ def publish_page(
     gallery_count = render_result.data["gallery_count"]
 
     # ── Ruling 3-R halt checks ───────────────────────────────────────────
-    if photo_count == 0:
-        from skills.contract import escalate_halt
-        escalate_halt(sb, property_id,
-            queue_type="publish_halt", reason_code="zero_photos",
-            title="Cannot publish — property has 0 photos",
-            detail="The property has no photographs. Cannot build a landing page.",
-            property_name=prop.get("name"), run_id=run_id, step_name="publish_page")
-        complete_step(sb, step_id, status="failed", error_message="Zero photos")
-        complete_run(sb, run_id, status="failed")
-        return SkillResult.failed(
-            reason="Zero photos — cannot publish",
-            attempted=1, succeeded=0, failed_count=1,
-            error_class="halt", human_required=True,
-        )
+    # NOTE (PAGE-4, 2026-08-19): the zero-photos check that was here is now
+    # unreachable. build_page() holds before producing HTML when there are zero
+    # canonical photos or zero observations, so render_result.is_ok is false
+    # and we return above. Removed to prevent a future refactor from
+    # accidentally making it reachable and firing a second escalate_halt for
+    # a condition already alerted by raise_hold in orchestrate.py.
 
     if unresolvable > 0:
         from skills.contract import escalate_halt

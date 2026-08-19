@@ -242,19 +242,18 @@ def test_hero_video_present_and_absent():
 # ── Test 4: zero canonical photos → hold ─────────────────────────────────────
 
 def test_zero_photos_hold():
-    """Zero canonical photographs → hold + hitl row + alert."""
+    """Zero canonical photographs → hold + hitl row + alert.
+    build_page calls raise_hold internally at the point of discovery."""
     sb = FakeSB(_build_tables([], [], []))
-    from core.page_builder.orchestrate import build_page, raise_hold
+    from core.page_builder.orchestrate import build_page
 
-    result = build_page(sb, "PROP-1")
+    import skills.notify
+    with patch("skills.notify.send_halt_alert", return_value=True) as mock_alert:
+        result = build_page(sb, "PROP-1")
+
     assert result["ok"] is False
     assert result["hold"] is True
     assert "no_canonical_photos" in result["hold_code"]
-
-    # Verify raise_hold creates hitl row and calls send_halt_alert
-    import skills.notify  # ensure module is imported for patching
-    with patch("skills.notify.send_halt_alert", return_value=True) as mock_alert:
-        raise_hold(sb, "PROP-1", result["reason"], result["hold_code"])
 
     rows = sb.hitl_inserts()
     assert len(rows) == 1
@@ -275,7 +274,10 @@ def test_photos_no_observations_hold():
     sb = FakeSB(_build_tables(photos, renditions, []))
     from core.page_builder.orchestrate import build_page
 
-    result = build_page(sb, "PROP-1")
+    import skills.notify
+    with patch("skills.notify.send_halt_alert", return_value=True):
+        result = build_page(sb, "PROP-1")
+
     assert result["ok"] is False
     assert result["hold"] is True
     assert "no_observations" in result["hold_code"]
@@ -305,7 +307,10 @@ def test_hold_with_live_page_untouched():
     sb = FakeSB(tables)
     from core.page_builder.orchestrate import build_page
 
-    result = build_page(sb, "PROP-1")
+    import skills.notify
+    with patch("skills.notify.send_halt_alert", return_value=True):
+        result = build_page(sb, "PROP-1")
+
     assert result["ok"] is False
     assert result["hold"] is True
 
