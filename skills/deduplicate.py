@@ -97,10 +97,13 @@ def deduplicate(
             attempted=0, succeeded=0, failed_count=0,
         )
 
-    # Check if already deduped (any non-canonical photos exist)
+    # Check if already deduped — but only noop when ALL photos have a
+    # pHash. A missing hash means there is real work to do: the backfill
+    # below will compute it and clustering may change the canonical set.
     if not force:
         non_canonical = sum(1 for p in photos if not p.get("is_canonical", True))
-        if non_canonical > 0:
+        all_hashed = all(p.get("phash") for p in photos)
+        if non_canonical > 0 and all_hashed:
             return SkillResult.noop(
                 f"Already deduped ({non_canonical} non-canonical). Use force=True to re-dedupe.",
                 {"non_canonical_existing": non_canonical},
@@ -109,6 +112,48 @@ def deduplicate(
     # ── Record run ───────────────────────────────────────────────────────
     run_id = record_run(sb, property_id, "onboard")
     step_id = record_step(sb, run_id, "deduplicate")
+
+    # ── Backfill pHash for photographs that lack one ────────────────────
+    # PHASH-1 computes pHash at acquisition, so this heals rows that
+    # predate it and any row whose hash computation failed at acquisition.
+    # Writes phash ONLY — does NOT touch image_width, image_height or
+    # quality_tier, because dimensions are the first term of the canonical
+    # sort key and rewriting them would change canonical selection as a
+    # side effect of a hash backfill.
+    needs_backfill = [p for p in photos if not p.get("phash")]
+    phash_backfilled = 0
+    phash_backfill_failed = 0
+
+    if needs_backfill:
+        import httpx
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            for photo in needs_backfill:
+                pid = photo["photo_id"]
+                rend = sb.table("renditions").select("storage_url").eq(
+                    "photo_id", pid
+                ).eq("kind", "original").limit(1).execute()
+                if not rend.data:
+                    logger.warning("[deduplicate] pHash backfill failed for %s: no original rendition", pid[:8])
+                    phash_backfill_failed += 1
+                    continue
+                url = rend.data[0]["storage_url"]
+                try:
+                    resp = client.get(url)
+                    resp.raise_for_status()
+                    import io
+                    import imagehash
+                    from PIL import Image
+                    img = Image.open(io.BytesIO(resp.content))
+                    phash_val = str(imagehash.phash(img))
+                    sb.table("photographs").update({"phash": phash_val}).eq("photo_id", pid).execute()
+                    photo["phash"] = phash_val  # patch in-memory for clustering
+                    phash_backfilled += 1
+                except Exception as exc:
+                    logger.warning("[deduplicate] pHash backfill failed for %s: %s", pid[:8], str(exc)[:60])
+                    phash_backfill_failed += 1
+
+        if phash_backfilled > 0:
+            logger.info("[deduplicate] pHash backfill: %d computed, %d failed", phash_backfilled, phash_backfill_failed)
 
     # ── Union-Find clustering ────────────────────────────────────────────
     photos_with_phash = [p for p in photos if p.get("phash")]
@@ -218,6 +263,8 @@ def deduplicate(
         "photos_with_phash": len(photos_with_phash),
         "clusters": multi_clusters,
         "duplicates_marked": duplicates_marked,
+        "phash_backfilled": phash_backfilled,
+        "phash_backfill_failed": phash_backfill_failed,
     })
     complete_run(sb, run_id, status="complete")
 
