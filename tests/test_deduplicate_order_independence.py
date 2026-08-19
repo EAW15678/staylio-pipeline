@@ -13,7 +13,7 @@ for. It must fail on c7b3d15 (no tiebreak, result depends on row order).
 import itertools
 from unittest.mock import MagicMock, patch
 
-from skills.deduplicate import deduplicate, _SOURCE_PRIORITY, _best_source_rank
+from skills.deduplicate import deduplicate
 
 
 def _make_photo(photo_id, phash, width, height, source_system="vrbo", source_image_id=None):
@@ -138,7 +138,7 @@ def test_exact_tie_tiebreak_by_source():
     assert len(canonical_ids) == 1, (
         f"Expected one canonical across permutations of tied pair, got {canonical_ids}"
     )
-    # VRBO (priority 1) beats Airbnb (priority 2) per _SOURCE_PRIORITY
+    # VRBO (priority 1) beats Airbnb (priority 2) per source priority
     assert "photo-vrbo" in canonical_ids, (
         f"VRBO photo should win the tiebreak over Airbnb, got {canonical_ids}"
     )
