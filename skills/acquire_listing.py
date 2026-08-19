@@ -5,7 +5,10 @@ Ports the PMC scrape path (Firecrawl markdown+json scoping from 6d17ddd),
 Airbnb/VRBO via Apify. Downloads image bytes, computes SHA-256
 content_hash, writes photographs + renditions('original').
 
-Every photograph has measured width/height and quality_tier.
+Every photograph has measured width/height, quality_tier, and pHash.
+pHash is computed unconditionally at acquisition — dedupe is identity,
+not quality. No dimension guard, no megapixel guard. An 84×56 thumbnail
+and a 5712×4284 owner upload both get one.
 Ruling 7 identity: UNIQUE(property_id, content_hash).
 
 Usage:
@@ -138,9 +141,20 @@ def acquire_owner_photos(
                     img = Image.open(io.BytesIO(img_bytes))
                     width, height = img.width, img.height
                 except Exception:
+                    img = None
                     width, height = None, None
 
-                # Upload to staging R2
+                # pHash — unconditional, no dimension guard (dedupe is
+                # identity, not quality; ruled by Erick, PHASH-1).
+                phash_val = None
+                if img is not None:
+                    try:
+                        import imagehash
+                        phash_val = str(imagehash.phash(img))
+                    except Exception as exc:
+                        logger.warning("[acquire] pHash failed for %s: %s", pid[:8], str(exc)[:60])
+
+                # Upload to R2
                 try:
                     key = f"{property_id}/original/owner_{content_hash[:8]}.jpg"
                     r2_url = skills_r2_upload(key, img_bytes, "image/jpeg")
@@ -151,6 +165,7 @@ def acquire_owner_photos(
                     "photo_id": pid,
                     "property_id": property_id,
                     "content_hash": content_hash,
+                    "phash": phash_val,
                     "source_urls": [url],
                     "source_systems": ["intake_portal"],
                     "is_canonical": True,
@@ -460,11 +475,22 @@ def acquire_listing(
                     img = Image.open(io.BytesIO(img_bytes))
                     width, height = img.width, img.height
                 except Exception:
+                    img = None
                     width, height = None, None
 
                 qt = _quality_tier(width, height)
                 if qt == "low":
                     low_res_count += 1
+
+                # pHash — unconditional, no dimension guard (dedupe is
+                # identity, not quality; ruled by Erick, PHASH-1).
+                phash_val = None
+                if img is not None:
+                    try:
+                        import imagehash
+                        phash_val = str(imagehash.phash(img))
+                    except Exception as exc:
+                        logger.warning("[acquire] pHash failed for %s: %s", pid[:8], str(exc)[:60])
 
                 # Upload to skills R2 bucket — env-driven, no hardcoded bucket
                 try:
@@ -482,6 +508,7 @@ def acquire_listing(
                     "photo_id": pid,
                     "property_id": property_id,
                     "content_hash": content_hash,
+                    "phash": phash_val,
                     "source_urls": [url],
                     "source_systems": [source_type],
                     "source_image_id": source_image_id,

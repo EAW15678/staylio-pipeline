@@ -133,17 +133,20 @@ def onboard(
             logger.info("[onboard] acquire_owner_photos → %d new, %d existing",
                        owner_result.get("photos_new", 0), owner_result.get("photos_existing", 0))
 
-    # ── 3. Enhance ───────────────────────────────────────────────────────
-    from skills.enhance import enhance
-    r = _run_skill("enhance", enhance, property_id, force=force)
-    if not r.is_ok and r.status != "held":
-        return SkillResult.failed(reason=f"Workflow halted at enhance: {r.reason}")
-
-    # ── 4. Deduplicate ───────────────────────────────────────────────────
+    # ── 3. Deduplicate ─────────────────────────────────────────────────
+    # Runs BEFORE enhance so Claid is only paid for photographs that
+    # survived deduplication. pHash is computed at acquisition (PHASH-1).
     from skills.deduplicate import deduplicate
     r = _run_skill("deduplicate", deduplicate, property_id, force=force)
     if not r.is_ok and r.status != "held":
         return SkillResult.failed(reason=f"Workflow halted at deduplicate: {r.reason}")
+
+    # ── 4. Enhance ───────────────────────────────────────────────────────
+    # enhance operates on CANONICALS ONLY, after dedupe.
+    from skills.enhance import enhance
+    r = _run_skill("enhance", enhance, property_id, force=force)
+    if not r.is_ok and r.status != "held":
+        return SkillResult.failed(reason=f"Workflow halted at enhance: {r.reason}")
 
     # ── 5. Observe ───────────────────────────────────────────────────────
     from skills.observe import observe
