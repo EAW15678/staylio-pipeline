@@ -115,6 +115,42 @@ def _build_ota_reviews_section(reviews: list) -> str:
   </section>"""
 
 
+def _build_amenities_section(amenity_highlights: dict, amenity_photos: dict = None) -> str:
+    """Render the Amenities section with optional photo proof.
+
+    amenity_highlights: {amenity_name: copy_text} from content package
+    amenity_photos: {amenity_name: photo_url} — photo evidence for claims.
+        Ruled by Erick, 2026-08-19: if a photograph's located_amenities names
+        the amenity, show that photo beside the claim. If none exists, the
+        claim renders as text only — no invented evidence.
+    """
+    if amenity_photos is None:
+        amenity_photos = {}
+    items = ""
+    for amenity, copy in list(amenity_highlights.items())[:8]:
+        photo_url = amenity_photos.get(amenity)
+        photo_html = ""
+        if photo_url:
+            photo_html = (
+                '<img src="' + _esc(photo_url) + '" alt="' + _esc(amenity)
+                + '" loading="lazy" class="amenity-photo">'
+            )
+        items += f"""
+      <div class="amenity-item">
+        {photo_html}
+        <h3>{_esc(amenity)}</h3>
+        <p>{_esc(copy)}</p>
+      </div>"""
+    return f"""
+  <section class="amenities" id="amenities">
+    <div class="container">
+      <h2>Amenities</h2>
+      <div class="amenities-grid">{items}
+      </div>
+    </div>
+  </section>"""
+
+
 def _build_good_to_know_section(arrival_info: str, extra_notes: str = None) -> str:
     """Render the Good to Know section."""
     if not arrival_info:
