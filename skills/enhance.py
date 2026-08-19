@@ -6,11 +6,12 @@ substrate. Selects a recipe per photograph based on observation fields
 (light_quality, placement, contains_text, quality_score, depth_tier).
 Writes renditions('enhanced') for each canonical photograph.
 
-Recipes (ENHANCE-2, ruled by Erick 2026-08-19):
+Recipes (ENHANCE-2/3, ruled by Erick 2026-08-19):
   text_bearing  — gentlest, protects letterforms
   bright_exterior — tames blown highlights
   flat_light    — lifts flat indoor lighting with contrast + polish
-  small_weak    — upscales and polishes low-quality / low-resolution
+  small_weak    — upscales and polishes physically small photos (< 2MP)
+  large_weak    — polishes large but soft/poorly-lit photos (no upscale)
   large_clean   — baseline HDR + sharpness, no upscale
 
 Precedence: gentler wins. text_bearing > bright_exterior > flat_light >
@@ -51,7 +52,7 @@ CLAID_API_BASE = "https://api.claid.ai/v1-beta1"
 # ── Enhancement recipes ─────────────────────────────────────────────
 # Each recipe serves a specific outcome (G28: consistent gallery).
 # Precedence: gentler wins. text_bearing > bright_exterior > flat_light
-# > small_weak > large_clean. Restraint beats punch.
+# > small_weak > large_weak > large_clean. Restraint beats punch.
 #
 # polish is restricted to small_weak and flat_light groups — never on
 # text-bearing or already-sharp frames. It redraws image parts while
@@ -83,8 +84,10 @@ def _select_recipe(photo, obs):
 
     # Precedence: gentler wins
     if obs.get("contains_text"):
-        qs = obs.get("quality_score") or 1.0
-        is_small = mp < 2.0 or qs < 0.6
+        # "Small" means physically small — MP < 2.0. A low quality score
+        # means soft/poorly lit, not small, and never qualifies for upscale.
+        # Must stay consistent with the small_weak/large_weak split below.
+        is_small = mp < 2.0
         return _build_recipe("text_bearing", mp, is_small=is_small)
 
     placement = obs.get("placement") or "unknown"
@@ -97,9 +100,16 @@ def _select_recipe(photo, obs):
     if lq == "flat":
         return _build_recipe("flat_light", mp)
 
-    qs = obs.get("quality_score") or 1.0
-    if mp < 2.0 or qs < 0.6:
+    # Size and score split — mutually exclusive, exhaustive:
+    #   MP < 2.0 → small_weak (upscale + polish)
+    #   MP >= 2.0, score < 0.6 → large_weak (polish only, no upscale)
+    #   MP >= 2.0, score >= 0.6 → large_clean (baseline)
+    if mp < 2.0:
         return _build_recipe("small_weak", mp)
+
+    qs = obs.get("quality_score") or 1.0
+    if qs < 0.6:
+        return _build_recipe("large_weak", mp)
 
     return _build_recipe("large_clean", mp)
 
@@ -116,6 +126,20 @@ def _build_recipe(name, mp, is_small=False):
             "restorations": {"decompress": "auto", "upscale": "smart_enhance"},
             "adjustments": {"hdr": 100, "sharpness": 20},
             "resizing": {"width": "150%", "height": "150%"},
+        }
+        if can_polish:
+            ops["restorations"]["polish"] = True
+        else:
+            logger.debug("[enhance] polish skipped: %.1fMP > %.1fMP ceiling", mp, _POLISH_MAX_MP)
+
+    elif name == "large_weak":
+        # A low quality score on a large photograph means soft, poorly
+        # lit or badly composed — none of which is fixed by adding
+        # pixels. Polish sharpens; upscaling a soft photograph only
+        # makes it bigger and softer. No upscale, no resizing.
+        ops = {
+            "restorations": {"decompress": "auto"},
+            "adjustments": {"hdr": 100, "sharpness": 20},
         }
         if can_polish:
             ops["restorations"]["polish"] = True
@@ -187,6 +211,61 @@ def _apply_edge_stitching(ops, photo, obs):
         hdr_val = ops["adjustments"]["hdr"]
         if isinstance(hdr_val, (int, float)):
             ops["adjustments"]["hdr"] = {"intensity": hdr_val, "stitching": True}
+
+
+def _count_credits(operations, input_mp):
+    """Count Claid credits for a recipe's operations.
+
+    Rate card (Claid published pricing, 2026-08-19):
+      adjustments block (any combination of dials): 1 credit
+      polish: 1 credit
+      upscale: tiered — 1 (<4MP), 2 (4–9MP), 3 (>=9MP)
+      resizing: 0 (when combined with another operation)
+      decompress: 0 (not on the rate card)
+    """
+    credits = 0
+    restorations = operations.get("restorations", {})
+    adjustments = operations.get("adjustments", {})
+
+    if adjustments:
+        credits += 1
+
+    if restorations.get("polish"):
+        credits += 1
+
+    if "upscale" in restorations:
+        if input_mp >= 9:
+            credits += 3
+        elif input_mp >= 4:
+            credits += 2
+        else:
+            credits += 1
+
+    # resizing: 0 credits when combined (always combined here)
+    # decompress: 0 credits (not on the rate card)
+
+    return max(credits, 1)  # at least 1 credit per call
+
+
+def _get_credit_rate(sb):
+    """Look up the current Claid credit rate from vendor_rates.
+
+    Fails loudly if no rate is found — a missing rate is a config
+    error, not something to paper over (G16).
+    """
+    resp = sb.table("vendor_rates").select("unit_cost").eq(
+        "vendor", "claid"
+    ).eq("unit_name", "credits").is_(
+        "effective_to", "null"
+    ).limit(1).execute()
+
+    if not resp.data:
+        raise EnvironmentError(
+            "No current Claid credit rate found in vendor_rates. "
+            "Seed one row: vendor='claid', unit_name='credits', "
+            "unit_cost=0.059, effective_from='2026-08-01'."
+        )
+    return float(resp.data[0]["unit_cost"])
 
 
 async def _call_claid(session, url, operations):
@@ -324,6 +403,9 @@ def enhance(
     # Import governance validator — single source in agents/agent3
     from agents.agent3.claid_enhancer import validate_operations
 
+    # Look up credit rate — fails loudly if not configured (G16)
+    credit_rate = _get_credit_rate(sb)
+
     enhanced_count = 0
     skipped_low_res = 0
     phash_computed = 0
@@ -424,20 +506,15 @@ def enhance(
                     "byte_size": len(enhanced_bytes),
                 }, on_conflict="photo_id,kind,format").execute()
 
-                # Claid cost: tiered by input megapixels
+                # Claid cost: count credits by operation, look up rate
                 input_mp = (w * h) / 1_000_000 if w and h else 1.0
-                if input_mp >= 9:
-                    claid_credits = 4
-                elif input_mp >= 4:
-                    claid_credits = 3
-                else:
-                    claid_credits = 2
-                claid_cost = claid_credits * 0.059
+                credits = _count_credits(operations, input_mp)
+                claid_cost = round(credits * credit_rate, 4)
                 total_cost += claid_cost
                 emit_cost(sb, run_id, property_id,
                           vendor="claid", service="enhance",
-                          units=1, unit_name="images",
-                          unit_cost=0.012, total_cost=round(claid_cost, 4),
+                          units=credits, unit_name="credits",
+                          unit_cost=credit_rate, total_cost=claid_cost,
                           workflow_name="enhance", generation_reason="photo_enhancement",
                           discriminator=pid[:8])
 
