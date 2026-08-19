@@ -26,6 +26,27 @@ logger = logging.getLogger(__name__)
 # pHash Hamming distance threshold for near-duplicate grouping
 HAMMING_THRESHOLD = 8
 
+# Source priority for canonical tiebreak — lower wins.
+# Ported verbatim from skills/dedupe.py:39-47 pending Erick's
+# confirmation. Only fires on exact resolution ties. booking_com is
+# dead on the substrate path but kept for parity.
+_SOURCE_PRIORITY = {
+    "intake_portal": 0,
+    "vrbo":          1,
+    "airbnb":        2,
+    "pmc_website":   3,
+    "pmc":           3,
+    "booking_com":   4,
+    "claude_parsed": 5,
+}
+
+
+def _best_source_rank(source_systems):
+    """Return the best (lowest) source priority from a list of source_systems."""
+    if not source_systems:
+        return 99
+    return min(_SOURCE_PRIORITY.get(s, 99) for s in source_systems)
+
 
 def _hamming_distance(h1, h2):
     """Compute Hamming distance between two hex-encoded pHash strings."""
@@ -57,7 +78,7 @@ def deduplicate(
 
     # ── Load photographs with pHash + source_image_id ─────────────────────
     photos_resp = sb.table("photographs").select(
-        "photo_id, phash, image_width, image_height, is_canonical, source_image_id"
+        "photo_id, phash, image_width, image_height, is_canonical, source_image_id, source_systems"
     ).eq("property_id", property_id).execute()
     photos = photos_resp.data or []
 
@@ -154,13 +175,20 @@ def deduplicate(
             continue
         multi_clusters += 1
 
-        # Best = highest resolution
-        def _resolution(p):
+        # Canonical selection: total ordering so result is deterministic
+        # regardless of query row order.
+        #   1. Megapixels descending — highest resolution wins.
+        #   2. Source priority — on exact resolution tie, better source wins.
+        #      Values ported from skills/dedupe.py pending Erick's confirmation.
+        #   3. photo_id ascending — unique, makes the key total.
+        def _canonical_key(p):
             w = p.get("image_width") or 0
             h = p.get("image_height") or 0
-            return w * h
+            mp = (w * h) / 1_000_000
+            src_rank = _best_source_rank(p.get("source_systems") or [])
+            return (-mp, src_rank, p["photo_id"])
 
-        members.sort(key=_resolution, reverse=True)
+        members.sort(key=_canonical_key)
         canonical = members[0]
 
         for member in members:
