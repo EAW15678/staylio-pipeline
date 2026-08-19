@@ -65,6 +65,41 @@ CLAID_API_BASE = "https://api.claid.ai/v1-beta1"
 
 _POLISH_MAX_MP = 16.0  # vendor ceiling: polish fails above 16MP
 
+# ── Named rules — each expressed once ────────────────────────────────
+# Every bare literal in selection, building or costing must reference
+# these. If a value needs to change, it changes here and nowhere else.
+
+# Smallness boundary. "Small" means physically small — MP below this.
+# A low quality score never qualifies a photograph for upscaling.
+# Ruled by Erick, 2026-08-19.
+_SMALL_MAX_MP = 2.0
+
+# Weakness boundary. Soft, poorly lit or badly composed — fixed by
+# polish, never by adding pixels. Ruled by Erick, 2026-08-19.
+_WEAK_MAX_SCORE = 0.6
+
+# Edge-stitching aspect-ratio threshold. UNRELATED to smallness despite
+# sharing the numeric value 2.0. These are independent rules that must
+# never be merged — one gates upscaling, the other gates HDR stitching.
+_WIDE_ASPECT_RATIO = 2.0
+
+# Claid upscale credit tiers (rate card, 2026-08-19)
+_UPSCALE_CREDIT_TIERS = [(9.0, 3), (4.0, 2), (0.0, 1)]
+ADJUSTMENTS_CREDITS = 1
+POLISH_CREDITS = 1
+# resizing and decompress are free when combined with another operation
+_FREE_OPERATIONS = frozenset({"resizing", "decompress"})
+
+
+def _is_small(mp):
+    """True when the photograph is physically small (under _SMALL_MAX_MP)."""
+    return mp < _SMALL_MAX_MP
+
+
+def _is_weak(quality_score):
+    """True when the photograph is weak (under _WEAK_MAX_SCORE)."""
+    return quality_score < _WEAK_MAX_SCORE
+
 
 def _select_recipe(photo, obs):
     """Select enhancement recipe from observation fields.
@@ -78,17 +113,13 @@ def _select_recipe(photo, obs):
 
     if obs is None:
         # Fallback: no observation available
-        if mp >= 2.0:
+        if not _is_small(mp):
             return _build_recipe("large_clean", mp)
         return _build_recipe("small_weak", mp)
 
     # Precedence: gentler wins
     if obs.get("contains_text"):
-        # "Small" means physically small — MP < 2.0. A low quality score
-        # means soft/poorly lit, not small, and never qualifies for upscale.
-        # Must stay consistent with the small_weak/large_weak split below.
-        is_small = mp < 2.0
-        return _build_recipe("text_bearing", mp, is_small=is_small)
+        return _build_recipe("text_bearing", mp, is_small=_is_small(mp))
 
     placement = obs.get("placement") or "unknown"
     tod = obs.get("time_of_day_read") or ""
@@ -101,14 +132,14 @@ def _select_recipe(photo, obs):
         return _build_recipe("flat_light", mp)
 
     # Size and score split — mutually exclusive, exhaustive:
-    #   MP < 2.0 → small_weak (upscale + polish)
-    #   MP >= 2.0, score < 0.6 → large_weak (polish only, no upscale)
-    #   MP >= 2.0, score >= 0.6 → large_clean (baseline)
-    if mp < 2.0:
+    #   small → small_weak (upscale + polish)
+    #   large + weak → large_weak (polish only, no upscale)
+    #   large + not weak → large_clean (baseline)
+    if _is_small(mp):
         return _build_recipe("small_weak", mp)
 
     qs = obs.get("quality_score") or 1.0
-    if qs < 0.6:
+    if _is_weak(qs):
         return _build_recipe("large_weak", mp)
 
     return _build_recipe("large_clean", mp)
@@ -204,7 +235,7 @@ def _apply_edge_stitching(ops, photo, obs):
     w = photo.get("image_width") or 0
     h = photo.get("image_height") or 0
     depth = obs.get("depth_tier") or ""
-    is_wide_aspect = w > 0 and h > 0 and (w / h) >= 2.0
+    is_wide_aspect = w > 0 and h > 0 and (w / h) >= _WIDE_ASPECT_RATIO
     is_wide_depth = depth in ("wide", "panoramic")
 
     if (is_wide_aspect or is_wide_depth) and "hdr" in ops.get("adjustments", {}):
@@ -228,21 +259,18 @@ def _count_credits(operations, input_mp):
     adjustments = operations.get("adjustments", {})
 
     if adjustments:
-        credits += 1
+        credits += ADJUSTMENTS_CREDITS
 
     if restorations.get("polish"):
-        credits += 1
+        credits += POLISH_CREDITS
 
     if "upscale" in restorations:
-        if input_mp >= 9:
-            credits += 3
-        elif input_mp >= 4:
-            credits += 2
-        else:
-            credits += 1
+        for threshold, tier_credits in _UPSCALE_CREDIT_TIERS:
+            if input_mp >= threshold:
+                credits += tier_credits
+                break
 
-    # resizing: 0 credits when combined (always combined here)
-    # decompress: 0 credits (not on the rate card)
+    # resizing and decompress: 0 credits (in _FREE_OPERATIONS)
 
     return max(credits, 1)  # at least 1 credit per call
 
