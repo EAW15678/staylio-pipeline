@@ -1,14 +1,25 @@
 """
-Skill: enhance — Claid.ai photo enhancement + pHash computation.
+Skill: enhance — per-photograph Claid.ai enhancement via recipes.
 
-Reads photographs + renditions('original') from substrate.
-Writes renditions('enhanced') for each photograph that lacks one.
-Also computes pHash for any photograph missing it (G13).
+Reads photographs + renditions('original') + active observations from
+substrate. Selects a recipe per photograph based on observation fields
+(light_quality, placement, contains_text, quality_score, depth_tier).
+Writes renditions('enhanced') for each canonical photograph.
 
-Input-addressed idempotency: skips any photograph whose original
-already has an enhanced rendition. Re-runs converge.
+Recipes (ENHANCE-2, ruled by Erick 2026-08-19):
+  text_bearing  — gentlest, protects letterforms
+  bright_exterior — tames blown highlights
+  flat_light    — lifts flat indoor lighting with contrast + polish
+  small_weak    — upscales and polishes low-quality / low-resolution
+  large_clean   — baseline HDR + sharpness, no upscale
 
-Resolution guard: does not pay Claid to upscale sub-200px thumbnails.
+Precedence: gentler wins. text_bearing > bright_exterior > flat_light >
+small_weak > large_clean. Restraint beats punch when they conflict.
+
+Universal: every recipe includes decompress ("auto") — scraped photos
+have been recompressed by every site they passed through.
+
+Also computes pHash for any photograph missing it (G13, legacy heal).
 
 Usage:
     from skills.enhance import enhance
@@ -35,16 +46,203 @@ logger = logging.getLogger(__name__)
 # produces upscaling artifacts and wastes money
 MIN_ENHANCE_DIMENSION = 200
 
-# Photos at or above this resolution are already high quality.
-# Skip Claid and promote original as the display rendition.
-# Pending Erick's ruling on the exact bar; 2MP (e.g. 1920x1080) is
-# the proposed threshold — Claid improves sub-2MP photos meaningfully
-# but adds minimal value to already-high-res images.
-# Credit projection: at 2MP threshold, Vista Azule's 7 owner photos
-# (5712x4284 = 24.5MP) would skip → saves 7 × $0.012 = $0.084/property.
-# At 0.5MP threshold, even PMC scrapes would skip → saves more but
-# may miss genuine quality improvement on medium-res photos.
-SKIP_ENHANCE_MEGAPIXELS = 2.0  # Pending Erick's ruling
+CLAID_API_BASE = "https://api.claid.ai/v1-beta1"
+
+# ── Enhancement recipes ─────────────────────────────────────────────
+# Each recipe serves a specific outcome (G28: consistent gallery).
+# Precedence: gentler wins. text_bearing > bright_exterior > flat_light
+# > small_weak > large_clean. Restraint beats punch.
+#
+# polish is restricted to small_weak and flat_light groups — never on
+# text-bearing or already-sharp frames. It redraws image parts while
+# preserving structure. Ruled by Erick 2026-08-19. Has a 16MP vendor
+# ceiling: above that, silently omit (don't fail).
+#
+# resizing is paired with upscale in small_weak — upscale selects the
+# AI model, resizing sets target dimensions. Whether upscale alone
+# changes dimensions is unresolved; the pairing is the safe choice.
+
+_POLISH_MAX_MP = 16.0  # vendor ceiling: polish fails above 16MP
+
+
+def _select_recipe(photo, obs):
+    """Select enhancement recipe from observation fields.
+
+    Returns (recipe_name, operations_dict).
+    obs may be None (no active observation) — falls back by resolution.
+    """
+    w = photo.get("image_width") or 0
+    h = photo.get("image_height") or 0
+    mp = (w * h) / 1_000_000 if w and h else 0
+
+    if obs is None:
+        # Fallback: no observation available
+        if mp >= 2.0:
+            return _build_recipe("large_clean", mp)
+        return _build_recipe("small_weak", mp)
+
+    # Precedence: gentler wins
+    if obs.get("contains_text"):
+        qs = obs.get("quality_score") or 1.0
+        is_small = mp < 2.0 or qs < 0.6
+        return _build_recipe("text_bearing", mp, is_small=is_small)
+
+    placement = obs.get("placement") or "unknown"
+    tod = obs.get("time_of_day_read") or ""
+    lq = obs.get("light_quality") or ""
+
+    if (placement == "outdoor" and tod in ("midday", "morning")) or lq == "hard":
+        return _build_recipe("bright_exterior", mp)
+
+    if lq == "flat":
+        return _build_recipe("flat_light", mp)
+
+    qs = obs.get("quality_score") or 1.0
+    if mp < 2.0 or qs < 0.6:
+        return _build_recipe("small_weak", mp)
+
+    return _build_recipe("large_clean", mp)
+
+
+def _build_recipe(name, mp, is_small=False):
+    """Build the Claid operations dict for a named recipe.
+
+    Every recipe includes decompress: auto (removes recompression damage).
+    """
+    can_polish = mp <= _POLISH_MAX_MP
+
+    if name == "small_weak":
+        ops = {
+            "restorations": {"decompress": "auto", "upscale": "smart_enhance"},
+            "adjustments": {"hdr": 100, "sharpness": 20},
+            "resizing": {"width": "150%", "height": "150%"},
+        }
+        if can_polish:
+            ops["restorations"]["polish"] = True
+        else:
+            logger.debug("[enhance] polish skipped: %.1fMP > %.1fMP ceiling", mp, _POLISH_MAX_MP)
+
+    elif name == "large_clean":
+        # No upscale, no resizing — the photo is already high-res.
+        # Baseline HDR + sharpness brings it into the gallery look.
+        ops = {
+            "restorations": {"decompress": "auto"},
+            "adjustments": {"hdr": 100, "sharpness": 15},
+        }
+
+    elif name == "flat_light":
+        # As large_clean plus contrast lift and polish to compensate
+        # for flat indoor lighting.
+        ops = {
+            "restorations": {"decompress": "auto"},
+            "adjustments": {"hdr": 100, "sharpness": 15, "contrast": 15},
+        }
+        if can_polish:
+            ops["restorations"]["polish"] = True
+        else:
+            logger.debug("[enhance] polish skipped: %.1fMP > %.1fMP ceiling", mp, _POLISH_MAX_MP)
+
+    elif name == "bright_exterior":
+        # Tames blown highlights on midday/morning exteriors and hard light.
+        # Lower HDR to avoid over-processing; negative exposure pulls back.
+        # No polish — these are typically sharp already.
+        ops = {
+            "restorations": {"decompress": "auto"},
+            "adjustments": {"hdr": 70, "exposure": -10, "sharpness": 15},
+        }
+
+    elif name == "text_bearing":
+        # Gentlest recipe — protects letterforms from redrawing.
+        # No polish ever. If the photo is also small/weak, use
+        # smart_resize (preserves text better than smart_enhance).
+        ops = {
+            "restorations": {"decompress": "auto"},
+            "adjustments": {"hdr": 60, "sharpness": 10},
+        }
+        if is_small:
+            ops["restorations"]["upscale"] = "smart_resize"
+            ops["resizing"] = {"width": "150%", "height": "150%"}
+
+    else:
+        # Unknown recipe name — fall back to large_clean
+        ops = {
+            "restorations": {"decompress": "auto"},
+            "adjustments": {"hdr": 100, "sharpness": 15},
+        }
+
+    return name, ops
+
+
+def _apply_edge_stitching(ops, photo, obs):
+    """Apply HDR edge stitching modifier for wide/panoramic frames."""
+    if obs is None:
+        return
+    w = photo.get("image_width") or 0
+    h = photo.get("image_height") or 0
+    depth = obs.get("depth_tier") or ""
+    is_wide_aspect = w > 0 and h > 0 and (w / h) >= 2.0
+    is_wide_depth = depth in ("wide", "panoramic")
+
+    if (is_wide_aspect or is_wide_depth) and "hdr" in ops.get("adjustments", {}):
+        hdr_val = ops["adjustments"]["hdr"]
+        if isinstance(hdr_val, (int, float)):
+            ops["adjustments"]["hdr"] = {"intensity": hdr_val, "stitching": True}
+
+
+async def _call_claid(session, url, operations):
+    """Call Claid v1-beta1 image/edit and return enhanced bytes.
+
+    Modelled on agents/agent3/claid_enhancer.enhance_photo_async —
+    same endpoint, same auth, same retry-on-429, same download flow.
+    Governance (validate_operations) must be called BEFORE this.
+    """
+    claid_key = os.environ.get("CLAID_API_KEY", "")
+    if not claid_key:
+        return None
+
+    payload = {
+        "input": url,
+        "operations": operations,
+        "output": {"format": {"type": "jpeg", "quality": 92}},
+    }
+
+    for attempt in range(1, 4):
+        try:
+            resp = await session.post(
+                f"{CLAID_API_BASE}/image/edit",
+                headers={
+                    "Authorization": f"Bearer {claid_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=60.0,
+            )
+            if resp.status_code == 429:
+                import asyncio
+                await asyncio.sleep(2 ** attempt)
+                continue
+            resp.raise_for_status()
+
+            data = resp.json()
+            output_url = (
+                data.get("output", {}).get("tmp_url")
+                or data.get("data", {}).get("output", {}).get("tmp_url")
+            )
+            if not output_url:
+                return None
+
+            dl_resp = await session.get(output_url, timeout=30.0)
+            dl_resp.raise_for_status()
+            return dl_resp.content
+
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 402:
+                raise  # billing error — let caller handle
+            if attempt == 3:
+                raise
+        except Exception:
+            if attempt == 3:
+                raise
 
 
 def enhance(
@@ -53,10 +251,14 @@ def enhance(
     *,
     force: bool = False,
 ) -> SkillResult:
-    """Enhance photographs via Claid.ai and compute pHash.
+    """Enhance photographs via Claid.ai with per-photograph recipes.
+
+    Loads the active observation for each canonical photograph, selects
+    a recipe based on observation fields, and dispatches to Claid.
+    Every recipe passes validate_operations() before dispatch.
 
     Returns SkillResult.ok({enhanced, skipped_existing, skipped_low_res,
-    phash_computed, cost_usd})
+    recipe counts, cost_usd})
     """
     try:
         sb = get_substrate()
@@ -64,7 +266,7 @@ def enhance(
         return SkillResult.failed(str(e))
 
     try:
-        claid_key = require_env("CLAID_API_KEY", "Claid.ai photo enhancement")
+        require_env("CLAID_API_KEY", "Claid.ai photo enhancement")
         require_env("R2_ENDPOINT_URL", "R2 storage for enhanced renditions")
         require_env("R2_ACCESS_KEY_ID", "R2 storage for enhanced renditions")
         require_env("R2_SECRET_ACCESS_KEY", "R2 storage for enhanced renditions")
@@ -74,8 +276,7 @@ def enhance(
         return SkillResult.failed(str(e))
 
     # ── Load photographs needing enhancement ─────────────────────────────
-    # G27b: enhance operates on CANONICALS ONLY, after dedupe.
-    # Never enhance a photograph a cluster is about to demote.
+    # enhance operates on CANONICALS ONLY, after dedupe and observe.
     query = sb.table("photographs").select(
         "photo_id, image_width, image_height, quality_tier, phash"
     ).eq("property_id", property_id).eq("is_canonical", True)
@@ -109,16 +310,27 @@ def enhance(
             {"already_enhanced": already_enhanced},
         )
 
+    # ── Load active observations for recipe selection ────────────────────
+    obs_resp = sb.table("observations").select(
+        "photo_id, light_quality, time_of_day_read, placement, "
+        "quality_score, contains_text, depth_tier"
+    ).eq("property_id", property_id).is_("superseded_at", "null").execute()
+    obs_by_photo = {o["photo_id"]: o for o in (obs_resp.data or [])}
+
     # ── Record run ───────────────────────────────────────────────────────
     run_id = record_run(sb, property_id, "onboard")
     step_id = record_step(sb, run_id, "enhance")
 
+    # Import governance validator — single source in agents/agent3
+    from agents.agent3.claid_enhancer import validate_operations
+
     enhanced_count = 0
     skipped_low_res = 0
-    skipped_high_res = 0
     phash_computed = 0
     failed_count = 0
     total_cost = 0.0
+    recipe_counts = {}
+    polish_skipped = 0
 
     for photo in needs_enhancement:
         pid = photo["photo_id"]
@@ -131,17 +343,6 @@ def enhance(
             skipped_low_res += 1
             continue
 
-        # High-res skip: photos already above threshold don't need Claid.
-        # NO enhanced rendition written — render_page falls back to original.
-        # The skip decision is recorded in run_step metadata, not as a fake row.
-        if w > 0 and h > 0:
-            mp = (w * h) / 1_000_000
-            if mp >= SKIP_ENHANCE_MEGAPIXELS:
-                skipped_high_res += 1
-                logger.info("[enhance] Skipping %s: %.1fMP ≥ %.1fMP threshold — original is display rendition",
-                           pid[:8], mp, SKIP_ENHANCE_MEGAPIXELS)
-                continue
-
         # Get original rendition URL
         orig = sb.table("renditions").select("storage_url").eq(
             "photo_id", pid
@@ -153,45 +354,55 @@ def enhance(
 
         original_url = orig.data[0]["storage_url"]
 
-        # Download the original
-        try:
-            img_resp = httpx.get(original_url, timeout=30, follow_redirects=True)
-            img_resp.raise_for_status()
-            img_bytes = img_resp.content
-        except Exception as exc:
-            logger.warning("[enhance] Download failed for %s: %s", pid[:8], str(exc)[:60])
-            failed_count += 1
-            continue
-
-        # ── Compute pHash if missing (G13) ───────────────────────────────
+        # ── Compute pHash if missing (G13, legacy heal) ──────────────────
         if not photo.get("phash"):
             try:
+                img_resp_ph = httpx.get(original_url, timeout=30, follow_redirects=True)
+                img_resp_ph.raise_for_status()
                 import imagehash
                 from PIL import Image
-                img = Image.open(io.BytesIO(img_bytes))
+                img = Image.open(io.BytesIO(img_resp_ph.content))
                 phash_val = str(imagehash.phash(img))
                 sb.table("photographs").update({"phash": phash_val}).eq("photo_id", pid).execute()
                 phash_computed += 1
                 logger.info("[enhance] pHash computed for %s: %s", pid[:8], phash_val)
-            except ImportError:
-                logger.warning("[enhance] imagehash not installed — cannot compute pHash")
             except Exception as exc:
                 logger.warning("[enhance] pHash failed for %s: %s", pid[:8], str(exc)[:60])
+
+        # ── Select recipe from observation ───────────────────────────────
+        obs = obs_by_photo.get(pid)
+        recipe_name, operations = _select_recipe(photo, obs)
+        _apply_edge_stitching(operations, photo, obs)
+
+        # Track polish skips
+        mp = (w * h) / 1_000_000 if w and h else 0
+        if recipe_name in ("small_weak", "flat_light") and mp > _POLISH_MAX_MP:
+            polish_skipped += 1
+
+        recipe_counts[recipe_name] = recipe_counts.get(recipe_name, 0) + 1
+
+        # ── Governance check — always before dispatch ────────────────────
+        try:
+            validate_operations(operations)
+        except ValueError as gov_err:
+            logger.error("[enhance] Governance violation for %s: %s", pid[:8], str(gov_err)[:120])
+            failed_count += 1
+            continue
+
+        logger.info("[enhance] %s recipe=%s ops=%s", pid[:8], recipe_name,
+                    list(operations.keys()))
 
         # ── Enhance via Claid ────────────────────────────────────────────
         try:
             import asyncio
-            from agents.agent3.claid_enhancer import enhance_photo_async
 
             async def _enhance():
                 async with httpx.AsyncClient(timeout=60) as session:
-                    return await enhance_photo_async(session, original_url, 0)
+                    return await _call_claid(session, original_url, operations)
 
             enhanced_bytes = asyncio.run(_enhance())
 
             if enhanced_bytes:
-                # Upload to skills R2 bucket — env-driven, no hardcoded bucket
-                content_hash = hashlib.sha256(img_bytes).hexdigest()
                 key = f"{property_id}/enhanced/{pid}.jpg"
                 r2_url = skills_r2_upload(key, enhanced_bytes, "image/jpeg")
 
@@ -213,8 +424,7 @@ def enhance(
                     "byte_size": len(enhanced_bytes),
                 }, on_conflict="photo_id,kind,format").execute()
 
-                # Claid cost: 1 adjustment + MP-tiered upscale = 2-4 credits
-                # at $0.059/credit. Tiers: 0-4MP = 2 credits, 4-9MP = 3, 9-36MP = 4.
+                # Claid cost: tiered by input megapixels
                 input_mp = (w * h) / 1_000_000 if w and h else 1.0
                 if input_mp >= 9:
                     claid_credits = 4
@@ -256,19 +466,23 @@ def enhance(
     complete_step(sb, step_id, status="complete", metadata={
         "enhanced": enhanced_count,
         "skipped_existing": already_enhanced,
-        "skipped_low_res": skipped_low_res, "skipped_high_res": skipped_high_res,
+        "skipped_low_res": skipped_low_res,
         "phash_computed": phash_computed,
         "failed": failed_count,
         "cost_usd": round(total_cost, 4),
+        "recipe_counts": recipe_counts,
+        "polish_skipped": polish_skipped,
     })
     complete_run(sb, run_id, status="complete")
 
     return SkillResult.ok({
         "enhanced": enhanced_count,
         "skipped_existing": already_enhanced,
-        "skipped_low_res": skipped_low_res, "skipped_high_res": skipped_high_res,
+        "skipped_low_res": skipped_low_res,
         "phash_computed": phash_computed,
         "failed": failed_count,
         "cost_usd": round(total_cost, 4),
+        "recipe_counts": recipe_counts,
+        "polish_skipped": polish_skipped,
         "run_id": run_id,
     })

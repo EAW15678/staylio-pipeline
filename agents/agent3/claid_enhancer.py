@@ -51,6 +51,19 @@ PERMITTED_OPERATIONS = frozenset({
     "auto_enhance",           # Claid's combined enhancement (safe — no generative elements)
     "light_correction",
     "exposure_correction",
+    # ENHANCE-2 (2026-08-19) — per-photograph recipes, ruled by Erick.
+    "decompress",             # removes recompression artifacts (restorations category)
+    "polish",                 # redraws image parts preserving structure; restricted to
+                              # small_weak and flat_light groups, never on text-bearing
+                              # or already-sharp frames. Ruled by Erick 2026-08-19.
+    "exposure",               # manual exposure adjustment (adjustments category, -100 to 100)
+    "contrast",               # manual contrast adjustment (adjustments category, -100 to 100)
+    "saturation",             # manual saturation adjustment (adjustments category, -100 to 100)
+    "width",                  # resizing parameter — the validator sees resizing dict keys
+                              # (width, height) as operation names, not the category name
+                              # "resizing". Do not replace with "resizing" — that would
+                              # pass validation but width/height would then fail.
+    "height",                 # resizing parameter — see width comment above.
 })
 
 # Governance: operations that are NEVER permitted regardless of request source

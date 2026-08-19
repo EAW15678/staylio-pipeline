@@ -141,18 +141,21 @@ def onboard(
     if not r.is_ok and r.status != "held":
         return SkillResult.failed(reason=f"Workflow halted at deduplicate: {r.reason}")
 
-    # ── 4. Enhance ───────────────────────────────────────────────────────
-    # enhance operates on CANONICALS ONLY, after dedupe.
-    from skills.enhance import enhance
-    r = _run_skill("enhance", enhance, property_id, force=force)
-    if not r.is_ok and r.status != "held":
-        return SkillResult.failed(reason=f"Workflow halted at enhance: {r.reason}")
-
-    # ── 5. Observe ───────────────────────────────────────────────────────
+    # ── 4. Observe ───────────────────────────────────────────────────────
+    # Runs BEFORE enhance so enhancement recipes can read observation
+    # fields (light_quality, placement, contains_text) to choose the
+    # right recipe per photograph (ENHANCE-2).
     from skills.observe import observe
     r = _run_skill("observe", observe, property_id, force=force)
     if not r.is_ok and r.status != "held":
         return SkillResult.failed(reason=f"Workflow halted at observe: {r.reason}")
+
+    # ── 5. Enhance ───────────────────────────────────────────────────────
+    # enhance operates on CANONICALS ONLY, after dedupe and observe.
+    from skills.enhance import enhance
+    r = _run_skill("enhance", enhance, property_id, force=force)
+    if not r.is_ok and r.status != "held":
+        return SkillResult.failed(reason=f"Workflow halted at enhance: {r.reason}")
 
     # ── 6. Write copy + Build guide (could be parallel, run sequential for now)
     from skills.write_copy import write_copy
