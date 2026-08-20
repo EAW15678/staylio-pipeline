@@ -66,6 +66,10 @@ def fetch_vibe_voices(sb, vibe_profile: str) -> list:
 
     collection_id = _get_collection_id(sb, vibe_profile)
 
+    # Capture the actual response body on HTTP errors — found because C2
+    # fixed the identical gap in Claid calls the same day (2026-08-20), and
+    # this file had the same unguarded str(exc) pattern. A real 400 on
+    # collection 6qynxss0wmnF5Wu051du was logged with no usable detail.
     try:
         resp = httpx.get(
             f"{ELEVENLABS_API_BASE}/voices",
@@ -74,6 +78,12 @@ def fetch_vibe_voices(sb, vibe_profile: str) -> list:
             timeout=15,
         )
         resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = exc.response.text[:500] if exc.response.text else "(empty body)"
+        raise ValueError(
+            f"Failed to fetch voices for vibe '{vibe_profile}' "
+            f"(collection {collection_id}): {exc.response.status_code} — body: {body}"
+        )
     except Exception as exc:
         raise ValueError(
             f"Failed to fetch voices for vibe '{vibe_profile}' "
