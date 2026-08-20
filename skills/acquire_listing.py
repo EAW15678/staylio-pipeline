@@ -292,8 +292,20 @@ def acquire_listing(
             # Extract photos and reviews
             for p in temp_kb.photos:
                 photo_urls.append(p.url)
+            # Dedupe check before insert — unconditional inserts produced a
+            # real live duplicate on Vista Azule 2026-08-20 (Stephanie B. VRBO
+            # review appeared twice after a crash-and-retry). The existing
+            # duplicate was cleaned up directly in production. This check
+            # prevents future duplicates on re-runs.
             for r in temp_kb.guest_reviews:
                 if r.text:
+                    dup = sb.table("guest_evidence").select("evidence_id").eq(
+                        "property_id", property_id
+                    ).eq("source", "airbnb").eq(
+                        "reviewer_name", r.reviewer_name or ""
+                    ).eq("written_text", r.text).limit(1).execute()
+                    if dup.data:
+                        continue
                     sb.table("guest_evidence").insert({
                         "property_id": property_id,
                         "written_text": r.text or "",
@@ -340,8 +352,16 @@ def acquire_listing(
             temp_kb = _scrape_vrbo(source_url, temp_kb, scrape_reviews=True)
             for p in temp_kb.photos:
                 photo_urls.append(p.url)
+            # Same dedupe check as Airbnb path above — see comment there.
             for r in temp_kb.guest_reviews:
                 if r.text:
+                    dup = sb.table("guest_evidence").select("evidence_id").eq(
+                        "property_id", property_id
+                    ).eq("source", "vrbo").eq(
+                        "reviewer_name", r.reviewer_name or ""
+                    ).eq("written_text", r.text).limit(1).execute()
+                    if dup.data:
+                        continue
                     sb.table("guest_evidence").insert({
                         "property_id": property_id,
                         "written_text": r.text or "",
