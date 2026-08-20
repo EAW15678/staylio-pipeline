@@ -49,6 +49,12 @@ MIN_ENHANCE_DIMENSION = 200
 
 CLAID_API_BASE = "https://api.claid.ai/v1-beta1"
 
+# Claid's documented limit: "Input image size should be less than 10.0mb".
+# 9.5MB leaves margin regardless of decimal-MB vs MiB interpretation.
+# Found because a real 14.65MB photo (f1d0e36d, Vista Azule) failed with
+# a 422 on 2026-08-20, and C2's error-body capture revealed the reason.
+_CLAID_MAX_INPUT_BYTES = 9_500_000
+
 # ── Enhancement recipes ─────────────────────────────────────────────
 # Each recipe serves a specific outcome (G28: consistent gallery).
 # Precedence: gentler wins. text_bearing > bright_exterior > flat_light
@@ -296,6 +302,48 @@ def _get_credit_rate(sb):
     return float(resp.data[0]["unit_cost"])
 
 
+def _compress_for_claid(property_id: str, pid: str, original_url: str,
+                        byte_size: int) -> str:
+    """Download, re-encode at quality=88, upload compressed version to R2.
+
+    Returns the public URL of the compressed copy. Preserves resolution —
+    only reduces JPEG quality. If quality=88 alone doesn't get under the
+    threshold, reduces dimensions by 50% as a fallback.
+
+    The compressed copy is stored under a distinct R2 key and never
+    overwrites the original rendition.
+    """
+    resp = httpx.get(original_url, timeout=30, follow_redirects=True)
+    resp.raise_for_status()
+
+    from PIL import Image
+    img = Image.open(io.BytesIO(resp.content))
+    if img.mode in ("RGBA", "P"):
+        img = img.convert("RGB")
+
+    # Try quality reduction first (preserves resolution)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=88)
+    compressed = buf.getvalue()
+
+    if len(compressed) > _CLAID_MAX_INPUT_BYTES:
+        # Quality alone wasn't enough — reduce dimensions by 50%
+        new_w, new_h = img.width // 2, img.height // 2
+        img_resized = img.resize((new_w, new_h), Image.LANCZOS)
+        buf = io.BytesIO()
+        img_resized.save(buf, format="JPEG", quality=88)
+        compressed = buf.getvalue()
+        logger.info("[enhance] Compressed %s: %d → %d bytes (resized to %dx%d)",
+                    pid[:8], byte_size, len(compressed), new_w, new_h)
+    else:
+        logger.info("[enhance] Compressed %s: %d → %d bytes (quality=88, resolution preserved)",
+                    pid[:8], byte_size, len(compressed))
+
+    key = f"{property_id}/compressed_for_claid/{pid}.jpg"
+    url = skills_r2_upload(key, compressed, "image/jpeg")
+    return url
+
+
 async def _call_claid(session, url, operations):
     """Call Claid v1-beta1 image/edit and return enhanced bytes.
 
@@ -462,8 +510,8 @@ def enhance(
             skipped_low_res += 1
             continue
 
-        # Get original rendition URL
-        orig = sb.table("renditions").select("storage_url").eq(
+        # Get original rendition URL and byte_size
+        orig = sb.table("renditions").select("storage_url, byte_size").eq(
             "photo_id", pid
         ).eq("kind", "original").limit(1).execute()
         if not orig.data:
@@ -472,6 +520,7 @@ def enhance(
             continue
 
         original_url = orig.data[0]["storage_url"]
+        original_byte_size = orig.data[0].get("byte_size") or 0
 
         # ── Compute pHash if missing (G13, legacy heal) ──────────────────
         if not photo.get("phash"):
@@ -511,13 +560,25 @@ def enhance(
         logger.info("[enhance] %s recipe=%s ops=%s", pid[:8], recipe_name,
                     list(operations.keys()))
 
+        # ── Compress oversized originals before sending to Claid ────────
+        claid_input_url = original_url
+        if original_byte_size > _CLAID_MAX_INPUT_BYTES:
+            try:
+                claid_input_url = _compress_for_claid(
+                    property_id, pid, original_url, original_byte_size)
+            except Exception as comp_exc:
+                logger.warning("[enhance] Compression failed for %s (%d bytes): %s",
+                              pid[:8], original_byte_size, str(comp_exc)[:100])
+                failed_count += 1
+                continue
+
         # ── Enhance via Claid ────────────────────────────────────────────
         try:
             import asyncio
 
             async def _enhance():
                 async with httpx.AsyncClient(timeout=60) as session:
-                    return await _call_claid(session, original_url, operations)
+                    return await _call_claid(session, claid_input_url, operations)
 
             enhanced_bytes = asyncio.run(_enhance())
 
