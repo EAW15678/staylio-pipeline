@@ -346,7 +346,16 @@ async def _call_claid(session, url, operations):
             if e.response.status_code == 402:
                 raise  # billing error — let caller handle
             if attempt == 3:
-                raise
+                # Capture Claid's actual response body before raising.
+                # A real 422 on 2026-08-20 (photo f1d0e36d, Vista Azule)
+                # was logged with no usable detail — just the status line.
+                # The body is where Claid explains what it rejected.
+                body = e.response.text[:500] if e.response.text else "(empty body)"
+                logger.warning("[enhance] Claid %s on final attempt: %s",
+                               e.response.status_code, body)
+                raise httpx.HTTPStatusError(
+                    f"{e} — body: {body}", request=e.request, response=e.response,
+                )
         except Exception:
             if attempt == 3:
                 raise
@@ -564,7 +573,10 @@ def enhance(
                     attempted=len(needs_enhancement), succeeded=enhanced_count,
                     failed_count=failed_count + 1, error_class="billing", human_required=True,
                 )
-            logger.warning("[enhance] Claid failed for %s: %s", pid[:8], error_str[:80])
+            # Widened from [:80] to [:300] — 80 chars was barely enough for
+            # the status line; left zero room for the response body this fix
+            # now attaches to the exception.
+            logger.warning("[enhance] Claid failed for %s: %s", pid[:8], error_str[:300])
             failed_count += 1
 
     # ── Complete ─────────────────────────────────────────────────────────
