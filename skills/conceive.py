@@ -92,7 +92,8 @@ def conceive(
     city = prop_data.get("city") or ""
     state = prop_data.get("state_region") or ""
     vibe = prop_data.get("vibe_profile") or ""
-    amenities = prop_data.get("amenities") or []
+    from core.page_builder.amenity_taxonomy import extract_amenity_names
+    amenities = extract_amenity_names(prop_data.get("amenities") or [])
 
     guest_snippets = []
     for ev in guest_evidence:

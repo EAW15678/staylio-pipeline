@@ -678,7 +678,8 @@ def direct(
     # ── Load context ────────────────────────────────────────────────────
     prop = sb.table("properties").select("name, vibe_profile, city, state_region, amenities").eq("id", property_id).limit(1).execute()
     prop_data = prop.data[0] if prop.data else {}
-    amenity_names = prop_data.get("amenities") or []
+    from core.page_builder.amenity_taxonomy import extract_amenity_names
+    amenity_names = extract_amenity_names(prop_data.get("amenities") or [])
 
     ctx_resp = sb.table("owner_context").select("owner_story, wow_factor, hidden_gems, guest_love").eq(
         "property_id", property_id).is_("superseded_at", "null").order("version", desc=True).limit(1).execute()
@@ -903,8 +904,9 @@ def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candid
         parts = [f"    {k}: {json.dumps(f.get(k), default=str)}" for k in fields if f.get(k) is not None]
         frame_lines.append("  Frame:\n" + "\n".join(parts))
 
-    amenities = prop.get("amenities") or []
-    amenity_str = ", ".join(str(a) for a in amenities[:50]) if amenities else "None available"
+    from core.page_builder.amenity_taxonomy import extract_amenity_names as _ean
+    amenities = _ean(prop.get("amenities") or [])
+    amenity_str = ", ".join(amenities[:50]) if amenities else "None available"
 
     return f"""You are a creative director assembling a shot spec for a 30-second property hero video.
 

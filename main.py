@@ -190,7 +190,9 @@ class IntakeSubmissionRequest(BaseModel):
 
     # Arrays
     guest_types: list[str] = []
-    amenities: list[str] = []
+    # Structured amenities: [{"name": str, "category": str}, ...].
+    # Shape changed 2026-08-20 (AMENITY-2) from a flat string array.
+    amenities: list[dict] = []
     guest_book_entries: list[dict] = []
 
     # Portal photo uploads (Supabase Storage public URLs).

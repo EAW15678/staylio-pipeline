@@ -56,38 +56,53 @@ logger = logging.getLogger(__name__)
 # UTM parameters applied to every Book Now link
 UTM_TEMPLATE = "?utm_source=booked&utm_medium=landing_page&utm_campaign={slug}&utm_content=book_now"
 
-# ── Amenity synonym map ──────────────────────────────────────────────────────
-# Maps each property amenity (title-cased checkbox label from properties.amenities)
-# to a set of substrings that match observation located_amenities[].name values.
-# Ruled by Erick, 2026-08-19: where no photo evidence exists for a claim,
-# it stays text-only — do not force a weak match.
+# ── Amenity photo-proof matching ──────────────────────────────────────────────
+# Replaced the old 16-entry _AMENITY_SYNONYMS dict (AMENITY-2, 2026-08-20).
+# Now uses the canonical taxonomy from amenity_taxonomy.py.
+#
+# For the 7 object-based categories (water_wellness, recreation, etc.), match
+# against located_amenities WITHIN THE SAME CATEGORY using substring matching
+# on the name — category narrows the candidate pool, name decides precision
+# (a "Fire pit" claim must not match a "Fireplace" photo just because both
+# are in "gathering").
+#
+# For the `setting` category (Ocean views, Mountain views, etc.), match against
+# observations.is_setting = true and setting_subject instead — these describe
+# fixed geography, not a photographable object. located_amenities does not
+# carry setting data.
 
-_AMENITY_SYNONYMS: dict[str, set] = {
-    "Private pool": {"pool", "swimming pool"},
-    "Hot tub": {"hot tub", "spa", "jacuzzi"},
-    "Fire pit": {"fire pit"},
-    "Fireplace": {"fireplace"},
-    "BBQ / Grill": {"grill", "bbq", "barbecue"},
-    "Ocean views": {"ocean view", "sea view", "ocean"},
-    "Chef's kitchen": {"kitchen", "chef"},
-    "Outdoor dining table": {"outdoor dining", "dining table"},
-    "Fast WiFi (200+ Mbps)": set(),  # no visual evidence possible
-    "Child-friendly": set(),  # no visual evidence possible
-    "Smart home": set(),  # no visual evidence possible
-    "Lake / Waterfront": {"lake", "waterfront", "water view"},
-    "EV charger": {"ev charger", "charging station"},
-    "Dedicated desk / Workspace": {"desk", "workspace", "office"},
-    "Pet-friendly": set(),  # no visual evidence possible
-    "Accessibility features": {"wheelchair", "accessible", "ramp"},
-}
+from core.page_builder.amenity_taxonomy import (
+    _AMENITY_PHOTO_SYNONYMS,
+    _SETTING_PHOTO_SYNONYMS,
+    SETTING_AMENITIES,
+    extract_amenity_names,
+)
 
 
-def _find_amenity_photo(amenity_name: str, photos_with_obs: list) -> str:
-    """Find a photo whose located_amenities matches an amenity claim.
+def _find_amenity_photo(amenity_name: str, amenity_category: str,
+                        photos_with_obs: list) -> str:
+    """Find a photo whose observations match an amenity claim.
+
+    For setting-category amenities: matches against is_setting/setting_subject.
+    For all other categories: matches against located_amenities within the
+    same category using substring matching on the name.
 
     Returns the display URL of the best matching photo, or empty string.
     """
-    synonyms = _AMENITY_SYNONYMS.get(amenity_name, set())
+    if amenity_category == "setting":
+        synonyms = _SETTING_PHOTO_SYNONYMS.get(amenity_name, set())
+        if not synonyms:
+            return ""
+        for photo in photos_with_obs:
+            if photo.get("is_setting") and photo.get("setting_subject"):
+                subject = photo["setting_subject"].lower()
+                for syn in synonyms:
+                    if syn in subject:
+                        return photo.get("display_url") or ""
+        return ""
+
+    # Non-setting: match against located_amenities
+    synonyms = _AMENITY_PHOTO_SYNONYMS.get(amenity_name, set())
     if not synonyms:
         return ""
 
@@ -95,6 +110,10 @@ def _find_amenity_photo(amenity_name: str, photos_with_obs: list) -> str:
         located = photo.get("located_amenities") or []
         for loc in located:
             loc_name = (loc.get("name") or "").lower()
+            loc_cat = (loc.get("category") or "").lower()
+            # Category narrows the candidate pool when available
+            if amenity_category and loc_cat and loc_cat != amenity_category:
+                continue
             for syn in synonyms:
                 if syn in loc_name:
                     return photo.get("display_url") or ""
@@ -202,11 +221,13 @@ def build_page(sb, property_id: str) -> dict:
         }
         media_assets.append(asset)
 
-        # Track for amenity photo-proof
-        if obs.get("located_amenities"):
+        # Track for amenity photo-proof — both located_amenities and setting data
+        if obs.get("located_amenities") or obs.get("is_setting"):
             photos_with_obs.append({
                 "display_url": display_url,
-                "located_amenities": obs["located_amenities"],
+                "located_amenities": obs.get("located_amenities") or [],
+                "is_setting": obs.get("is_setting", False),
+                "setting_subject": obs.get("setting_subject") or "",
             })
 
         if obs.get("role") == "hero" and not hero_photo_url:
@@ -301,17 +322,27 @@ def build_page(sb, property_id: str) -> dict:
                     pick["description"] = parts[1].strip()
                 dont_miss_picks.append(pick)
 
-    # ── Amenity photo-proof (ruled by Erick, 2026-08-19) ─────────────────
-    # For each amenity claim, if a photograph's located_amenities names it,
-    # attach that photo. If none exists, the claim stays text-only.
+    # ── Amenity photo-proof (ruled by Erick, 2026-08-19; updated AMENITY-2) ──
+    # For each amenity claim, find a matching photo. Setting-category items match
+    # via is_setting/setting_subject; all others via located_amenities within
+    # the same category. If none exists, the claim stays text-only.
     amenity_highlights = content_package.get("amenity_highlights") or {}
     amenities_list = prop.get("amenities") or []
     amenity_photos = {}
-    for amenity_name in amenities_list:
-        if isinstance(amenity_name, str):
-            photo_url = _find_amenity_photo(amenity_name, photos_with_obs)
+    for amenity_entry in amenities_list:
+        # Handle both structured {name, category} and legacy flat strings
+        if isinstance(amenity_entry, dict):
+            a_name = amenity_entry.get("name") or ""
+            a_cat = amenity_entry.get("category") or ""
+        elif isinstance(amenity_entry, str):
+            a_name = amenity_entry
+            a_cat = ""
+        else:
+            continue
+        if a_name:
+            photo_url = _find_amenity_photo(a_name, a_cat, photos_with_obs)
             if photo_url:
-                amenity_photos[amenity_name] = photo_url
+                amenity_photos[a_name] = photo_url
 
     # ── Build page URL and booking URL ───────────────────────────────────
     page_url = f"https://{slug}.upliftstays.com"
@@ -336,7 +367,7 @@ def build_page(sb, property_id: str) -> dict:
         "avg_nightly_rate": {"value": prop.get("avg_nightly_rate")},
         "airbnb_rating": {"value": prop.get("airbnb_rating")},
         "airbnb_review_count": {"value": prop.get("airbnb_review_count")},
-        "amenities": [{"value": a} for a in amenities_list if isinstance(a, str)],
+        "amenities": [{"value": n} for n in extract_amenity_names(amenities_list)],
     }
     schema_html = build_schema_from_inputs(
         kb=kb_for_schema,

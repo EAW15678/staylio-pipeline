@@ -17,6 +17,7 @@ import logging
 import os
 from typing import Optional
 
+from core.page_builder.amenity_taxonomy import extract_amenity_names as _extract_amenity_names
 from skills.contract import (
     SkillResult, get_substrate, require_env,
     record_run, record_step, complete_step, complete_run, emit_cost,
@@ -82,7 +83,7 @@ def write_copy(
         "bathrooms": _pf(prop.get("bathrooms")),
         "max_occupancy": _pf(prop.get("max_occupancy")),
         "description": _pf(prop.get("description")),
-        "amenities": [{"value": a} for a in (prop.get("amenities") or [])],
+        "amenities": [{"value": n} for n in _extract_amenity_names(prop.get("amenities") or [])],
         "unique_features": [],
         "neighborhood_description": _pf(None),
         "owner_story": None,
