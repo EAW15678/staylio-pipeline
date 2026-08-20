@@ -283,15 +283,30 @@ def write_copy(
     }).execute()
 
     # ── Held path: write hitl_queue_items ─────────────────────────────────
+    # Fixed 2026-08-20: three invalid values found by reviewing every
+    # hitl_queue_items insert site — "copy_review" → "content_review"
+    # (CHECK constraint), "normal" → "p2" (CHECK: p0/p1/p2/p3; p2 = real
+    # but not urgent, matching quality-gate semantics), "pending" → "open"
+    # (CHECK: open/in_progress/resolved/dismissed). Also added account_id
+    # lookup. Historical case (property f2147602, 2026-08-12, score 3.7)
+    # found and confirmed — deliberately not backfilled per Erick's ruling.
     if quality_result in ("needs_review", "fail"):
+        wc_account_id = None
+        try:
+            wc_prop = sb.table("properties").select("account_id").eq("id", property_id).limit(1).execute()
+            if wc_prop.data:
+                wc_account_id = wc_prop.data[0].get("account_id")
+        except Exception:
+            pass
         sb.table("hitl_queue_items").insert({
             "property_id": property_id,
-            "queue_type": "copy_review",
+            "account_id": wc_account_id,
+            "queue_type": "content_review",
             "reason_code": f"quality_gate_{quality_result}",
             "title": f"Copy v{next_version} quality gate: {quality_result} (score: {quality_score})",
             "description": f"Quality gate scored {quality_score}/5. Review required before publishing.",
-            "priority": "normal",
-            "status": "pending",
+            "priority": "p2",
+            "status": "open",
             "payload": json.dumps({"version": next_version, "quality_score": quality_score, "quality_result": quality_result}),
             "created_by_type": "agent",
         }).execute()

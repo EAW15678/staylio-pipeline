@@ -49,14 +49,18 @@ def conceive(
         return SkillResult.failed(str(e))
 
     # ── Idempotency: check for existing active concept ─────────────────
+    # Fetches the actual concept_id, not just a count. The noop response
+    # must carry concept_id so onboard.py can pass it to direct() —
+    # limit(0)/count-only broke Vista Azule live on 2026-08-20 because
+    # onboard.py read r.data.get("concept_id") and got None.
     if not force:
-        existing = sb.table("concepts").select("concept_id", count="exact").eq(
+        existing = sb.table("concepts").select("concept_id").eq(
             "property_id", property_id
-        ).eq("status", "active").is_("superseded_at", "null").limit(0).execute()
-        if existing.count > 0:
+        ).eq("status", "active").is_("superseded_at", "null").limit(1).execute()
+        if existing.data:
             return SkillResult.noop(
                 f"Active concept already exists for property {property_id[:12]}.",
-                {"concepts_existing": existing.count},
+                {"concepts_existing": 1, "concept_id": existing.data[0]["concept_id"]},
             )
 
     try:

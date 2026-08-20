@@ -605,12 +605,17 @@ def raise_hold(sb, property_id: str, reason: str, hold_code: str):
     Reuses the exact pattern from VIDEO-WORKFLOW-1 in workflows/onboard.py.
     Does not fork send_halt_alert — calls it directly.
     """
-    # Get property name for the alert
+    # Get property name and account_id for the alert.
+    # account_id was hardcoded to None — found by reviewing every
+    # hitl_queue_items insert site after escalate_halt's missing
+    # created_by_type crashed Vista Azule on 2026-08-20.
     prop_name = property_id[:12]
+    account_id = None
     try:
-        prop_resp = sb.table("properties").select("name").eq("id", property_id).limit(1).execute()
+        prop_resp = sb.table("properties").select("name, account_id").eq("id", property_id).limit(1).execute()
         if prop_resp.data:
             prop_name = prop_resp.data[0].get("name") or property_id[:12]
+            account_id = prop_resp.data[0].get("account_id")
     except Exception:
         pass
 
@@ -618,7 +623,7 @@ def raise_hold(sb, property_id: str, reason: str, hold_code: str):
     sb.table("hitl_queue_items").insert({
         "id": hitl_id,
         "property_id": property_id,
-        "account_id": None,
+        "account_id": account_id,
         "queue_type": "pipeline_failure",
         "priority": "p0",
         "status": "open",

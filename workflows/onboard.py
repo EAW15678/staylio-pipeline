@@ -273,11 +273,16 @@ def onboard(
                        video_failed_step, video_error[:80])
 
         # ── Alert: hitl queue row + email ───────────────────────────────
+        # account_id lookup added — was hardcoded to None, found by reviewing
+        # every hitl_queue_items insert site after escalate_halt's missing
+        # created_by_type crashed Vista Azule on 2026-08-20.
         prop_name = prop_data.get("name") or property_id[:12] if "prop_data" in dir() else property_id[:12]
+        account_id = None
         try:
-            prop_for_name = sb.table("properties").select("name").eq("id", property_id).limit(1).execute()
+            prop_for_name = sb.table("properties").select("name, account_id").eq("id", property_id).limit(1).execute()
             if prop_for_name.data:
                 prop_name = prop_for_name.data[0].get("name") or property_id[:12]
+                account_id = prop_for_name.data[0].get("account_id")
         except Exception:
             pass
 
@@ -287,7 +292,7 @@ def onboard(
             sb.table("hitl_queue_items").insert({
                 "id": hitl_id,
                 "property_id": property_id,
-                "account_id": None,
+                "account_id": account_id,
                 "queue_type": "pipeline_failure",
                 "priority": "p0",
                 "status": "open",

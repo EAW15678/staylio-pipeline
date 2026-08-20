@@ -625,14 +625,18 @@ def direct(
         return SkillResult.failed(str(e))
 
     # ── Check existing direction ────────────────────────────────────────
+    # Fetches the actual direction_id, not just a count. The noop response
+    # must carry direction_id so onboard.py can pass it to narrate/music/
+    # motion/assemble — same bug class as conceive's missing concept_id
+    # that broke Vista Azule live on 2026-08-20.
     if not force:
-        existing = sb.table("directions").select("direction_id", count="exact").eq(
+        existing = sb.table("directions").select("direction_id").eq(
             "concept_id", concept_id
-        ).is_("superseded_at", "null").limit(0).execute()
-        if existing.count > 0:
+        ).is_("superseded_at", "null").limit(1).execute()
+        if existing.data:
             return SkillResult.noop(
                 f"Direction already exists for concept {concept_id[:12]}.",
-                {"directions_existing": existing.count},
+                {"directions_existing": 1, "direction_id": existing.data[0]["direction_id"]},
             )
 
     # ── Load concept ────────────────────────────────────────────────────
