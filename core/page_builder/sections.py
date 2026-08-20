@@ -279,8 +279,6 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
 
     from core.page_builder.helpers import _esc_js
 
-    lightbox_idx = {item["url"]: i for i, item in enumerate(gallery_items)}
-
     modules_html = ""
     for label, module in modules.items():
         hero = module["hero"]
@@ -289,18 +287,24 @@ def _build_category_modules_section(modules: dict, gallery_items: list) -> str:
 
         visible_supporting = all_supporting[:MAX_VISIBLE_SUPPORTING]
 
-        h_idx = lightbox_idx.get(hero["url"], 0)
+        # Room-module thumbnails open the section-scoped gallery, positioned
+        # on the specific photo clicked. Previously these called openLightbox
+        # (the unscoped viewer for "All Photos"), which meant clicking a
+        # Living Areas photo and scrolling showed bedroom photos at "59/72"
+        # instead of staying within the section's photos. Fixed 2026-08-20 (B2).
+        label_js = _esc_js(label)
+        hero_url_js = _esc_js(hero["url"])
         hero_html = (
             f'<img src="{_esc(hero["url"])}" alt="{_esc(hero["alt"])}" loading="lazy" '
-            f'class="cat-module-hero" onclick="openLightbox({h_idx})">'
+            f"class=\"cat-module-hero\" onclick=\"if(window.openGalleryFiltered){{openGalleryFiltered(['{label_js}'],'{hero_url_js}');}}\">"
         )
 
         sup_html = ""
         for img in visible_supporting:
-            i_idx = lightbox_idx.get(img["url"], 0)
+            img_url_js = _esc_js(img["url"])
             sup_html += (
                 f'<img src="{_esc(img["url"])}" alt="{_esc(img["alt"])}" loading="lazy" '
-                f'class="cat-module-thumb" onclick="openLightbox({i_idx})">'
+                f"class=\"cat-module-thumb\" onclick=\"if(window.openGalleryFiltered){{openGalleryFiltered(['{label_js}'],'{img_url_js}');}}\">"
             )
 
         if visible_supporting:

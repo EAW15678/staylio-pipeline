@@ -223,13 +223,26 @@ def _build_lightbox_gallery_js(gallery_items: list) -> str:
       document.body.style.overflow = 'hidden';
     }};
 
-    window.openGalleryFiltered = function(cats) {{
+    /* openGalleryFiltered — scopes the gallery to one or more sections.
+       Optional startUrl positions on the specific photo clicked instead of
+       always index 0. Added 2026-08-20 (B2) because room-module thumbnails
+       were calling openLightbox (the unscoped viewer) instead of this —
+       clicking a Living Areas photo and scrolling showed bedroom photos at
+       "59/72" instead of staying within the 18 Living Areas photos. */
+    window.openGalleryFiltered = function(cats, startUrl) {{
       galActiveCat = '__multi__';
       galFiltered = PHOTOS.filter(function(p) {{ return cats.indexOf(p.cat) !== -1; }});
       if (galFiltered.length === 0) galFiltered = PHOTOS.slice();
       galIdx = 0;
+      if (startUrl) {{
+        var found = -1;
+        for (var i = 0; i < galFiltered.length; i++) {{
+          if (galFiltered[i].url === startUrl) {{ found = i; break; }}
+        }}
+        if (found !== -1) galIdx = found;
+      }}
       buildTabs();
-      showGal(0);
+      showGal(galIdx);
       if (galDialog && !galDialog.open) galDialog.showModal();
       document.body.style.overflow = 'hidden';
     }};
