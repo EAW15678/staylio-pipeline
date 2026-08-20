@@ -284,6 +284,10 @@ def escalate_halt(
     except Exception:
         pass
 
+    # created_by_type is NOT NULL — was missing here, crashed Vista Azule's
+    # launch on 2026-08-20 with a slug collision. "system" is correct because
+    # escalate_halt fires for infrastructure-level conditions (slug collision,
+    # zero-photo, unresolvable, billing/auth) — not agent/model judgment calls.
     result = sb.table("hitl_queue_items").insert({
         "property_id": property_id,
         "account_id": account_id,
@@ -293,6 +297,7 @@ def escalate_halt(
         "description": detail[:500],
         "priority": "urgent",
         "status": "pending",
+        "created_by_type": "system",
         "payload": payload,
     }).execute()
 
