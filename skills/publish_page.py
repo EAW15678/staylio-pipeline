@@ -48,6 +48,46 @@ def _make_slug(name: str) -> str:
     return slug[:50]
 
 
+def _purge_cf_cache(page_url: str, slug: str):
+    """Purge Cloudflare edge cache for a published page URL.
+
+    Best-effort: logs a warning if credentials are missing or the purge
+    fails, but never raises — a failed purge must not block a successful
+    publish. The cache will expire naturally within s-maxage (1 hour).
+    """
+    import os
+    zone_id = os.environ.get("CLOUDFLARE_ZONE_ID", "")
+    api_token = os.environ.get("CLOUDFLARE_API_TOKEN", "")
+
+    if not zone_id or not api_token:
+        logger.info("[publish_page] CLOUDFLARE_ZONE_ID or CLOUDFLARE_API_TOKEN not set — skipping cache purge")
+        return
+
+    try:
+        import httpx
+        urls_to_purge = [
+            page_url,
+            f"{page_url}/",
+            f"https://{slug}.upliftstays.com/index.html",
+        ]
+        resp = httpx.post(
+            f"https://api.cloudflare.com/client/v4/zones/{zone_id}/purge_cache",
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json",
+            },
+            json={"files": urls_to_purge},
+            timeout=10.0,
+        )
+        if resp.status_code == 200 and resp.json().get("success"):
+            logger.info("[publish_page] Cloudflare cache purged for %s", page_url)
+        else:
+            logger.warning("[publish_page] Cloudflare cache purge failed: %s %s",
+                          resp.status_code, resp.text[:200])
+    except Exception as exc:
+        logger.warning("[publish_page] Cloudflare cache purge error: %s", str(exc)[:100])
+
+
 def publish_page(
     property_id: str,
     *,
@@ -206,6 +246,19 @@ def publish_page(
                 len(html_bytes), page_url, publish_bucket)
 
     logger.info("[publish_page] Uploaded %d bytes → %s", len(html_bytes), page_url)
+
+    # ── Purge Cloudflare edge cache for this URL ─────────────────────────
+    # The staylio-router Worker sets Cache-Control: s-maxage=3600, so
+    # Cloudflare's edge cache holds responses for up to 1 hour independent
+    # of the R2 object changing. Without an explicit purge, a republish is
+    # invisible to visitors until the cache expires. Found 2026-08-20 when
+    # two confirmed data-layer fixes (location correction, review dedupe)
+    # were invisible on the live page despite successful R2 writes.
+    #
+    # Requires CLOUDFLARE_ZONE_ID and CLOUDFLARE_API_TOKEN with
+    # Zone.Cache Purge permission. If either is missing, the publish still
+    # succeeds — the cache just expires naturally.
+    _purge_cf_cache(page_url, slug)
 
     # ── Write landing_pages ──────────────────────────────────────────────
     sb.table("landing_pages").upsert({
