@@ -302,6 +302,16 @@ def _get_credit_rate(sb):
     return float(resp.data[0]["unit_cost"])
 
 
+def _resolve_claid_input_url(property_id: str, pid: str, original_url: str,
+                              byte_size: int) -> str:
+    """Return the URL to send to Claid — original if under threshold,
+    compressed if over. Extracted so the trigger logic is testable,
+    not just _compress_for_claid in isolation."""
+    if byte_size > _CLAID_MAX_INPUT_BYTES:
+        return _compress_for_claid(property_id, pid, original_url, byte_size)
+    return original_url
+
+
 def _compress_for_claid(property_id: str, pid: str, original_url: str,
                         byte_size: int) -> str:
     """Download, re-encode at quality=88, upload compressed version to R2.
@@ -560,17 +570,15 @@ def enhance(
         logger.info("[enhance] %s recipe=%s ops=%s", pid[:8], recipe_name,
                     list(operations.keys()))
 
-        # ── Compress oversized originals before sending to Claid ────────
-        claid_input_url = original_url
-        if original_byte_size > _CLAID_MAX_INPUT_BYTES:
-            try:
-                claid_input_url = _compress_for_claid(
-                    property_id, pid, original_url, original_byte_size)
-            except Exception as comp_exc:
-                logger.warning("[enhance] Compression failed for %s (%d bytes): %s",
-                              pid[:8], original_byte_size, str(comp_exc)[:100])
-                failed_count += 1
-                continue
+        # ── Resolve input URL — compress if oversized ───────────────────
+        try:
+            claid_input_url = _resolve_claid_input_url(
+                property_id, pid, original_url, original_byte_size)
+        except Exception as comp_exc:
+            logger.warning("[enhance] Compression failed for %s (%d bytes): %s",
+                          pid[:8], original_byte_size, str(comp_exc)[:100])
+            failed_count += 1
+            continue
 
         # ── Enhance via Claid ────────────────────────────────────────────
         try:
