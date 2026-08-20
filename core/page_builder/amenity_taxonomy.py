@@ -56,7 +56,7 @@ AMENITY_CATEGORIES: list[dict] = [
             "Board games", "Game room", "Home theater / media room",
             "Projector and screen", "Gym / exercise equipment", "Yoga studio",
             "Trampoline (in-ground or standard)", "Playground / jungle gym",
-            "Zip-line", "Climbing wall", "Fire pit",
+            "Zip-line", "Climbing wall",
             "Sport court (multi-use)", "Treehouse element", "Barn", "Art studio",
         ],
     },
@@ -85,6 +85,7 @@ AMENITY_CATEGORIES: list[dict] = [
         "items": [
             "Crib", "Pack 'n play", "High chair", "Baby gate", "Baby monitor",
             "Changing table", "Children's books and toys", "Board games for kids",
+            "Family/kid-friendly",
             "Wheelchair accessible", "Step-free guest entrance", "Wide doorways",
             "Grab bars (shower/toilet)", "Roll-in shower", "Accessible-height bed",
             "Accessible parking spot", "Single-level home",
@@ -112,7 +113,8 @@ AMENITY_CATEGORIES: list[dict] = [
             "Keyless entry", "Security cameras (exterior only, disclosed)",
             "Smoke alarm", "Carbon monoxide alarm", "Fire extinguisher",
             "First aid kit", "Safe", "Elevator", "Generator", "Solar power",
-            "Pet-friendly", "Smoking allowed (exterior only)",
+            "Pet-friendly", "Smart home technology", "Chef's kitchen",
+            "Smoking allowed (exterior only)",
         ],
     },
 ]
