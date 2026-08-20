@@ -202,6 +202,47 @@ def acquire_owner_photos(
     return {"photos_new": photos_new, "photos_existing": photos_existing, "photos_failed": photos_failed}
 
 
+def _insert_review_if_new(sb, property_id: str, source: str, review) -> bool:
+    """Insert a guest review unless an identical one already exists.
+
+    Returns True if inserted, False if skipped as a duplicate. Extracted
+    2026-08-20 after the original fix's own tests were found to test a
+    copy of this logic instead of the real thing — this makes that
+    impossible by construction, since there is now only one copy.
+
+    Dedupe check: same property_id + source + reviewer_name + written_text.
+    Different text from the same reviewer is a different review and inserts.
+
+    Note: VRBO reviews do not carry star_rating (the OTA doesn't expose it
+    in the scrape). Airbnb reviews do. getattr with None default preserves
+    this existing behavioural difference — it is intentional, not an
+    oversight. The VRBO insert dict has never included star_rating.
+    """
+    if not review.text:
+        return False
+    dup = sb.table("guest_evidence").select("evidence_id").eq(
+        "property_id", property_id
+    ).eq("source", source).eq(
+        "reviewer_name", review.reviewer_name or ""
+    ).eq("written_text", review.text).limit(1).execute()
+    if dup.data:
+        return False
+    row = {
+        "property_id": property_id,
+        "written_text": review.text or "",
+        "verbal_text": "",
+        "reviewer_name": review.reviewer_name,
+        "stay_date": review.stay_date,
+        "source": source,
+        "is_guest_book": False,
+    }
+    star = getattr(review, "star_rating", None)
+    if star is not None:
+        row["star_rating"] = star
+    sb.table("guest_evidence").insert(row).execute()
+    return True
+
+
 def acquire_listing(
     property_id: str,
     source_url: str,
@@ -292,30 +333,8 @@ def acquire_listing(
             # Extract photos and reviews
             for p in temp_kb.photos:
                 photo_urls.append(p.url)
-            # Dedupe check before insert — unconditional inserts produced a
-            # real live duplicate on Vista Azule 2026-08-20 (Stephanie B. VRBO
-            # review appeared twice after a crash-and-retry). The existing
-            # duplicate was cleaned up directly in production. This check
-            # prevents future duplicates on re-runs.
             for r in temp_kb.guest_reviews:
-                if r.text:
-                    dup = sb.table("guest_evidence").select("evidence_id").eq(
-                        "property_id", property_id
-                    ).eq("source", "airbnb").eq(
-                        "reviewer_name", r.reviewer_name or ""
-                    ).eq("written_text", r.text).limit(1).execute()
-                    if dup.data:
-                        continue
-                    sb.table("guest_evidence").insert({
-                        "property_id": property_id,
-                        "written_text": r.text or "",
-                        "verbal_text": "",
-                        "reviewer_name": r.reviewer_name,
-                        "stay_date": r.stay_date,
-                        "source": "airbnb",
-                        "is_guest_book": False,
-                        "star_rating": r.star_rating,
-                    }).execute()
+                _insert_review_if_new(sb, property_id, "airbnb", r)
             # Extract property fields
             extracted_fields = {}
             if temp_kb.name and temp_kb.name.value:
@@ -352,25 +371,8 @@ def acquire_listing(
             temp_kb = _scrape_vrbo(source_url, temp_kb, scrape_reviews=True)
             for p in temp_kb.photos:
                 photo_urls.append(p.url)
-            # Same dedupe check as Airbnb path above — see comment there.
             for r in temp_kb.guest_reviews:
-                if r.text:
-                    dup = sb.table("guest_evidence").select("evidence_id").eq(
-                        "property_id", property_id
-                    ).eq("source", "vrbo").eq(
-                        "reviewer_name", r.reviewer_name or ""
-                    ).eq("written_text", r.text).limit(1).execute()
-                    if dup.data:
-                        continue
-                    sb.table("guest_evidence").insert({
-                        "property_id": property_id,
-                        "written_text": r.text or "",
-                        "verbal_text": "",
-                        "reviewer_name": r.reviewer_name,
-                        "stay_date": r.stay_date,
-                        "source": "vrbo",
-                        "is_guest_book": False,
-                    }).execute()
+                _insert_review_if_new(sb, property_id, "vrbo", r)
             extracted_fields = {}
             if temp_kb.name and temp_kb.name.value:
                 extracted_fields["property_name"] = temp_kb.name.value
