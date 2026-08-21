@@ -149,3 +149,57 @@ def test_output_json_includes_new_fields():
     new_fields = ["hero_proposition", "booking_drivers", "directing_mode", "mode_rationale"]
     for field in new_fields:
         assert f'"{field}"' in prompt, f"Output JSON must include '{field}'"
+
+
+# ── Test 7: opening preference language present ─────────────────────────────
+
+def test_opening_preference_present():
+    """The prompt contains the property/setting preference and no longer
+    contains the old 'ORDER is YOUR judgment' line."""
+    prompt = _make_prompt()
+
+    assert "property or setting over feature" in prompt, \
+        "Must state preference for property/setting over feature"
+    assert "The ORDER among the three kinds is YOUR judgment" not in prompt, \
+        "Old unconstrained judgment line must be removed"
+    assert "Supersedes G65" in prompt, \
+        "Must note the G65 supersede"
+
+
+# ── Test 8: feature opener still permitted ──────────────────────────────────
+
+def test_feature_opener_still_permitted():
+    """The preference is stated as a preference, not a prohibition.
+    Feature opener must remain explicitly permitted."""
+    prompt = _make_prompt()
+
+    assert "feature opener remains permitted" in prompt, \
+        "Must explicitly state feature opener is still permitted"
+    assert "not a hard rule" in prompt, \
+        "Must state the preference is not a hard rule"
+
+
+# ── Test 9: validator still passes feature opener ───────────────────────────
+
+def test_validator_still_passes_feature_opener():
+    """validate_opening_establishes accepts opening_type='feature' —
+    regression guard proving this stayed a prompt change and did not
+    leak into enforcement."""
+    from skills.direct import validate_opening_establishes
+
+    direction = {
+        "beats": [{"ordinal": 1, "photo_id": "p1"}],
+        "opening_type": "feature",
+    }
+    obs_map = {
+        "p1": {
+            "curated_section": "Pool",
+            "placement": "outdoor",
+            "is_setting": False,
+        },
+    }
+
+    violations = validate_opening_establishes(direction, obs_map)
+    assert violations == [], (
+        f"Feature opener must not produce violations, got: {violations}"
+    )

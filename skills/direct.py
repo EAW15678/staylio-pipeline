@@ -1047,7 +1047,17 @@ not the brief — everything above is where the film actually gets made.
     Beat 1 MUST NOT open on ANY interior section (Bedrooms, Bathrooms,
     Kitchen, Living Areas, Extras). Interior frames are fully available
     for beats 2 onward — this rule governs beat 1 ONLY.
-    The ORDER among the three kinds is YOUR judgment.
+    PREFERENCE: property or setting over feature. Open on the property
+    itself or on what situates it whenever a frame of either is available
+    and strong enough to carry the opening. Use a feature opener when it
+    is genuinely the strongest opening available to you — not as a
+    default, and not merely because a feature frame is the prettiest
+    photograph in the set. This is a preference you exercise judgment on,
+    not a hard rule: a feature opener remains permitted and is not a
+    violation.
+    (Supersedes G65's "ORDER is the DIRECTOR'S judgment" — Erick narrowed
+    this 2026-08-21. Property/setting preferred over feature. Choice
+    between property and setting remains the director's judgment.)
     You MUST declare opening_type in the output JSON.
     If the opener is a frame below 768px wide (a weak opener), assign ONLY
     "push_in" as its requested_motion — no parallax, no pans.
