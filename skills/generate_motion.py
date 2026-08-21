@@ -252,11 +252,20 @@ def generate_motion(
                 import runwayml
                 runway_client = runwayml.RunwayML(api_key=runway_key)
 
+                # Runway accepts only 5 or 10 second durations (confirmed
+                # against Runway's API docs, 2026-08-21). Five of six locked
+                # beats failed silently on this limit. Snap defensively — the
+                # director is told the rule, this is the backstop.
+                runway_duration = 10 if duration > 7.5 else 5
+                if runway_duration != duration:
+                    logger.info("[motion] Beat %d: quantizing duration %.1f → %ds for Runway",
+                               ordinal, duration, runway_duration)
+
                 task = runway_client.image_to_video.create(
                     model=model,
                     prompt_image=source_url,
                     prompt_text=locked_prompt,
-                    duration=duration,
+                    duration=runway_duration,
                     ratio="1280:720" if aspect_ratio == "16:9" else "720:1280",
                 )
 
@@ -283,7 +292,45 @@ def generate_motion(
 
             except Exception as exc:
                 error_str = str(exc)
-                logger.warning("[motion] Runway locked failed for beat %d: %s", ordinal, error_str[:80])
+                # G67 / MOTION-1: downgrade to bounded, never drop. A dropped
+                # beat is how a 29.4s direction became a 10.6s master (5 of 6
+                # locked beats silently vanished, 2026-08-21).
+                logger.warning("[motion] Runway locked failed for beat %d: %s — downgrading to bounded",
+                              ordinal, error_str[:300])
+
+                # Fall back to bounded at the beat's directed duration
+                fallback_id = str(uuid.uuid4())
+                sb.table("video_artifacts").insert({
+                    "artifact_id": fallback_id,
+                    "property_id": property_id,
+                    "kind": "clip",
+                    "direction_id": direction_id,
+                    "concept_id": direction.get("concept_id"),
+                    "photo_id": photo_id,
+                    "input_hash": input_hash,
+                    "storage_url": source_url,
+                    "duration_seconds": duration,
+                    "model": None,
+                    "vendor": "creatomate",
+                    "beat_ordinal": ordinal,
+                    "requested_motion": "push_in",
+                    "technique": "bounded",
+                    "motion_params": {
+                        "prompt": None,
+                        "actual_motion": "push_in",
+                        "downgraded": True,
+                        "original_technique": "locked",
+                        "original_motion": requested_motion,
+                        "original_prompt": locked_prompt,
+                        "failure_reason": error_str[:300],
+                    },
+                    "cost_estimate_usd": 0,
+                    "status": "ready",
+                    "created_by_agent": "skills/generate_motion",
+                }).execute()
+
+                clips_rendered += 1
+                technique_counts["bounded"] = technique_counts.get("bounded", 0) + 1
                 clips_rejected += 1
                 continue
 

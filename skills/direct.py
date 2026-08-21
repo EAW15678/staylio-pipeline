@@ -1242,6 +1242,10 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
       and grass moving, steam rising, curtains breathing, clouds
       drifting. Costs Runway rates. State in motion_prompt exactly what
       you expect to move.
+      A locked beat MUST be exactly 5.0 or 10.0 seconds — Runway
+      accepts no other duration. Plan your pacing around this: locked
+      beats are 5s or 10s, bounded beats can be any length. A 3.5-second
+      locked beat is impossible and will fail.
     - "generative": full Runway generation with camera movement.
     REACH FOR "locked" ON ANY FRAME WITH GENUINE LIFE IN IT. A pool, the
     ocean, a fire pit, trees, sky, a hot tub, anything with water or
