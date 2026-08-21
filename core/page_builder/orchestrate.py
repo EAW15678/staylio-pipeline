@@ -409,7 +409,7 @@ def build_page(sb, property_id: str) -> dict:
     hero_media_html = ""
     if hero_video_url:
         hero_media_html = (
-            f'<video autoplay muted playsinline id="hero-video">'
+            f'<video autoplay muted loop playsinline id="hero-video">'
             f'<source src="{_esc(hero_video_url)}" type="video/mp4"></video>'
         )
     elif hero_photo_url:
@@ -500,35 +500,62 @@ def build_page(sb, property_id: str) -> dict:
     </div>
   </footer>"""
 
-    # Video replay button
-    replay_js = ""
+    # Hero video "Hear me" unmute control — restored from the pre-PAGE-2
+    # implementation. Dropped during the PAGE-2/3/4 rebuild, not intentionally
+    # removed. On click: unmutes and restarts from the beginning. On loop
+    # restart: re-mutes automatically so unmuted playback is a deliberate,
+    # user-requested state, not permanent. The video loops muted by default
+    # (autoplay muted loop playsinline) for browser compliance.
+    hero_video_js = ""
     if hero_video_url:
-        replay_js = """
+        hero_video_js = """
   <script>
   (function(){
     var v=document.getElementById('hero-video');
     if(!v)return;
-    var rb=document.createElement('button');
-    rb.id='hero-replay-btn';rb.textContent='\\u21BB Replay';rb.style.display='none';
-    v.parentElement.parentElement.appendChild(rb);
-    v.addEventListener('ended',function(){rb.style.display='block';});
-    rb.addEventListener('click',function(){v.currentTime=0;v.play();rb.style.display='none';});
+    var hb=document.createElement('button');
+    hb.id='hero-hear-btn';
+    hb.textContent='\\uD83D\\uDD0A Hear me';
+    hb.setAttribute('aria-label','Unmute and play video with sound');
+    v.parentElement.parentElement.appendChild(hb);
+    hb.addEventListener('click',function(){
+      v.muted=false;
+      v.currentTime=0;
+      v.play();
+      hb.textContent='\\uD83D\\uDD07 Mute';
+    });
+    v.addEventListener('timeupdate',function(){
+      if(!v.muted && v.currentTime<0.1 && v.duration>0){
+        v.muted=true;
+        hb.textContent='\\uD83D\\uDD0A Hear me';
+      }
+    });
   })();
   </script>"""
 
-    # Audio play handler
+    # Guest audio toggle — clicking a playing track stops it; clicking a
+    # different track stops the old one and starts the new one. The previous
+    # implementation unconditionally created a new Audio object on every click,
+    # including re-clicking the same button — no way to stop playback.
+    # Dropped feature restored from pre-PAGE-2, found 2026-08-20.
     audio_js = ""
     if guest_reviews and review_audio_urls:
         audio_js = """
   <script>
   (function(){
-    var current=null;
+    var current=null,currentBtn=null;
     document.querySelectorAll('.audio-play-btn').forEach(function(btn){
       btn.addEventListener('click',function(){
         var src=this.getAttribute('data-audio-src');
         if(!src)return;
+        if(current && currentBtn===this){
+          current.pause();current=null;currentBtn=null;
+          return;
+        }
         if(current){current.pause();current=null;}
         current=new Audio(src);
+        currentBtn=this;
+        current.addEventListener('ended',function(){current=null;currentBtn=null;});
         current.play().catch(function(){});
       });
     });
@@ -566,7 +593,7 @@ def build_page(sb, property_id: str) -> dict:
 {faq_html}
 {footer_html}
 {lightbox_html}
-{replay_js}
+{hero_video_js}
 {audio_js}
 {growthbook_html}
 </body>
