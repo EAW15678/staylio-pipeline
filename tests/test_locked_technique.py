@@ -31,21 +31,19 @@ def test_locked_prompt_template_has_placeholder():
     assert "{content_motion}" in _LOCKED_PROMPT_TEMPLATE
 
 
-def test_locked_prompt_template_suppresses_wobble():
-    """Template explicitly suppresses handheld wobble."""
+def test_locked_prompt_template_positive_only():
+    """PHASE0-1: Template uses positive phrasing only — no negatives.
+    Runway documents negatives as producing opposite results."""
     t = _LOCKED_PROMPT_TEMPLATE.lower()
-    assert "wobble" in t
-    assert "shake" in t
-    assert "tripod" in t
+    assert "locked-off" in t or "still" in t, "Must state camera is still (positive)"
+    assert "does not move" not in t, "No negative phrasing"
+    assert "wobble" not in t, "No wobble negatives"
 
 
 def test_locked_prompt_template_locks_camera():
-    """Template states camera does not move."""
+    """Template states camera is still using positive phrasing."""
     t = _LOCKED_PROMPT_TEMPLATE.lower()
-    assert "does not move" in t
-    assert "pan" in t
-    assert "tilt" in t
-    assert "zoom" in t
+    assert "still" in t, "Must state camera is still"
 
 
 def test_locked_prompt_fills_content_motion():
@@ -54,7 +52,7 @@ def test_locked_prompt_fills_content_motion():
         content_motion="Pool water ripples with reflected sunlight."
     )
     assert "Pool water ripples" in filled
-    assert "does not move" in filled
+    assert "still" in filled.lower()
 
 
 # ── Text constraint with technique ────────────────────────────────────

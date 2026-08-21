@@ -49,20 +49,21 @@ RUNWAY_COST = {
 }
 
 # Locked-camera prompt template.
-# Provenance: MOTION-TEST clip 1 (2026-08-14) used this phrasing and Runway
-# held the camera. Erick confirmed: "NEITHER clip showed anything that is not
-# in the source photograph." Wobble suppression added per Erick's ruling.
+# PHASE0-1 (2026-08-21): Rewritten per Runway's own Gen-4 prompting guide.
+# The previous template was ~two-thirds negative phrasing ("does not move",
+# "no wobble", "no camera shake", "no micro-drift", "no oscillation") plus
+# a closing sentence re-describing scene elements ("architecture, railings,
+# structural elements"). Runway documents that negative phrasing "may produce
+# unpredictable or even opposite results" and re-describing image content
+# "reduces motion and produces unexpected results." G78 recorded handheld
+# wobble as an unfixable characteristic of locked — this negative-heavy
+# template is the most plausible cause. G78 reopened pending test.
 #
 # {content_motion} is filled from the beat's motion_prompt — the director
 # describes what should move (water, foliage, fire, etc.).
 _LOCKED_PROMPT_TEMPLATE = (
-    "Completely static camera. The camera does not move, pan, tilt, or zoom. "
-    "The framing stays exactly as it is — perfectly steady, tripod-locked, "
-    "absolutely no handheld wobble, no camera shake, no micro-drift, "
-    "no oscillation of any kind. "
-    "{content_motion} "
-    "All architecture, railings, structural elements, and fixed objects "
-    "remain perfectly motionless."
+    "The locked-off camera remains perfectly still. "
+    "{content_motion}"
 )
 
 
