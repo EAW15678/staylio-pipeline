@@ -38,8 +38,9 @@ def _page_css() -> str:
       inset: 0;
       z-index: 3;
       display: flex;
-      align-items: center;
+      align-items: flex-end;
       justify-content: center;
+      padding-bottom: 2rem;
       pointer-events: none;
     }
     #hero-cta-btn {
