@@ -126,3 +126,26 @@ def test_audio_switch_track():
     # ended handler cleans up
     assert "current.addEventListener('ended'" in html, \
         "Should clean up on track end"
+
+
+# ── Test 5: hero-hear-btn has CSS with position: absolute ────────────────────
+
+def test_hero_hear_btn_has_positioning_css():
+    """The rendered CSS includes a #hero-hear-btn rule with position: absolute,
+    not just the button element in the HTML — the button must be pulled out of
+    the flex flow to be visible."""
+    html = _build_page_with_video()
+
+    # The CSS is in a <style> block in the HTML
+    assert "#hero-hear-btn" in html, "CSS rule for #hero-hear-btn should exist"
+
+    # Extract the CSS rule
+    import re
+    rule_match = re.search(r"#hero-hear-btn\s*\{([^}]+)\}", html)
+    assert rule_match, "Should find a CSS rule block for #hero-hear-btn"
+
+    rule_body = rule_match.group(1)
+    assert "position: absolute" in rule_body, (
+        f"#hero-hear-btn must have position: absolute to escape flex flow, got: {rule_body[:100]}"
+    )
+    assert "z-index:" in rule_body, "Should have z-index to layer above video"

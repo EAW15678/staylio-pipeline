@@ -71,20 +71,27 @@ def _page_css() -> str:
     .hero-cta-text {
       line-height: 1;
     }
-    #hero-replay-btn {
+    /* #hero-replay-btn removed — replaced by #hero-hear-btn (unmute control) */
+    #hero-hear-btn {
       position: absolute;
-      bottom: 24px;
-      right: 24px;
-      z-index: 3;
-      background: rgba(0,0,0,0.45);
-      border: 1px solid rgba(255,255,255,0.3);
-      border-radius: 20px;
+      top: 1.5rem;
+      right: 1.5rem;
+      z-index: 4;
+      background: rgba(255,255,255,0.12);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid rgba(255,255,255,0.35);
+      border-radius: 50px;
       color: #fff;
-      padding: 8px 18px;
-      font-size: 0.85rem;
+      padding: 10px 20px;
+      font-size: 0.9rem;
       font-family: inherit;
       cursor: pointer;
       letter-spacing: 0.02em;
+      transition: background 0.2s;
+    }
+    #hero-hear-btn:hover {
+      background: rgba(255,255,255,0.22);
     }
     .hero-content { position: relative; z-index: 1; padding: 2rem 1.5rem 3rem;
                     max-width: var(--max-width); margin: 0 auto; width: 100%; color: #fff; }
