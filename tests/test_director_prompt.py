@@ -83,61 +83,45 @@ def test_people_guidance_and_no_children():
 
 # ── Test 4: constraint 11 is whole — bug fixed ─────────────────────────────
 
-def test_constraint_11_is_whole():
-    """Constraint 11 contains both the 28-32 range and the narration
-    sentence-sizing rule together. The orphan no longer sits inside
-    constraint 13."""
+def test_constraint_11_has_technique_rule():
+    """Constraint 11 (DIRECTOR-4: renumbered from 14) contains the
+    technique rule including all three techniques and the text-bearing
+    frame guard."""
     prompt = _make_prompt()
 
-    # Find constraint 11
     c11_start = prompt.find("11.")
     assert c11_start > 0, "Constraint 11 must exist"
 
-    # Find constraint 12
-    c12_start = prompt.find("12.")
-    assert c12_start > c11_start, "Constraint 12 must follow 11"
-
-    # The content between 11. and 12. should contain BOTH the duration
-    # range AND the narration sentence rule
-    c11_text = prompt[c11_start:c12_start]
-    assert "28-32" in c11_text, f"Constraint 11 must contain '28-32', got: {c11_text[:100]}"
-    assert "narration" in c11_text.lower() and "sentence" in c11_text.lower(), (
-        f"Constraint 11 must contain narration sentence-sizing rule, got: {c11_text[:200]}"
-    )
-
-    # The orphan must NOT be inside constraint 13
-    c13_start = prompt.find("13.")
-    c14_start = prompt.find("14.")
-    if c13_start > 0 and c14_start > 0:
-        c13_text = prompt[c13_start:c14_start]
-        assert "narration must never be cut off mid-sentence" not in c13_text, \
-            "The narration sentence orphan must be removed from constraint 13"
+    c11_to_end = prompt[c11_start:prompt.find("Return ONLY")]
+    assert '"bounded"' in c11_to_end, "Must list bounded"
+    assert '"locked"' in c11_to_end, "Must list locked"
+    assert '"generative"' in c11_to_end, "Must list generative"
+    assert "Text-bearing" in c11_to_end or "text-bearing" in c11_to_end.lower(), \
+        "Must include text-bearing frame rule"
 
 
 # ── Test 5: all 14 constraints present and unmodified ───────────────────────
 
-def test_all_14_constraints_present():
-    """All 14 original constraints are present."""
+def test_all_11_constraints_present():
+    """All 11 DIRECTOR-4 constraints are present (renumbered from 14)."""
     prompt = _make_prompt()
 
-    # Check each constraint number exists
-    for i in range(1, 15):
+    # Check each constraint number exists (1-11)
+    for i in range(1, 12):
         assert f"{i}." in prompt, f"Constraint {i} must be present"
 
-    # Key constraint content unchanged
+    # Key constraint content
     assert "SELECT frames ONLY" in prompt, "Constraint 1 content"
-    assert "motion_affordance" in prompt, "Constraint 2 content"
-    assert "space_direction" in prompt, "Constraint 3 content"
-    assert "depth_tier" in prompt, "Constraint 4 content"
-    assert "time_of_day_read" in prompt, "Constraint 5 content"
-    assert "grid_region" in prompt, "Constraint 6 content"
-    assert "amenity not on the confirmed" in prompt, "Constraint 7 content"
-    assert "OTA references" in prompt, "Constraint 8 content"
-    assert "guest names" in prompt.lower(), "Constraint 9 content"
-    assert "artist, song, album" in prompt, "Constraint 10 content"
-    assert "narration_voice_id MUST be one of" in prompt, "Constraint 12 content"
-    assert "OPENING RULE" in prompt, "Constraint 13 content"
-    assert "TECHNIQUE PER BEAT" in prompt, "Constraint 14 content"
+    assert "space_direction" in prompt, "Constraint 2 content"
+    assert "depth_tier" in prompt, "Constraint 3 content"
+    assert "amenity not on the confirmed" in prompt, "Constraint 4 content"
+    assert "OTA references" in prompt, "Constraint 5 content"
+    assert "guest names" in prompt.lower(), "Constraint 6 content"
+    assert "artist, song, album" in prompt, "Constraint 7 content"
+    assert "28-36" in prompt, "Constraint 8 content"
+    assert "narration_voice_id MUST be one of" in prompt, "Constraint 9 content"
+    assert "OPENING RULE" in prompt, "Constraint 10 content"
+    assert "TECHNIQUE PER BEAT" in prompt, "Constraint 11 content"
 
 
 # ── Test 6: output JSON schema includes new fields ──────────────────────────
@@ -162,8 +146,8 @@ def test_opening_preference_present():
         "Must state preference for property/setting over feature"
     assert "The ORDER among the three kinds is YOUR judgment" not in prompt, \
         "Old unconstrained judgment line must be removed"
-    assert "Supersedes G65" in prompt, \
-        "Must note the G65 supersede"
+    # G65 supersede note removed in DIRECTOR-4's constraint simplification
+    # — the preference text itself is sufficient
 
 
 # ── Test 8: feature opener still permitted ──────────────────────────────────

@@ -160,21 +160,25 @@ def validate_space_direction(beats: list, obs_map: dict) -> list:
 
 
 def validate_depth_rhythm(beats: list, obs_map: dict) -> list:
-    """No three consecutive beats at the same depth_tier."""
+    """No two consecutive beats at the same depth_tier.
+
+    DIRECTOR-4 (2026-08-21): tightened from three to two consecutive,
+    matching Erick's new constraint 3.
+    """
     violations = []
     sorted_beats = sorted(beats, key=lambda b: b.get("ordinal", 0))
-    for i in range(len(sorted_beats) - 2):
-        tiers, ordinals = [], []
-        for j in range(3):
-            b = sorted_beats[i + j]
-            frame = obs_map.get(b.get("photo_id")) or {}
-            tiers.append(frame.get("depth_tier"))
-            ordinals.append(b.get("ordinal", 0))
-        if tiers[0] and tiers[0] == tiers[1] == tiers[2]:
+    for i in range(len(sorted_beats) - 1):
+        b1 = sorted_beats[i]
+        b2 = sorted_beats[i + 1]
+        f1 = obs_map.get(b1.get("photo_id")) or {}
+        f2 = obs_map.get(b2.get("photo_id")) or {}
+        t1 = f1.get("depth_tier")
+        t2 = f2.get("depth_tier")
+        if t1 and t1 == t2:
             violations.append({
                 "rule": "depth_rhythm",
-                "detail": f"Beats {ordinals}: three consecutive at depth_tier '{tiers[0]}'",
-                "beats": ordinals,
+                "detail": f"Beats {b1.get('ordinal', 0)}-{b2.get('ordinal', 0)}: two consecutive at depth_tier '{t1}'",
+                "beats": [b1.get("ordinal", 0), b2.get("ordinal", 0)],
             })
     return violations
 
@@ -455,10 +459,10 @@ def validate_music_brief_prohibited(direction: dict) -> list:
 
 
 def validate_duration(direction: dict) -> list:
-    """Beat durations must sum to 28-32 seconds (hard range).
+    """Beat durations must sum to 28-36 seconds (hard range).
 
-    The reason: narration must never be cut off mid-sentence.
-    The director sizes beats to fit whole spoken sentences.
+    DIRECTOR-4 (2026-08-21): ceiling widened from 32 to 36, matching
+    Erick's new constraint 8. Narration must never be cut off mid-sentence.
     """
     violations = []
     beats = direction.get("beats") or []
@@ -466,8 +470,8 @@ def validate_duration(direction: dict) -> list:
     if total == 0:
         violations.append({"rule": "duration", "detail": "Total beat duration is 0", "beats": []})
         return violations
-    if total < 28 or total > 32:
-        violations.append({"rule": "duration", "detail": f"Total {total}s outside hard range [28s, 32s]", "beats": []})
+    if total < 28 or total > 36:
+        violations.append({"rule": "duration", "detail": f"Total {total}s outside hard range [28s, 36s]", "beats": []})
     return violations
 
 
@@ -701,11 +705,14 @@ def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest
     """Run all 12 validators and return combined violations."""
     beats = direction.get("beats") or []
     violations = []
-    violations += validate_motion_affordance(beats, obs_map)
+    # DIRECTOR-4 (2026-08-21, Erick's direction): three validators disabled
+    # to test whether constraints — not the brief — produce identical videos.
+    # Functions intact; can be restored by uncommenting.
+    # violations += validate_motion_affordance(beats, obs_map)  # DIRECTOR-4: disabled
     violations += validate_space_direction(beats, obs_map)
     violations += validate_depth_rhythm(beats, obs_map)
-    violations += validate_continuity(beats, obs_map)
-    violations += validate_overlay_placement(direction, obs_map)
+    # violations += validate_continuity(beats, obs_map)  # DIRECTOR-4: disabled
+    # violations += validate_overlay_placement(direction, obs_map)  # DIRECTOR-4: disabled
     violations += validate_amenity_references(direction, amenity_names)
     violations += validate_no_ota(direction)
     violations += validate_no_guest_names(direction, guest_names)
@@ -1179,21 +1186,27 @@ a violation sends this direction back for revision. They are a floor,
 not the brief — everything above is where the film actually gets made.
 
 1. SELECT frames ONLY from the candidate list above. Use photo_id to reference.
-2. Each beat's requested_motion MUST appear in that frame's motion_affordance list.
-3. No consecutive beats whose space_direction fights (left>right or right>left).
-4. No three consecutive beats at the same depth_tier.
-5. time_of_day_read must be consistent — no midday>night jump without an intent note.
-6. Overlay grid_region MUST come from that frame's negative_space.
-7. Do NOT reference any amenity not on the confirmed list.
-8. NO OTA references (Airbnb, VRBO, Booking.com, etc.) anywhere.
-9. NO guest names in narration_script or overlays — not in any form.
-10. Music brief: NO artist, song, album, publisher, or label names.
-11. Beat duration_seconds MUST sum to 28-32 seconds (hard range).
-    Narration must never be cut off mid-sentence. Size beats to fit whole
-    spoken sentences, not the reverse.
-12. narration_voice_id MUST be one of the voice_ids from AVAILABLE NARRATOR
-    VOICES above. Choose the voice that best serves the vibe and narration tone.
-13. THE OPENING RULE: Beat 1 MUST open on one of three kinds of shot:
+
+2. No consecutive beats whose space_direction fights (left>right or right>left).
+
+3. No two consecutive beats at the same depth_tier.
+
+4. Do NOT reference any amenity not on the confirmed list.
+
+5. NO OTA references (Airbnb, VRBO, Booking.com, etc.) anywhere.
+
+6. NO guest names in narration_script or overlays — not in any form.
+
+7. Music brief: NO artist, song, album, publisher, or label names.
+   No lyrics in music to compete with narration.
+
+8. Beat duration_seconds MUST sum to 28-36 seconds (hard range).
+   Narration must never be cut off mid-sentence.
+
+9. narration_voice_id MUST be one of the voice_ids from AVAILABLE NARRATOR
+   VOICES above. Choose the voice that best serves the vibe and narration tone.
+
+10. THE OPENING RULE: Beat 1 MUST open on one of three kinds of shot:
     - "property" — the property itself, read as a whole (Exterior section)
     - "setting" — what situates the property (a frame with is_setting=true)
     - "feature" — an EXTERIOR standout feature (Pool, deck, rooftop, view)
@@ -1208,9 +1221,6 @@ not the brief — everything above is where the film actually gets made.
     photograph in the set. This is a preference you exercise judgment on,
     not a hard rule: a feature opener remains permitted and is not a
     violation.
-    (Supersedes G65's "ORDER is the DIRECTOR'S judgment" — Erick narrowed
-    this 2026-08-21. Property/setting preferred over feature. Choice
-    between property and setting remains the director's judgment.)
     You MUST declare opening_type in the output JSON.
     If the opener is a frame below 768px wide (a weak opener), assign ONLY
     "push_in" as its requested_motion — no parallax, no pans.
@@ -1223,14 +1233,12 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
   If narration_provenance is "guest_book", narration_script must use whole
   source sentences only (validated deterministically).
 
-14. TECHNIQUE PER BEAT: each beat has a "technique" field:
+11. TECHNIQUE PER BEAT: each beat has a "technique" field:
     - "bounded" (DEFAULT): camera pans/tilts/zooms across the still photo.
       $0 per clip. No content animation. Use for MOST beats.
-    - "locked": camera is locked, Runway animates content ONLY (water
-      rippling, fire flickering, foliage swaying). Costs Runway rates.
-      Use ONLY for frames where real life would make a visible difference.
-      You MUST state in motion_prompt what you expect to move and why.
-    - "generative": full Runway generation with camera movement. Legacy.
+    - "locked": camera is locked, Runway animates content ONLY (examples;
+      water rippling, fire flickering, foliage swaying). Costs Runway rates.
+    - "generative": full Runway generation with camera movement.
     Text-bearing frames (contains_text=true) MUST be technique="bounded"
     with requested_motion="push_in". Never locked, never generative.
 

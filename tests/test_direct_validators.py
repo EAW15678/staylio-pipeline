@@ -108,10 +108,10 @@ def test_depth_rhythm_pass():
 
 
 def test_depth_rhythm_fail():
+    # DIRECTOR-4: now flags TWO consecutive same-tier (tightened from three)
     beats = [
         {"ordinal": 1, "photo_id": "photo-A"},  # foreground
-        {"ordinal": 2, "photo_id": "photo-D"},  # foreground
-        {"ordinal": 3, "photo_id": "photo-A"},  # foreground — 3 in a row!
+        {"ordinal": 2, "photo_id": "photo-D"},  # foreground — 2 in a row!
     ]
     violations = validate_depth_rhythm(beats, OBS_MAP)
     assert len(violations) == 1
