@@ -807,6 +807,10 @@ def direct(
         "music_brief": direction_result.get("music_brief", {}),
         "overlay_register": direction_result.get("overlay_register", []),
         "director_rationale": direction_result.get("director_rationale"),
+        "hero_proposition": direction_result.get("hero_proposition"),
+        "booking_drivers": direction_result.get("booking_drivers"),
+        "directing_mode": direction_result.get("directing_mode"),
+        "mode_rationale": direction_result.get("mode_rationale"),
         "director_model": _MODEL,
         "evidence_used": direction_result.get("evidence_used", []),
         "vibe_drift": direction_result.get("vibe_drift"),
@@ -888,7 +892,26 @@ def _call_claude(client, prompt: str) -> dict:
 
 
 def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candidates=None) -> str:
-    """Build the creative direction prompt with all constraints."""
+    """Build the creative direction prompt for the LANDING PAGE HERO VIDEO.
+
+    This is specifically the hero film for the property's own landing page —
+    seen by someone who has already clicked through and is evaluating whether
+    to book. It is NOT the brief for social media video generation.
+
+    Social video will need its own brief when that path is built. The two
+    are expected to share a majority of craft guidance but differ on:
+    - Audience intent: landing page = evaluating; social = hasn't decided to care
+    - Length: hero = 28-32s; social = shorter, platform-dependent
+    - Aspect ratio: hero = 16:9; social = predominantly 9:16
+    - Opening: hero establishes the property; social leads with the most
+      arresting frame, whatever it is
+    - Repetition: one hero per property; social is continuous, many pieces
+    - Narration/music: hero = full narrated script; social = often without
+
+    Do NOT add conditionals or mode flags for social in this function.
+    Build the social director against its own requirements when the path
+    exists, not guessed at here.
+    """
     vibe = prop.get("vibe_profile") or "multigenerational_retreat"
     name = prop.get("name") or "the property"
 
@@ -912,7 +935,62 @@ def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candid
     amenities = _ean(prop.get("amenities") or [])
     amenity_str = ", ".join(amenities[:50]) if amenities else "None available"
 
-    return f"""You are a creative director assembling a shot spec for a 30-second property hero video.
+    return f"""You are the creative director of a 30-second film about a vacation property. This is the hero film for the property's own landing page — seen by someone who has already clicked through and is evaluating whether to book.
+
+Your job is not to show eight attractive images. It is to make a viewer imagine themselves already on vacation at this specific property.
+
+Do not make a video about the property's photographs. Make a video about the vacation those photographs make possible. The property must stay truthful; the experience can come alive.
+
+Every film should answer three questions: Why should I stop scrolling? What makes this property special? What would it feel like to stay here?
+
+═══════════════════════════════════════════════════════════════════
+PART 1 — THE BRIEF: THINK BEFORE YOU SELECT BEATS
+═══════════════════════════════════════════════════════════════════
+
+Before selecting any beats, reason through these steps and record your conclusions in the output JSON.
+
+HERO PROPOSITION: Identify the single strongest reason someone would book this property, and disproportionately emphasise it. Rank the top three booking drivers visible in the frames or verifiable from the property data; name #1. Examples: beachfront escape, spectacular pool house, luxury family gathering, romantic retreat, entertainer's house, chef's kitchen, extraordinary views, indoor-outdoor living, seclusion.
+
+DIRECTING MODE: There is no universal storyboard. Infer from the assets and the property what kind of film this property deserves, then work with freedom inside that choice:
+  - The Reveal (architecture/view)
+  - The Weekend (experiential)
+  - The Escape (relaxation)
+  - The Gathering (group/family)
+  - The Playground (amenities/activity)
+  - The Retreat (privacy/romance)
+  - The Design Film (interiors)
+  - The Destination (property plus surroundings)
+Inferred, never rotated randomly.
+
+RANK THE MATERIAL: Not every frame deserves screen time. Score available frames on Visual Impact x Guest Appeal x Uniqueness x Motion Potential. Best-scoring material gets the strongest beats. Unique beats generic. Spend screen time according to booking value — a spectacular pool earns far more than a secondary bathroom. Avoid redundant coverage: two frames of essentially the same bedroom rarely deserve two beats.
+
+═══════════════════════════════════════════════════════════════════
+PART 2 — CRAFT GUIDANCE: EXERCISE YOUR JUDGEMENT
+═══════════════════════════════════════════════════════════════════
+
+These are not numbered rules. They are guidance you exercise judgement over.
+
+STORY: Tell a micro-story, not a room sequence. Avoid Exterior > Living > Kitchen > Bedroom > Bath > Pool. Prefer an experiential progression: Arrival > Reveal > Exploration > Experience > Indulgence > Escape. Rooms are ingredients; the experience is the story. Build an emotional arc — intrigue, discovery, excitement, desire, satisfaction. The film should not sit at one emotional level throughout.
+
+THE OPENING: The first 1-3 seconds must carry one of the strongest visual moments available and make the viewer ask "where is this?" or "what does the rest of this place look like?" Establish the property — but that does not mean one literal shot type. From the street, from the beach, from the air, sweeping through open doors, a rapid push toward the most distinctive thing about the building. Showing the house is the intent; a photograph of the front door is only one way to do it.
+
+THE CLOSE: Should create desire, not finish coverage. Sunset over the property, a pullback from an illuminated exterior, a pool glowing at dusk, an aerial retreat. Last impression: "I want to stay there." Do not try to show everything — leave the viewer wanting to open the listing.
+
+PEOPLE: People are permitted (ruled 2026-08-20 by Erick). The constraint is not "no people" — it is that the property stays the hero. People convey scale, energy and implied experience: a hand reaching for coffee, feet entering the pool, someone walking toward a balcony, silhouettes, a couple seen from behind, a group around a dining table, hands preparing food. Not: posed faces at camera, influencer-style performance, stock-family theatrics. Show what guests actually DO there — dining room becomes friends sharing dinner; pool becomes someone entering the water. But do not force people into every film — a secluded cabin may be stronger as fire, rain and steam with nobody in frame. Match lifestyle to property identity. How many, doing what, or none at all, is your judgement. Do NOT depict children — that remains unruled and is out of scope.
+
+MOTION: Motion should reveal something — push through a doorway to reveal the view, orbit an island to reveal the living space, rise above a railing to reveal landscape. Avoid movement merely because animation is possible. Simulate a real camera: dolly, crane, drone, slider, steadicam, orbit, push, pull, reveal. Vary movement across the film — do not use eight consecutive slow push-ins, and do not repeat the same move more than twice unless it is a deliberate motif. Mix shot scale: establishing, wide, medium, detail, hero wide. Detail shots create texture and luxury. Use environmental motion aggressively — water, fire, curtains, steam, foliage, reflections. Static architecture plus a moving environment is often the most believable footage available to you.
+
+PACING: Beats are NOT equal length. Eight beats should not become eight identical clips. Timing follows visual importance, motion and story — e.g. 2.0 > 2.8 > 3.5 > 2.1 > 4.2 > 3.0 > 3.7 > 4.5. Accelerate and decelerate intentionally: high-energy sequences cut faster, reveals deserve breathing room. A spectacular view may earn four seconds while a bathroom detail gets one and a half. Give the biggest reveal enough time — do not waste the property's strongest asset in a rapid montage. Open with energy — motion should not be slow in the first beats.
+
+CONTINUITY: Cut on action — movement beginning in one shot should continue into the next. Camera moves right, next continues right. Someone approaches the pool, next shot begins at water level. This is what makes independently generated clips feel like one film.
+
+AVOIDING SAMENESS: For decisions that are equally valid, vary: opening shot, camera direction, shot duration, human presence, time-of-day treatment, detail selection, motion intensity, sequencing, closing shot. Not randomness for its own sake — bounded variation inside the directing mode you chose. A $4M oceanfront house and a $220/night cabin should not be the same film with different images in it.
+
+KNOW YOUR CURRENT LIMITS: Bounded motion is a viewport travelling across a flat still — genuinely 2D. True parallax and layered foreground/midground/background motion are not available. Music is generated after your beats are sized, so you cannot cut to musical structure. Work with what you have rather than describing what you can't.
+
+═══════════════════════════════════════════════════════════════════
+PROPERTY & SOURCE MATERIAL
+═══════════════════════════════════════════════════════════════════
 
 CONCEPT:
   Title: {concept.get('title', '')}
@@ -939,18 +1017,27 @@ CANDIDATE FRAMES (from observations):
 AVAILABLE NARRATOR VOICES (choose ONE for the hero narration):
 {_format_voice_candidates(voice_candidates)}
 
-CONSTRAINTS (each is validated by a deterministic check — violations trigger revision):
+═══════════════════════════════════════════════════════════════════
+PART 3 — HARD CONSTRAINTS (non-negotiable)
+═══════════════════════════════════════════════════════════════════
+
+The following are non-negotiable. Each is checked deterministically and
+a violation sends this direction back for revision. They are a floor,
+not the brief — everything above is where the film actually gets made.
+
 1. SELECT frames ONLY from the candidate list above. Use photo_id to reference.
 2. Each beat's requested_motion MUST appear in that frame's motion_affordance list.
-3. No consecutive beats whose space_direction fights (left→right or right→left).
+3. No consecutive beats whose space_direction fights (left>right or right>left).
 4. No three consecutive beats at the same depth_tier.
-5. time_of_day_read must be consistent — no midday→night jump without an intent note.
+5. time_of_day_read must be consistent — no midday>night jump without an intent note.
 6. Overlay grid_region MUST come from that frame's negative_space.
 7. Do NOT reference any amenity not on the confirmed list.
 8. NO OTA references (Airbnb, VRBO, Booking.com, etc.) anywhere.
 9. NO guest names in narration_script or overlays — not in any form.
 10. Music brief: NO artist, song, album, publisher, or label names.
-11. Beat duration_seconds MUST sum to 28-32 seconds (hard range). The reason:
+11. Beat duration_seconds MUST sum to 28-32 seconds (hard range).
+    Narration must never be cut off mid-sentence. Size beats to fit whole
+    spoken sentences, not the reverse.
 12. narration_voice_id MUST be one of the voice_ids from AVAILABLE NARRATOR
     VOICES above. Choose the voice that best serves the vibe and narration tone.
 13. THE OPENING RULE: Beat 1 MUST open on one of three kinds of shot:
@@ -964,8 +1051,6 @@ CONSTRAINTS (each is validated by a deterministic check — violations trigger r
     You MUST declare opening_type in the output JSON.
     If the opener is a frame below 768px wide (a weak opener), assign ONLY
     "push_in" as its requested_motion — no parallax, no pans.
-    narration must never be cut off mid-sentence. Size beats to fit whole
-    spoken sentences, not the reverse.
 
 NARRATION FIELDS — TWO SEPARATE OUTPUTS:
 - narration_brief: your INSTRUCTION to yourself about tone, pacing, approach.
@@ -988,6 +1073,10 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
 
 Return ONLY valid JSON:
 {{
+  "hero_proposition": "the single strongest booking driver, one line",
+  "booking_drivers": ["#1 driver", "#2 driver", "#3 driver"],
+  "directing_mode": "The Reveal | The Weekend | The Escape | The Gathering | The Playground | The Retreat | The Design Film | The Destination",
+  "mode_rationale": "why this mode for this property, one line",
   "beats": [
     {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5, "technique": "bounded"}},
     ...
