@@ -518,14 +518,17 @@ def build_page(sb, property_id: str) -> dict:
     hb.textContent='\\uD83D\\uDD0A Hear me';
     hb.setAttribute('aria-label','Unmute and play video with sound');
     v.parentElement.parentElement.appendChild(hb);
+    var justUnmuted=false;
     hb.addEventListener('click',function(){
       v.muted=false;
       v.currentTime=0;
+      justUnmuted=true;
       v.play();
       hb.textContent='\\uD83D\\uDD07 Mute';
     });
     v.addEventListener('timeupdate',function(){
-      if(!v.muted && v.currentTime<0.1 && v.duration>0){
+      if(justUnmuted && v.currentTime>0.5){justUnmuted=false;}
+      if(!justUnmuted && !v.muted && v.currentTime<0.1 && v.duration>0){
         v.muted=true;
         hb.textContent='\\uD83D\\uDD0A Hear me';
       }
