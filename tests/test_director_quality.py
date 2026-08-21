@@ -11,7 +11,8 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, ".")
 
 from skills.direct import (
-    _assess_quality, _build_prompt,
+    _assess_quality, _build_prompt, _determine_status,
+    _alert_on_quality_shortfalls,
     _QUALITY_MIN_DIMENSION, _QUALITY_MIN_AVERAGE, _QUALITY_DIMENSIONS,
 )
 
@@ -121,86 +122,67 @@ def test_shortfall_triggers_revision():
     assert "Weak opening" in revision_issues[0]["detail"]
 
 
-# ── Test 7: exhausted attempts → escalate_halt called AND returns ok ────────
+# ── Test 7: _alert_on_quality_shortfalls calls escalate_halt ─────────────────
 
 def test_alert_and_ship():
-    """With attempts exhausted, escalate_halt IS called AND the skill
-    would still return ok with a direction_id."""
+    """_alert_on_quality_shortfalls calls escalate_halt with the correct
+    queue_type and reason_code, and returns normally."""
     shortfalls = [
         {"dimension": "hook_strength", "score": 4, "threshold": 6,
          "reason": "below_minimum", "director_says": "Weak opening"},
     ]
 
-    # Simulate the alert-and-ship logic from direct()
     import skills.contract
     with patch("skills.contract.escalate_halt") as mock_halt:
-        # This is what direct() does after the loop
-        if shortfalls:
-            from skills.contract import escalate_halt
-            shortfall_detail = "; ".join(
-                f"{s['dimension']}: {s['score']}/{s['threshold']} — {s['director_says']}"
-                for s in shortfalls
-            )
-            escalate_halt(
-                MagicMock(), "PROP-1",
-                queue_type="content_review",
-                reason_code="quality_below_threshold",
-                title="Direction quality below threshold",
-                detail=shortfall_detail,
-            )
+        _alert_on_quality_shortfalls(
+            MagicMock(), "PROP-1", {"name": "Test"}, shortfalls,
+            run_id="RUN-1", attempts=3)
 
-        assert mock_halt.called, "escalate_halt must be called on shortfalls"
-        assert mock_halt.call_args.kwargs["queue_type"] == "content_review"
-
-    # Status would still be "approved" if no validator violations
-    all_violations = []
-    status = "draft" if all_violations else "approved"
-    assert status == "approved", "Quality shortfalls must NOT change status"
+    assert mock_halt.called, "escalate_halt must be called on shortfalls"
+    assert mock_halt.call_args.kwargs["queue_type"] == "content_review"
+    assert mock_halt.call_args.kwargs["reason_code"] == "quality_below_threshold"
+    assert "hook_strength" in mock_halt.call_args.kwargs["detail"]
 
 
-# ── Test 8: shortfalls not in rejection_reasons, not in status ──────────────
+# ── Test 8: _determine_status takes only violations, not shortfalls ─────────
 
-def test_shortfalls_separate_from_violations():
-    """Quality shortfalls do not appear in rejection_reasons and do not
-    alter status."""
-    all_violations = []  # no validator violations
-    quality_shortfalls = [{"dimension": "hook_strength", "score": 4,
-                           "threshold": 6, "reason": "below_minimum",
-                           "director_says": "Weak"}]
+def test_shortfalls_cannot_reach_status():
+    """_determine_status takes only validator violations as input.
+    Quality shortfalls cannot reach it by construction — the function
+    signature does not accept them. This is structural proof, not a
+    value assertion."""
+    import inspect
 
-    # Status determination (from direct.py)
-    status = "draft" if all_violations else "approved"
-    rejection_reasons = all_violations if all_violations else None
+    # Structural: _determine_status takes ONLY all_violations
+    sig = inspect.signature(_determine_status)
+    params = list(sig.parameters.keys())
+    assert params == ["all_violations"], (
+        f"_determine_status must take only 'all_violations', got: {params}"
+    )
 
-    assert status == "approved", "Quality shortfalls must not change status"
-    assert rejection_reasons is None, "Quality shortfalls must not appear in rejection_reasons"
+    # Behavioural: no violations → approved
+    assert _determine_status([]) == "approved"
 
-    # The insert would have quality_shortfalls as a SEPARATE field
-    insert_data = {
-        "rejection_reasons": rejection_reasons,
-        "quality_shortfalls": quality_shortfalls,
-        "status": status,
-    }
-    assert insert_data["status"] == "approved"
-    assert insert_data["rejection_reasons"] is None
-    assert insert_data["quality_shortfalls"] is not None
+    # Behavioural: with violations → draft
+    assert _determine_status([{"rule": "test", "detail": "x"}]) == "draft"
+
+    # The key point: there is no way to pass quality_shortfalls to this
+    # function — it has no parameter for them. The separation is enforced
+    # by the function's interface, not by a conditional inside it.
 
 
-# ── Test 9: escalate_halt failure doesn't break direction ───────────────────
+# ── Test 9: _alert_on_quality_shortfalls never raises ────────────────────────
 
 def test_alert_failure_doesnt_break():
-    """If escalate_halt raises, the direction still returns ok."""
+    """If escalate_halt raises inside _alert_on_quality_shortfalls,
+    the function returns normally — never propagates the exception."""
+    shortfalls = [
+        {"dimension": "hook_strength", "score": 4, "threshold": 6,
+         "reason": "below_minimum", "director_says": "Weak"},
+    ]
+
     import skills.contract
     with patch("skills.contract.escalate_halt", side_effect=RuntimeError("alert down")):
-        # Simulate the try/except from direct()
-        try:
-            from skills.contract import escalate_halt
-            escalate_halt(MagicMock(), "PROP-1",
-                          queue_type="content_review",
-                          reason_code="quality_below_threshold",
-                          title="test", detail="test")
-        except Exception:
-            pass  # "A failed alert must never break a successful direction"
-
-    # If we got here without raising, the direction would continue
-    assert True, "Alert failure must not break the direction"
+        # Must not raise — the try/except inside catches it
+        _alert_on_quality_shortfalls(
+            MagicMock(), "PROP-1", {"name": "Test"}, shortfalls)

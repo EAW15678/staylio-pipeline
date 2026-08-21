@@ -643,6 +643,60 @@ def _assess_quality(direction_result: dict) -> list:
     return shortfalls
 
 
+def _determine_status(all_violations: list) -> str:
+    """Determine direction status from validator violations ONLY.
+
+    Quality shortfalls are deliberately excluded from this function's
+    input — they cannot reach status by construction. This is the
+    structural proof that Erick's ruling holds: shortfalls alert but
+    never change status. Extracted so this separation is testable
+    against the real code.
+    """
+    if all_violations:
+        return "draft"
+    return "approved"
+
+
+def _alert_on_quality_shortfalls(sb, property_id, prop_data, shortfalls,
+                                  run_id=None, attempts=1):
+    """Surface quality shortfalls for review. NEVER raises, NEVER alters
+    status — the direction ships either way.
+
+    Erick's ruling, option C, 2026-08-21: alert AND ship. Not halt-only
+    (property could get stuck with no video), not ship-silently (problems
+    disappear).
+
+    ⚠️ This is a deliberate, narrow exception to the standing rule that
+    "quality annotations (needs_review) do NOT trigger alerts" (from
+    escalate_halt's docstring). Erick ruled this one case an exception.
+    Do not revert as a mistake — the tracker is updated.
+
+    Extracted so this ruling is testable against the real code path
+    rather than a simulation of it.
+    """
+    logger.info("[direct] Quality shortfalls at final attempt: %s",
+                [(s["dimension"], s["score"]) for s in shortfalls])
+    try:
+        from skills.contract import escalate_halt
+        shortfall_detail = "; ".join(
+            f"{s['dimension']}: {s['score']}/{s['threshold']} — {s['director_says']}"
+            for s in shortfalls
+        )
+        escalate_halt(
+            sb, property_id,
+            queue_type="content_review",
+            reason_code="quality_below_threshold",
+            title=f"Direction quality below threshold for {prop_data.get('name', property_id[:12])}",
+            detail=f"Quality shortfalls after {attempts} attempts: {shortfall_detail}",
+            property_name=prop_data.get("name"),
+            run_id=run_id,
+            step_name="direct",
+        )
+    except Exception as alert_exc:
+        # A failed alert must never break a successful direction
+        logger.warning("[direct] Quality alert failed: %s — continuing", str(alert_exc)[:100])
+
+
 def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest_texts: list, amenity_names: list, photo_widths: dict = None) -> list:
     """Run all 12 validators and return combined violations."""
     beats = direction.get("beats") or []
@@ -849,47 +903,17 @@ def direct(
         return SkillResult.failed(reason="Director returned no result", attempted=1, succeeded=0, failed_count=1, error_class="vendor")
 
     # ── Determine status ────────────────────────────────────────────────
-    # Quality shortfalls alone must NOT change status — they are a soft
-    # signal, not rule-breaking. Only validator violations affect status.
+    # Quality shortfalls are deliberately excluded — _determine_status
+    # takes only validator violations. See its docstring for why.
+    status = _determine_status(all_violations)
     if all_violations:
-        status = "draft"  # Persisted with violations — not approved
         logger.warning("[direct] Persisting with %d violations after %d attempts", len(all_violations), attempt + 1)
-    else:
-        status = "approved"
 
-    # ── Quality alert — alert AND ship (Erick's ruling, option C) ──────
-    # When quality scores fall below threshold after all attempts: surface
-    # for review AND publish anyway. Not halt-only (property could get stuck
-    # with no video), not ship-silently (current default where problems
-    # disappear).
-    #
-    # ⚠️ This is a deliberate, narrow exception to the standing rule that
-    # "quality annotations (needs_review) do NOT trigger alerts" (from
-    # escalate_halt's docstring). Erick ruled this one case an exception
-    # on 2026-08-21. Do not revert as a mistake — the tracker is updated.
     final_shortfalls = quality_shortfalls if quality_shortfalls else None
     if final_shortfalls:
-        logger.info("[direct] Quality shortfalls at final attempt: %s",
-                    [(s["dimension"], s["score"]) for s in final_shortfalls])
-        try:
-            from skills.contract import escalate_halt
-            shortfall_detail = "; ".join(
-                f"{s['dimension']}: {s['score']}/{s['threshold']} — {s['director_says']}"
-                for s in final_shortfalls
-            )
-            escalate_halt(
-                sb, property_id,
-                queue_type="content_review",
-                reason_code="quality_below_threshold",
-                title=f"Direction quality below threshold for {prop_data.get('name', property_id[:12])}",
-                detail=f"Quality shortfalls after {attempt + 1} attempts: {shortfall_detail}",
-                property_name=prop_data.get("name"),
-                run_id=run_id,
-                step_name="direct",
-            )
-        except Exception as alert_exc:
-            # A failed alert must never break a successful direction
-            logger.warning("[direct] Quality alert failed: %s — continuing", str(alert_exc)[:100])
+        _alert_on_quality_shortfalls(
+            sb, property_id, prop_data, final_shortfalls,
+            run_id=run_id, attempts=attempt + 1)
 
     # ── Compute input hash ──────────────────────────────────────────────
     hash_input = json.dumps({
