@@ -37,6 +37,21 @@ logger = logging.getLogger(__name__)
 _MODEL = "claude-sonnet-4-6"
 _MAX_REVISION_ATTEMPTS = 2
 
+# Quality self-assessment thresholds — first guesses, need tuning against
+# real runs. Nobody has ever seen what scores this director actually produces.
+_QUALITY_MIN_DIMENSION = 6   # any single dimension below this = shortfall
+_QUALITY_MIN_AVERAGE = 7.0   # mean across all nine below this = shortfall
+
+# The nine quality dimensions. "Template risk" is deliberately excluded —
+# a director looking at one property has no idea what the previous twenty
+# films looked like, so it cannot self-assess cross-property sameness.
+# That needs comparison against prior directions, a different mechanism.
+_QUALITY_DIMENSIONS = [
+    "hook_strength", "property_differentiation", "experience",
+    "motion_quality", "feature_prioritisation", "visual_variety",
+    "emotional_arc", "authenticity", "booking_desire",
+]
+
 # Weak-frame threshold: frames below this width (in pixels) receive
 # constrained motion when used as the opener (slow push-in only).
 # Basis: Runway Gen-4 produces acceptable results at 768px+ but
@@ -578,6 +593,56 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
     return violations
 
 
+def _assess_quality(direction_result: dict) -> list:
+    """Assess the director's self-reported quality scores against thresholds.
+
+    Returns a list of shortfall dicts, each naming the dimension, its score,
+    and the director's own stated reason. Empty list = no shortfalls.
+
+    Self-scoring is a soft signal — a model grading its own work grades
+    generously. This may well return 8s across the board on a film Erick
+    would call boring. The value is partly that the act of scoring changes
+    what the director produces upstream — plausible, but unproven. Do not
+    present this as a quality guarantee.
+    """
+    scores = direction_result.get("quality_self_score") or {}
+    if not scores:
+        return []
+
+    shortfalls = []
+    total = 0
+    count = 0
+
+    for dim in _QUALITY_DIMENSIONS:
+        entry = scores.get(dim) or {}
+        score = entry.get("score", 0) if isinstance(entry, dict) else 0
+        why = entry.get("why", "") if isinstance(entry, dict) else ""
+        total += score
+        count += 1
+
+        if score < _QUALITY_MIN_DIMENSION:
+            shortfalls.append({
+                "dimension": dim,
+                "score": score,
+                "threshold": _QUALITY_MIN_DIMENSION,
+                "reason": "below_minimum",
+                "director_says": why,
+            })
+
+    if count > 0:
+        avg = total / count
+        if avg < _QUALITY_MIN_AVERAGE:
+            shortfalls.append({
+                "dimension": "_average",
+                "score": round(avg, 2),
+                "threshold": _QUALITY_MIN_AVERAGE,
+                "reason": "average_below_minimum",
+                "director_says": f"Mean {avg:.1f} across {count} dimensions",
+            })
+
+    return shortfalls
+
+
 def _run_all_validators(direction: dict, obs_map: dict, guest_names: list, guest_texts: list, amenity_names: list, photo_widths: dict = None) -> list:
     """Run all 12 validators and return combined violations."""
     beats = direction.get("beats") or []
@@ -730,13 +795,22 @@ def direct(
 
     direction_result = None
     all_violations = []
+    quality_shortfalls = []
     attempt = 0
 
     for attempt in range(_MAX_REVISION_ATTEMPTS + 1):
         if attempt == 0:
             direction_result = _call_director(client, concept, frames, prop_data, owner_ctx, guest_evidence, voice_candidates)
         else:
-            direction_result = _call_revision(client, concept, frames, prop_data, owner_ctx, guest_evidence, voice_candidates, direction_result, all_violations)
+            # Build revision issues from both violations AND quality shortfalls
+            revision_issues = list(all_violations)
+            for sf in quality_shortfalls:
+                revision_issues.append({
+                    "rule": f"quality_{sf['dimension']}",
+                    "detail": f"Self-score {sf['score']}/{sf['threshold']} — {sf['director_says']}",
+                    "beats": [],
+                })
+            direction_result = _call_revision(client, concept, frames, prop_data, owner_ctx, guest_evidence, voice_candidates, direction_result, revision_issues)
 
         if not direction_result:
             break
@@ -755,13 +829,19 @@ def direct(
                     "beats": [],
                 })
 
-        if not all_violations:
-            logger.info("[direct] Attempt %d: all validators passed", attempt + 1)
+        # Assess quality (separate from violations — shortfalls do not
+        # change status or appear in rejection_reasons)
+        quality_shortfalls = _assess_quality(direction_result)
+
+        needs_revision = bool(all_violations) or bool(quality_shortfalls)
+        if not needs_revision:
+            logger.info("[direct] Attempt %d: all validators passed, quality OK", attempt + 1)
             break
         else:
-            logger.info("[direct] Attempt %d: %d violations, %s",
-                       attempt + 1, len(all_violations),
-                       [v["rule"] for v in all_violations])
+            logger.info("[direct] Attempt %d: %d violations, %d quality shortfalls, rules=%s, quality=%s",
+                       attempt + 1, len(all_violations), len(quality_shortfalls),
+                       [v["rule"] for v in all_violations],
+                       [s["dimension"] for s in quality_shortfalls])
 
     if not direction_result:
         complete_step(sb, step_id, status="failed", error_message="Director returned no result")
@@ -769,11 +849,47 @@ def direct(
         return SkillResult.failed(reason="Director returned no result", attempted=1, succeeded=0, failed_count=1, error_class="vendor")
 
     # ── Determine status ────────────────────────────────────────────────
+    # Quality shortfalls alone must NOT change status — they are a soft
+    # signal, not rule-breaking. Only validator violations affect status.
     if all_violations:
         status = "draft"  # Persisted with violations — not approved
         logger.warning("[direct] Persisting with %d violations after %d attempts", len(all_violations), attempt + 1)
     else:
         status = "approved"
+
+    # ── Quality alert — alert AND ship (Erick's ruling, option C) ──────
+    # When quality scores fall below threshold after all attempts: surface
+    # for review AND publish anyway. Not halt-only (property could get stuck
+    # with no video), not ship-silently (current default where problems
+    # disappear).
+    #
+    # ⚠️ This is a deliberate, narrow exception to the standing rule that
+    # "quality annotations (needs_review) do NOT trigger alerts" (from
+    # escalate_halt's docstring). Erick ruled this one case an exception
+    # on 2026-08-21. Do not revert as a mistake — the tracker is updated.
+    final_shortfalls = quality_shortfalls if quality_shortfalls else None
+    if final_shortfalls:
+        logger.info("[direct] Quality shortfalls at final attempt: %s",
+                    [(s["dimension"], s["score"]) for s in final_shortfalls])
+        try:
+            from skills.contract import escalate_halt
+            shortfall_detail = "; ".join(
+                f"{s['dimension']}: {s['score']}/{s['threshold']} — {s['director_says']}"
+                for s in final_shortfalls
+            )
+            escalate_halt(
+                sb, property_id,
+                queue_type="content_review",
+                reason_code="quality_below_threshold",
+                title=f"Direction quality below threshold for {prop_data.get('name', property_id[:12])}",
+                detail=f"Quality shortfalls after {attempt + 1} attempts: {shortfall_detail}",
+                property_name=prop_data.get("name"),
+                run_id=run_id,
+                step_name="direct",
+            )
+        except Exception as alert_exc:
+            # A failed alert must never break a successful direction
+            logger.warning("[direct] Quality alert failed: %s — continuing", str(alert_exc)[:100])
 
     # ── Compute input hash ──────────────────────────────────────────────
     hash_input = json.dumps({
@@ -815,6 +931,8 @@ def direct(
         "evidence_used": direction_result.get("evidence_used", []),
         "vibe_drift": direction_result.get("vibe_drift"),
         "input_hash": input_hash,
+        "quality_self_score": direction_result.get("quality_self_score"),
+        "quality_shortfalls": final_shortfalls,
         "rejection_reasons": all_violations if all_violations else None,
         "status": status,
         "created_by_agent": "skills/direct",
@@ -964,6 +1082,17 @@ Inferred, never rotated randomly.
 
 RANK THE MATERIAL: Not every frame deserves screen time. Score available frames on Visual Impact x Guest Appeal x Uniqueness x Motion Potential. Best-scoring material gets the strongest beats. Unique beats generic. Spend screen time according to booking value — a spectacular pool earns far more than a secondary bathroom. Avoid redundant coverage: two frames of essentially the same bedroom rarely deserve two beats.
 
+SCORE YOUR OWN WORK: After selecting beats and building the film, honestly assess the result on nine dimensions (1-10 each, with a one-line justification). These scores are checked against thresholds — shortfalls trigger revision. Be honest, not generous.
+  - hook_strength: Would the first two seconds stop someone scrolling?
+  - property_differentiation: Could this film belong to another rental, or is it distinctly THIS property?
+  - experience: Can the viewer imagine being there?
+  - motion_quality: Does this feel filmed rather than animated?
+  - feature_prioritisation: Are the strongest attributes getting the most attention?
+  - visual_variety: Are scale, movement, composition and pacing varied?
+  - emotional_arc: Does the film build toward something?
+  - authenticity: Is everything implied genuinely possible here?
+  - booking_desire: Does this make the property more desirable?
+
 ═══════════════════════════════════════════════════════════════════
 PART 2 — CRAFT GUIDANCE: EXERCISE YOUR JUDGEMENT
 ═══════════════════════════════════════════════════════════════════
@@ -1104,5 +1233,16 @@ Return ONLY valid JSON:
   "director_rationale": "...",
   "evidence_used": [],
   "vibe_drift": null,
+  "quality_self_score": {{
+    "hook_strength": {{"score": 1-10, "why": "one line"}},
+    "property_differentiation": {{"score": 1-10, "why": "one line"}},
+    "experience": {{"score": 1-10, "why": "one line"}},
+    "motion_quality": {{"score": 1-10, "why": "one line"}},
+    "feature_prioritisation": {{"score": 1-10, "why": "one line"}},
+    "visual_variety": {{"score": 1-10, "why": "one line"}},
+    "emotional_arc": {{"score": 1-10, "why": "one line"}},
+    "authenticity": {{"score": 1-10, "why": "one line"}},
+    "booking_desire": {{"score": 1-10, "why": "one line"}}
+  }},
   "target_duration_sec": 30
 }}"""
