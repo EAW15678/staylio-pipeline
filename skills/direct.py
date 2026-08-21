@@ -1144,9 +1144,9 @@ PACING: Beats are NOT equal length. Eight beats should not become eight identica
 
 CONTINUITY: Cut on action — movement beginning in one shot should continue into the next. Camera moves right, next continues right. Someone approaches the pool, next shot begins at water level. This is what makes independently generated clips feel like one film.
 
-AVOIDING SAMENESS: For decisions that are equally valid, vary: opening shot, camera direction, shot duration, human presence, time-of-day treatment, detail selection, motion intensity, sequencing, closing shot. Not randomness for its own sake — bounded variation inside the directing mode you chose. A $4M oceanfront house and a $220/night cabin should not be the same film with different images in it.
+AVOIDING SAMENESS: For decisions that are equally valid, vary: opening shot, camera direction, shot duration, human presence, time-of-day treatment, detail selection, motion intensity, sequencing, closing shot. Not randomness for its own sake — controlled variation inside the directing mode you chose. A $4M oceanfront house and a $220/night cabin should not be the same film with different images in it.
 
-KNOW YOUR CURRENT LIMITS: Bounded motion is a viewport travelling across a flat still — genuinely 2D. True parallax and layered foreground/midground/background motion are not available. Music is generated after your beats are sized, so you cannot cut to musical structure. Work with what you have rather than describing what you can't.
+KNOW YOUR CURRENT LIMITS: You have two ways to create motion. Bounded motion moves a viewport across a flat still — real camera movement, but nothing in the frame itself moves. Locked technique holds the camera and animates the content — this is the only way to put genuine life into a frame. True parallax and layered foreground/midground/background motion are not available. Music is generated after your beats are sized, so you cannot cut to musical structure. Work with what you have rather than describing what you can't.
 
 ═══════════════════════════════════════════════════════════════════
 PROPERTY & SOURCE MATERIAL
@@ -1233,12 +1233,25 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
   If narration_provenance is "guest_book", narration_script must use whole
   source sentences only (validated deterministically).
 
-11. TECHNIQUE PER BEAT: each beat has a "technique" field:
-    - "bounded" (DEFAULT): camera pans/tilts/zooms across the still photo.
-      $0 per clip. No content animation. Use for MOST beats.
-    - "locked": camera is locked, Runway animates content ONLY (examples;
-      water rippling, fire flickering, foliage swaying). Costs Runway rates.
+11. TECHNIQUE PER BEAT: each beat has a "technique" field. Choose per
+    beat based on what the frame actually contains — there is no default.
+    - "bounded": the camera is a viewport travelling across the still
+      photograph. Nothing in the frame moves. $0 per clip.
+    - "locked": the camera holds still and the CONTENT animates — water
+      rippling, a pool surface catching light, fire flickering, foliage
+      and grass moving, steam rising, curtains breathing, clouds
+      drifting. Costs Runway rates. State in motion_prompt exactly what
+      you expect to move.
     - "generative": full Runway generation with camera movement.
+    REACH FOR "locked" ON ANY FRAME WITH GENUINE LIFE IN IT. A pool, the
+    ocean, a fire pit, trees, sky, a hot tub, anything with water or
+    flame or foliage — these are the frames that make a film feel filmed
+    rather than assembled. A film composed entirely of bounded beats is
+    a slideshow, and a slideshow is a FAILED direction regardless of how
+    well it scores on anything else.
+    Bounded is the right choice for frames with nothing moving in them —
+    a made bed, a vanity, an empty room. Use it there deliberately, not
+    as a fallback.
     Text-bearing frames (contains_text=true) MUST be technique="bounded"
     with requested_motion="push_in". Never locked, never generative.
 
@@ -1249,7 +1262,8 @@ Return ONLY valid JSON:
   "directing_mode": "The Reveal | The Weekend | The Escape | The Gathering | The Playground | The Retreat | The Design Film | The Destination",
   "mode_rationale": "why this mode for this property, one line",
   "beats": [
-    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 5, "technique": "bounded"}},
+    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "tilt_up", "motion_prompt": "...", "duration_seconds": 4, "technique": "locked"}},
+    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 3, "technique": "bounded"}},
     ...
   ],
   "opening_type": "property" or "setting" or "feature",
