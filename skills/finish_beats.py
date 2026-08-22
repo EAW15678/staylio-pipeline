@@ -295,6 +295,15 @@ def finish_beats(
             "technique": clip.get("technique"),
         }
 
+        # Skip: already Aleph-finished (this clip IS the finished version)
+        mp = clip.get("motion_params") or {}
+        if mp.get("finishing") == "aleph":
+            report["action"] = "cached"
+            report["reason"] = "already Aleph-finished"
+            beat_reports.append(report)
+            skipped += 1
+            continue
+
         # Skip: text-bearing frame
         obs = obs_map.get(photo_id, {})
         if obs.get("contains_text"):
