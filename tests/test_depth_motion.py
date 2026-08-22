@@ -204,3 +204,136 @@ def test_opening_rule_mutation_proof():
     from skills.direct import _run_all_validators
     val_src = inspect.getsource(_run_all_validators)
     assert "validate_opening_establishes" in val_src, "Opening validator must still be called"
+
+
+# ── Test 11: f81ead38 with thin_railings IS eligible at restrained ────
+
+def test_f81ead38_thin_railings_eligible_restrained():
+    """f81ead38 has thin_railings but is eligible at restrained lateral
+    because the empirical override covers this combination."""
+    from skills.depth_motion import check_depth_eligibility
+
+    result = check_depth_eligibility(
+        photo_id="f81ead38-51f6-5f86-a9bc-85def619a3b0",
+        image_width=3840,
+        image_height=2560,
+        has_depth_map=True,
+        depth_structure="deep",
+        motion_risks=["thin_railings", "water_surface", "straight_architectural_lines"],
+        requested_motion="lateral_right",
+        intensity="restrained",
+    )
+    assert result["eligible"] is True, f"f81ead38 must be eligible, got: {result['reason']}"
+
+
+def test_f81ead38_mutation_proof_blanket_rejection():
+    """If the blanket THIN_STRUCTURE_RISKS rejection is restored
+    (removing EMPIRICAL_RISK_OVERRIDES), f81ead38 must become
+    ineligible — proving the override is doing the work."""
+    from skills.depth_motion import (
+        check_depth_eligibility, EMPIRICAL_RISK_OVERRIDES,
+        PERIPHERAL_THIN_STRUCTURE_RISKS,
+    )
+    # The empirical override for thin_railings must exist
+    assert "thin_railings" in EMPIRICAL_RISK_OVERRIDES, \
+        "thin_railings must have an empirical override"
+    # And thin_railings must be in the peripheral set, not the central set
+    assert "thin_railings" in PERIPHERAL_THIN_STRUCTURE_RISKS, \
+        "thin_railings must be peripheral, not central"
+
+
+# ── Test 12: central thin structures still rejected ───────────────────
+
+def test_central_thin_structures_rejected():
+    """Chandeliers and pendant lights in the centre of frame are
+    rejected — these cross major depth boundaries and smear visibly.
+
+    NOTE: current observation data identifies pendant_lights and
+    chandelier in motion_risk. It does NOT distinguish central vs
+    peripheral placement. This is a known gap — the chandelier in
+    the Phase 3 living-room beat demonstrated the problem, but
+    observations do not carry positional information for thin
+    structures. A future observation improvement should add
+    thin_structure_region (central/peripheral/edge) to enable
+    finer-grained depth eligibility."""
+    from skills.depth_motion import check_depth_eligibility
+
+    result = check_depth_eligibility(
+        photo_id="chandelier_room",
+        image_width=3840,
+        image_height=2560,
+        has_depth_map=True,
+        depth_structure="deep",
+        motion_risks=["pendant_lights", "straight_architectural_lines"],
+        requested_motion="lateral_right",
+        intensity="restrained",
+    )
+    assert result["eligible"] is False
+    assert "central thin-structure" in result["reason"]
+
+
+# ── Test 13: water frame is NOT forced to static ──────────────────────
+
+def test_water_frame_not_forced_to_static():
+    """A frame with water_surface in motion_risk is depth-eligible.
+    Camera treatment and content motion are independently assignable.
+    water_surface does not force the camera to be static."""
+    from skills.depth_motion import check_depth_eligibility
+
+    result = check_depth_eligibility(
+        photo_id="pool_shot",
+        image_width=3500,
+        image_height=2333,
+        has_depth_map=True,
+        depth_structure="deep",
+        motion_risks=["water_surface", "reflections", "straight_architectural_lines"],
+        requested_motion="lateral_right",
+        intensity="restrained",
+    )
+    assert result["eligible"] is True, \
+        f"Water frame must be depth-eligible — camera and content are independent. Got: {result['reason']}"
+
+
+def test_water_frame_not_forced_mutation_proof():
+    """If water_surface were added to any rejection set, the water
+    frame would become ineligible — proving the orthogonal model."""
+    from skills.depth_motion import (
+        CENTRAL_THIN_STRUCTURE_RISKS, PERIPHERAL_THIN_STRUCTURE_RISKS,
+    )
+    assert "water_surface" not in CENTRAL_THIN_STRUCTURE_RISKS
+    assert "water_surface" not in PERIPHERAL_THIN_STRUCTURE_RISKS
+
+
+# ── Test 14: empirical override mechanism ─────────────────────────────
+
+def test_empirical_override_allows_validated_combination():
+    """A validated (risk, camera_family, intensity) combination is
+    allowed despite the risk label."""
+    from skills.depth_motion import check_depth_eligibility, EMPIRICAL_RISK_OVERRIDES
+
+    # thin_railings + lateral_right + restrained → overridden
+    result = check_depth_eligibility(
+        photo_id="any_deck",
+        image_width=3840,
+        image_height=2560,
+        has_depth_map=True,
+        depth_structure="deep",
+        motion_risks=["thin_railings"],
+        requested_motion="lateral_right",
+        intensity="restrained",
+    )
+    assert result["eligible"] is True
+
+    # Same risk + non-overridden trajectory → rejected
+    result2 = check_depth_eligibility(
+        photo_id="any_deck",
+        image_width=3840,
+        image_height=2560,
+        has_depth_map=True,
+        depth_structure="deep",
+        motion_risks=["thin_railings"],
+        requested_motion="push_in",  # not in safe_camera_families
+        intensity="restrained",
+    )
+    assert result2["eligible"] is False, \
+        "Non-overridden trajectory must be rejected despite same risk"

@@ -583,7 +583,7 @@ def validate_opening_establishes(direction: dict, obs_map: dict, photo_widths: d
                     ),
                     "beats": [beat.get("ordinal", 0)],
                 })
-            if beat_technique in ("locked", "generative"):
+            if beat_technique in ("static", "locked", "generative", "depth"):
                 violations.append({
                     "rule": "opening_establishes",
                     "detail": (
@@ -1233,50 +1233,46 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
   If narration_provenance is "guest_book", narration_script must use whole
   source sentences only (validated deterministically).
 
-11. TECHNIQUE PER BEAT: each beat has a "technique" field. Choose per
-    beat based on what the frame actually contains — there is no default.
+11. CAMERA TREATMENT AND CONTENT MOTION — two independent decisions.
+
+    Each beat has a "technique" field for camera treatment:
     - "bounded": the camera is a viewport travelling across the still
-      photograph. Nothing in the frame moves. $0 per clip.
+      photograph. $0 per clip. Good for shallow-depth frames and detail shots.
     - "depth": the camera performs an authored parallax move through
-      a depth-projected version of the still photograph. The scene gains
-      dimensional depth — foreground and background separate and move at
-      different rates, like a real camera. Best for wide-angle exteriors,
-      pool/deck shots, and rooms with strong foreground-to-background
-      layering. depth_structure must be "deep" for this to work.
-      Depth beats can be any duration. Set intensity to "restrained"
-      (4% displacement, subtle) or "moderate" (8%, visible but clean).
-      ⚠️ depth does NOT animate content — water stays still, foliage
-      does not sway. If the frame contains genuine life (water, fire,
-      foliage), prefer "locked" to bring that life to the film.
-      ⚠️ depth is INELIGIBLE for frames with thin foreground structures
-      (chandeliers, pendant lights, balusters, thin chair legs) — these
-      smear under reprojection. The system will automatically fall back
-      to bounded if ineligible; you do not need to guard against this.
-    - "locked": the camera holds still and the CONTENT animates — water
-      rippling, a pool surface catching light, fire flickering, foliage
-      and grass moving, steam rising, curtains breathing, clouds
-      drifting. Costs Runway rates. State in motion_prompt exactly what
-      you expect to move.
-      A locked beat MUST be exactly 5.0 or 10.0 seconds — Runway
-      accepts no other duration. Plan your pacing around this: locked
-      beats are 5s or 10s, bounded beats can be any length. A 3.5-second
-      locked beat is impossible and will fail.
+      a depth-projected version of the photograph. Foreground and
+      background separate and move at different rates — like a real
+      camera on a track. Best for frames with depth_structure="deep".
+      Set intensity to "restrained" (4%, subtle) or "moderate" (8%).
+      Depth beats can be any duration.
+      ⚠️ depth works on frames with AND without environmental life.
+      A rooftop deck with water AND strong depth → use "depth".
+      The system handles eligibility — if a frame's depth map or
+      resolution cannot support depth, it falls back to bounded
+      automatically. You do not need to guard against this.
+    - "static": the camera holds completely still. Use for frames
+      where camera movement would distract — a fireplace close-up,
+      a detail shot of amenities, a still moment in the pacing.
+      Static beats with content_motion can be any duration.
     - "generative": full Runway generation with camera movement.
-    REACH FOR "locked" ON ANY FRAME WITH GENUINE LIFE IN IT. A pool, the
-    ocean, a fire pit, trees, sky, a hot tub, anything with water or
-    flame or foliage — these are the frames that make a film feel filmed
-    rather than assembled. A film composed entirely of bounded beats is
-    a slideshow, and a slideshow is a FAILED direction regardless of how
-    well it scores on anything else.
-    Use "depth" for exterior or wide-angle frames that have strong
-    depth layering but nothing that should naturally move — a driveway
-    at dusk, a building facade, a rooftop view, an empty deck.
-    Bounded is the right choice for frames with nothing moving AND
-    shallow depth — a made bed, a vanity, a detail shot. Use it there
-    deliberately, not as a fallback.
-    Text-bearing frames (contains_text=true) MUST be technique="bounded"
-    with requested_motion="push_in". Never locked, never generative,
-    never depth.
+
+    Each beat ALSO has "content_motion" — a list of environmental
+    elements that should naturally move in the final film:
+      ["water", "foliage", "fire", "curtains", "clouds", "steam"]
+    Set content_motion to [] if nothing in the frame should move.
+    ⚠️ content_motion is independent of camera treatment. A depth
+    beat on a pool photo should have content_motion=["water"] — the
+    camera moves AND the water moves. These are not alternatives.
+
+    GUIDELINES:
+    - A film composed entirely of bounded beats is a slideshow.
+    - Frames with depth_structure="deep" and strong layering → "depth".
+    - Frames with genuine environmental life (water, fire, foliage) →
+      set content_motion to name what should move. Camera can be
+      "depth", "static", or "bounded" independently.
+    - Shallow-depth frames with nothing moving → "bounded".
+    - Text-bearing frames (contains_text=true) MUST be technique="bounded"
+      with requested_motion="push_in". Never static, never generative,
+      never depth.
 
 Return ONLY valid JSON:
 {{
@@ -1285,9 +1281,9 @@ Return ONLY valid JSON:
   "directing_mode": "The Reveal | The Weekend | The Escape | The Gathering | The Playground | The Retreat | The Design Film | The Destination",
   "mode_rationale": "why this mode for this property, one line",
   "beats": [
-    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "tilt_up", "motion_prompt": "...", "duration_seconds": 4, "technique": "locked"}},
-    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "lateral_right", "motion_prompt": "", "duration_seconds": 3, "technique": "depth", "intensity": "restrained"}},
-    {{"ordinal": 3, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 3, "technique": "bounded"}},
+    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "lateral_right", "motion_prompt": "", "duration_seconds": 3, "technique": "depth", "intensity": "restrained", "content_motion": ["water", "foliage"]}},
+    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "", "duration_seconds": 5, "technique": "static", "content_motion": ["fire"]}},
+    {{"ordinal": 3, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "", "duration_seconds": 3, "technique": "bounded", "content_motion": []}},
     ...
   ],
   "opening_type": "property" or "setting" or "feature",

@@ -1,29 +1,23 @@
 """
-MOTION-D: Depth-based parallax motion rendering.
+MOTION-D1: Depth-based parallax motion rendering.
 
-Translates the director's creative intent into DepthFlow parameters,
-overscan maths, and crop geometry. Called by generate_motion when
-technique='depth'.
+Orthogonal model — camera treatment and content motion are independent:
+    camera_treatment:   static | bounded | depth | generative
+    content_motion:     [] (list of what should move — water, foliage, fire...)
 
-The director expresses:
-    camera intent:      lateral_right | lateral_left | push_in
-    intensity:          restrained (4%) | moderate (8%)
-    hero focal point:   from observation.focal_point
+The director decides both separately. This module handles the camera
+treatment side: eligibility, script generation, Modal render.
 
-This module translates that into:
-    DepthFlow state variables, render dimensions, crop coordinates.
-
-The director never sees Modal, DepthFlow, or overscan arithmetic.
+Thin-structure risk is contextual, not binary. A photograph with
+peripheral thin structures at restrained magnitude is eligible;
+one with a central chandelier crossing a major depth boundary is not.
 """
 
 import logging
-import math
 
 logger = logging.getLogger(__name__)
 
 # ── Magnitude mapping ─────────────────────────────────────────────────
-# intensity name → (amp, description)
-# 4% = amp 2.0 (Phase 1-5 "restrained"), 8% = amp 4.0 (Phase 1-5 "moderate")
 INTENSITY_AMP = {
     "restrained": 2.0,   # 4% — validated as "best" across all phases
     "moderate": 4.0,     # 8% — validated as "usable" to "best"
@@ -33,15 +27,42 @@ DEFAULT_INTENSITY = "restrained"
 # Delivery resolution
 DELIVERY_W, DELIVERY_H = 1920, 1080
 
-# ── Thin-structure risk signals from observations ─────────────────────
-# These motion_risk values indicate foreground elements that smear under
-# depth reprojection. Overscan does not fix this — the distortion is in
-# the interior of the frame, not at the edges.
-THIN_STRUCTURE_RISKS = {"thin_railings", "thin_furniture", "pendant_lights"}
-
 # ── Minimum overscan margin (as fraction) ─────────────────────────────
 MIN_MARGIN = 0.10  # 10% absolute minimum
 DEFAULT_MARGIN = 0.30  # 30% validated default
+
+# ── Thin-structure risk: contextual, not binary ───────────────────────
+# These motion_risk values indicate thin foreground elements. Whether
+# they actually block depth depends on context — are they peripheral
+# or central? At what magnitude?
+#
+# HIGH-CONFIDENCE rejection: thin structures that typically occupy
+# the central/hero region and cross major depth boundaries.
+# These smear visibly regardless of magnitude or trajectory.
+CENTRAL_THIN_STRUCTURE_RISKS = {"pendant_lights", "chandelier"}
+
+# CONTEXTUAL: thin structures that may be peripheral (e.g. railings
+# along the frame edge). At restrained magnitude with lateral motion,
+# peripheral thin structures are tolerable — Phase 1 proved this
+# across dozens of blind-rated clips with f81ead38's railings.
+PERIPHERAL_THIN_STRUCTURE_RISKS = {"thin_railings", "thin_furniture"}
+
+# ── Empirical overrides ──────────────────────────────────────────────
+# Validated (camera_family, magnitude_range) combinations that override
+# generic risk labels. These encode the experimental finding, not the
+# specific photo — the same photo at a different trajectory could fail.
+#
+# Each entry: (camera_families, max_intensity) that are safe despite
+# the presence of the named risk.
+EMPIRICAL_RISK_OVERRIDES = {
+    # Phase 1: thin_railings + restrained lateral → rated "best"
+    # across f81ead38 and similar rooftop/deck frames
+    "thin_railings": {
+        "safe_camera_families": {"lateral_right", "lateral_left", "pan_right",
+                                  "pan_left", "pan_right_to_left", "pan_left_to_right"},
+        "max_intensity": "restrained",
+    },
+}
 
 
 def check_depth_eligibility(
@@ -56,16 +77,16 @@ def check_depth_eligibility(
 ) -> dict:
     """Check whether a photograph is eligible for depth motion.
 
-    Returns:
-        dict with:
-            eligible: bool
-            reason: str (why ineligible, or "eligible")
-            margin: float (the margin fraction to use, if eligible)
-            render_w: int
-            render_h: int
-            amp: float
+    Thin-structure risk is contextual:
+    - Central thin structures (chandeliers, pendants) → always reject
+    - Peripheral thin structures (railings) → reject at moderate+,
+      allow at restrained with lateral trajectories (empirically validated)
+
+    Returns dict with eligible, reason, margin, render_w, render_h, amp,
+    and optionally constraints (e.g. max_intensity forced down).
     """
     amp = INTENSITY_AMP.get(intensity, INTENSITY_AMP[DEFAULT_INTENSITY])
+    constraints = []
 
     # 1. Must have a cached depth map
     if not has_depth_map:
@@ -75,32 +96,52 @@ def check_depth_eligibility(
     if depth_structure in ("shallow", "flat"):
         return {"eligible": False, "reason": f"depth_structure={depth_structure} — insufficient parallax"}
 
-    # 3. Thin-structure risk check
+    # 3. Thin-structure risk — contextual assessment
     risk_set = set(motion_risks or [])
-    thin_risks = risk_set & THIN_STRUCTURE_RISKS
-    if thin_risks:
-        return {"eligible": False, "reason": f"thin-structure risk: {', '.join(thin_risks)}"}
+
+    # 3a. Central thin structures → always reject
+    central_risks = risk_set & CENTRAL_THIN_STRUCTURE_RISKS
+    if central_risks:
+        return {"eligible": False, "reason": f"central thin-structure risk: {', '.join(central_risks)}"}
+
+    # 3b. Peripheral thin structures → check empirical overrides
+    peripheral_risks = risk_set & PERIPHERAL_THIN_STRUCTURE_RISKS
+    if peripheral_risks:
+        all_overridden = True
+        for risk in peripheral_risks:
+            override = EMPIRICAL_RISK_OVERRIDES.get(risk)
+            if not override:
+                all_overridden = False
+                break
+            if requested_motion not in override["safe_camera_families"]:
+                all_overridden = False
+                break
+            # Check intensity constraint
+            max_int = override["max_intensity"]
+            if max_int == "restrained" and intensity != "restrained":
+                # Constrain to restrained
+                intensity = "restrained"
+                amp = INTENSITY_AMP["restrained"]
+                constraints.append(f"intensity constrained to restrained due to {risk}")
+
+        if not all_overridden:
+            return {"eligible": False,
+                    "reason": f"thin-structure risk: {', '.join(peripheral_risks)} "
+                              f"(no empirical override for {requested_motion}/{intensity})"}
 
     # 4. Calculate required overscan margin from source dimensions
-    # The source must fit the oversized render canvas at 16:9 aspect ratio.
     margin = DEFAULT_MARGIN
-
-    # Required render dimensions
     render_w = int(DELIVERY_W * (1 + margin))
     render_h = int(DELIVERY_H * (1 + margin))
-    render_w += render_w % 2  # round to even
+    render_w += render_w % 2
     render_h += render_h % 2
 
-    # Check if source can cover the render canvas
-    # Source aspect ratio may differ from 16:9 — the limiting dimension matters.
     source_aspect = image_width / max(image_height, 1)
     render_aspect = render_w / render_h
 
     if source_aspect >= render_aspect:
-        # Source is wider — height is the limiting dimension
         effective_width = int(image_height * render_aspect)
         if effective_width < render_w:
-            # Try minimum margin
             render_w_min = int(DELIVERY_W * (1 + MIN_MARGIN))
             render_h_min = int(DELIVERY_H * (1 + MIN_MARGIN))
             render_w_min += render_w_min % 2
@@ -111,7 +152,6 @@ def check_depth_eligibility(
             margin = MIN_MARGIN
             render_w, render_h = render_w_min, render_h_min
     else:
-        # Source is taller — width is the limiting dimension
         if image_width < render_w:
             render_w_min = int(DELIVERY_W * (1 + MIN_MARGIN))
             render_h_min = int(DELIVERY_H * (1 + MIN_MARGIN))
@@ -122,7 +162,7 @@ def check_depth_eligibility(
             margin = MIN_MARGIN
             render_w, render_h = render_w_min, render_h_min
 
-    return {
+    result = {
         "eligible": True,
         "reason": "eligible",
         "margin": margin,
@@ -130,6 +170,9 @@ def check_depth_eligibility(
         "render_h": render_h,
         "amp": amp,
     }
+    if constraints:
+        result["constraints"] = constraints
+    return result
 
 
 def build_depthflow_script(
@@ -145,7 +188,6 @@ def build_depthflow_script(
     elif requested_motion in ("lateral_left", "pan_left", "pan_right_to_left"):
         offset_expr = f"(-{amp} * t, 0.0)"
     else:
-        # Default: gentle lateral right for push_in, tilt, or unrecognized
         offset_expr = f"({amp} * t, 0.0)"
 
     update_code = f"""
@@ -183,16 +225,7 @@ def render_depth_beat(
     duration: float = 3.0,
     fps: int = 30,
 ) -> dict:
-    """Render a depth motion beat via Modal and return the result.
-
-    This calls the Modal depth-render function which:
-    1. Downloads image + depth map
-    2. Renders at oversized canvas (render_w × render_h)
-    3. Crops centre DELIVERY_W × DELIVERY_H with ffmpeg
-    4. Uploads to R2
-
-    Returns dict with storage_url, render_seconds, file_size.
-    """
+    """Render a depth motion beat via Modal and return the result."""
     import modal
 
     render_fn = modal.Function.from_name("depth-render", "render_depth_beat")

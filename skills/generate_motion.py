@@ -36,12 +36,13 @@ logger = logging.getLogger(__name__)
 # These are NOT dropped — the shot stays in the film at push_in.
 FRAME_EXITING_MOVES = {"pull_back", "tilt_up"}
 
-# Valid technique values. The director sets one per beat.
+# Valid camera treatment values. The director sets one per beat.
 #   bounded    — Creatomate pan animation on the still image. $0. DEFAULT.
-#   locked     — Runway gen, camera locked, content animates (water, fire, foliage).
-#   generative — Runway gen, camera moves freely. Legacy path.
+#   static     — Camera holds still. Content may animate via finishing (FINISH-A).
+#   locked     — Legacy alias for static. Accepted for backward compat.
 #   depth      — DepthFlow parallax on Modal GPU. Authored camera, overscan crop. ~$0.01.
-VALID_TECHNIQUES = {"bounded", "locked", "generative", "depth"}
+#   generative — Runway gen, camera moves freely. Legacy path.
+VALID_TECHNIQUES = {"bounded", "static", "locked", "generative", "depth"}
 
 # Cost per second by model
 RUNWAY_COST = {
@@ -150,8 +151,8 @@ def generate_motion(
     clips_rejected = 0
     clips_cached = 0
     total_cost = 0.0
-    technique_counts = {"bounded": 0, "locked": 0, "generative": 0, "depth": 0}
-    technique_costs = {"bounded": 0.0, "locked": 0.0, "generative": 0.0, "depth": 0.0}
+    technique_counts = {"bounded": 0, "static": 0, "generative": 0, "depth": 0}
+    technique_costs = {"bounded": 0.0, "static": 0.0, "generative": 0.0, "depth": 0.0}
 
     for beat in beats:
         photo_id = beat.get("photo_id")
@@ -164,6 +165,9 @@ def generate_motion(
         ordinal = beat.get("ordinal", 0)
 
         technique = beat.get("technique", "bounded")
+        # Normalise legacy "locked" → "static" (camera-only semantics)
+        if technique == "locked":
+            technique = "static"
 
         if technique not in VALID_TECHNIQUES:
             logger.error("[motion] Beat %d: unknown technique '%s'", ordinal, technique)
@@ -417,8 +421,9 @@ def generate_motion(
                 technique_counts["bounded"] += 1
                 continue
 
-        # ── Locked: Runway with locked-camera prompt ───────────────────
-        if technique == "locked":
+        # ── Static: camera holds still, Runway animates content ─────────
+        # (formerly "locked" — renamed to separate camera from content)
+        if technique == "static":
             content_motion = motion_prompt or "Subtle natural movement within the scene."
             locked_prompt = _LOCKED_PROMPT_TEMPLATE.format(content_motion=content_motion)
 
@@ -428,7 +433,7 @@ def generate_motion(
             hash_input = json.dumps({
                 "source_url": source_url,
                 "prompt": locked_prompt,
-                "technique": "locked",
+                "technique": "static",
                 "duration": duration,
                 "model": model,
                 "aspect_ratio": aspect_ratio,
@@ -516,7 +521,7 @@ def generate_motion(
                         "prompt": None,
                         "actual_motion": "push_in",
                         "downgraded": True,
-                        "original_technique": "locked",
+                        "original_technique": "static",
                         "original_motion": requested_motion,
                         "original_prompt": locked_prompt,
                         "failure_reason": error_str[:300],
@@ -552,10 +557,10 @@ def generate_motion(
                 "vendor": "runway",
                 "beat_ordinal": ordinal,
                 "requested_motion": requested_motion,
-                "technique": "locked",
+                "technique": "static",
                 "motion_params": {
                     "prompt": locked_prompt,
-                    "actual_motion": "locked",
+                    "actual_motion": "static",
                     "downgraded": False,
                     "original_motion": None,
                     "original_prompt": None,
@@ -576,9 +581,9 @@ def generate_motion(
                       discriminator=f"beat_{ordinal}")
 
             clips_rendered += 1
-            technique_counts["locked"] += 1
-            technique_costs["locked"] += clip_cost
-            logger.info("[motion] Beat %d: locked %ds model=%s cost=$%.4f",
+            technique_counts["static"] += 1
+            technique_costs["static"] += clip_cost
+            logger.info("[motion] Beat %d: static %ds model=%s cost=$%.4f",
                        ordinal, duration, model, clip_cost)
             continue
 
