@@ -40,7 +40,8 @@ FRAME_EXITING_MOVES = {"pull_back", "tilt_up"}
 #   bounded    — Creatomate pan animation on the still image. $0. DEFAULT.
 #   locked     — Runway gen, camera locked, content animates (water, fire, foliage).
 #   generative — Runway gen, camera moves freely. Legacy path.
-VALID_TECHNIQUES = {"bounded", "locked", "generative"}
+#   depth      — DepthFlow parallax on Modal GPU. Authored camera, overscan crop. ~$0.01.
+VALID_TECHNIQUES = {"bounded", "locked", "generative", "depth"}
 
 # Cost per second by model
 RUNWAY_COST = {
@@ -113,17 +114,28 @@ def generate_motion(
     if not beats:
         return SkillResult.noop("No beats in this direction.", {})
 
-    # ── Load observations for motion_risk routing ───────────────────────
+    # ── Load observations for motion_risk and depth routing ──────────────
     obs_resp = sb.table("observations").select(
-        "photo_id, motion_risk"
+        "photo_id, motion_risk, depth_structure"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     motion_risk_by_photo = {
         o["photo_id"]: o.get("motion_risk") or []
         for o in (obs_resp.data or [])
     }
+    depth_structure_by_photo = {
+        o["photo_id"]: o.get("depth_structure") or ""
+        for o in (obs_resp.data or [])
+    }
+
+    # ── Load photograph dimensions (needed for depth eligibility) ──────
+    photo_ids = list({b.get("photo_id") for b in beats if b.get("photo_id")})
+    photo_dims = {}
+    for pid in photo_ids:
+        p = sb.table("photographs").select("image_width, image_height").eq("photo_id", pid).limit(1).execute()
+        if p.data:
+            photo_dims[pid] = (p.data[0].get("image_width") or 0, p.data[0].get("image_height") or 0)
 
     # ── Load rendition URLs ─────────────────────────────────────────────
-    photo_ids = list({b.get("photo_id") for b in beats if b.get("photo_id")})
     renditions = {}
     for pid in photo_ids:
         rend = sb.table("renditions").select("kind, storage_url").eq("photo_id", pid).execute()
@@ -138,8 +150,8 @@ def generate_motion(
     clips_rejected = 0
     clips_cached = 0
     total_cost = 0.0
-    technique_counts = {"bounded": 0, "locked": 0, "generative": 0}
-    technique_costs = {"bounded": 0.0, "locked": 0.0, "generative": 0.0}
+    technique_counts = {"bounded": 0, "locked": 0, "generative": 0, "depth": 0}
+    technique_costs = {"bounded": 0.0, "locked": 0.0, "generative": 0.0, "depth": 0.0}
 
     for beat in beats:
         photo_id = beat.get("photo_id")
@@ -220,6 +232,190 @@ def generate_motion(
             logger.info("[motion] Beat %d: bounded %s %ds cost=$0",
                        ordinal, requested_motion, duration)
             continue
+
+        # ── Depth: DepthFlow parallax on Modal GPU ─────────────────────
+        if technique == "depth":
+            from skills.depth_motion import check_depth_eligibility, render_depth_beat
+
+            img_w, img_h = photo_dims.get(photo_id, (0, 0))
+            depth_map_url = urls.get("depth_map", "")
+            intensity = beat.get("intensity", "restrained")
+
+            elig = check_depth_eligibility(
+                photo_id=photo_id,
+                image_width=img_w,
+                image_height=img_h,
+                has_depth_map=bool(depth_map_url),
+                depth_structure=depth_structure_by_photo.get(photo_id, ""),
+                motion_risks=motion_risk_by_photo.get(photo_id, []),
+                requested_motion=requested_motion,
+                intensity=intensity,
+            )
+
+            if not elig["eligible"]:
+                # Fall back to bounded — never fail, never swap images
+                logger.info("[motion] Beat %d: depth ineligible (%s), falling back to bounded",
+                           ordinal, elig["reason"])
+                technique = "bounded"
+                # Re-enter bounded path (duplicate the bounded logic for fallback)
+                hash_input = json.dumps({
+                    "source_url": source_url,
+                    "motion": requested_motion,
+                    "technique": "bounded",
+                    "duration": duration,
+                    "aspect_ratio": aspect_ratio,
+                }, sort_keys=True)
+                input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+                if not force:
+                    existing = sb.table("video_artifacts").select("artifact_id", count="exact").eq(
+                        "input_hash", input_hash
+                    ).eq("kind", "clip").eq("status", "ready").is_(
+                        "superseded_at", "null"
+                    ).limit(0).execute()
+                    if existing.count > 0:
+                        clips_cached += 1
+                        continue
+
+                artifact_id = str(uuid.uuid4())
+                sb.table("video_artifacts").insert({
+                    "artifact_id": artifact_id,
+                    "property_id": property_id,
+                    "kind": "clip",
+                    "direction_id": direction_id,
+                    "concept_id": direction.get("concept_id"),
+                    "photo_id": photo_id,
+                    "input_hash": input_hash,
+                    "storage_url": source_url,
+                    "duration_seconds": duration,
+                    "model": None,
+                    "vendor": "creatomate",
+                    "beat_ordinal": ordinal,
+                    "requested_motion": requested_motion,
+                    "technique": "bounded",
+                    "motion_params": {
+                        "downgraded": True,
+                        "original_technique": "depth",
+                        "fallback_reason": elig["reason"],
+                    },
+                    "cost_estimate_usd": 0,
+                    "status": "ready",
+                    "created_by_agent": "skills/generate_motion",
+                }).execute()
+                clips_rendered += 1
+                technique_counts["bounded"] += 1
+                continue
+
+            # Eligible — render via Modal
+            try:
+                hash_input = json.dumps({
+                    "source_url": source_url,
+                    "depth_map_url": depth_map_url,
+                    "motion": requested_motion,
+                    "technique": "depth",
+                    "intensity": intensity,
+                    "render_w": elig["render_w"],
+                    "render_h": elig["render_h"],
+                    "amp": elig["amp"],
+                    "duration": duration,
+                }, sort_keys=True)
+                input_hash = hashlib.sha256(hash_input.encode()).hexdigest()
+
+                if not force:
+                    existing = sb.table("video_artifacts").select("artifact_id", count="exact").eq(
+                        "input_hash", input_hash
+                    ).eq("kind", "clip").eq("status", "ready").is_(
+                        "superseded_at", "null"
+                    ).limit(0).execute()
+                    if existing.count > 0:
+                        clips_cached += 1
+                        continue
+
+                result = render_depth_beat(
+                    image_url=source_url,
+                    depth_map_url=depth_map_url,
+                    requested_motion=requested_motion,
+                    render_w=elig["render_w"],
+                    render_h=elig["render_h"],
+                    amp=elig["amp"],
+                    duration=duration,
+                )
+
+                if "error" in result:
+                    raise RuntimeError(result["error"][:300])
+
+                artifact_id = str(uuid.uuid4())
+                sb.table("video_artifacts").insert({
+                    "artifact_id": artifact_id,
+                    "property_id": property_id,
+                    "kind": "clip",
+                    "direction_id": direction_id,
+                    "concept_id": direction.get("concept_id"),
+                    "photo_id": photo_id,
+                    "input_hash": input_hash,
+                    "storage_url": result["storage_url"],
+                    "duration_seconds": duration,
+                    "model": "depthflow-1.0.0",
+                    "vendor": "modal",
+                    "beat_ordinal": ordinal,
+                    "requested_motion": requested_motion,
+                    "technique": "depth",
+                    "motion_params": {
+                        "intensity": intensity,
+                        "amp": elig["amp"],
+                        "render_w": elig["render_w"],
+                        "render_h": elig["render_h"],
+                        "margin": elig["margin"],
+                        "crop_offset": result.get("crop_offset"),
+                        "downgraded": False,
+                    },
+                    "cost_estimate_usd": 0.01,
+                    "status": "ready",
+                    "created_by_agent": "skills/generate_motion",
+                }).execute()
+
+                clips_rendered += 1
+                technique_counts["depth"] += 1
+                technique_costs["depth"] += 0.01
+                total_cost += 0.01
+                logger.info("[motion] Beat %d: depth %s %ds render=%dx%d margin=%.0f%% cost=$0.01",
+                           ordinal, requested_motion, duration,
+                           elig["render_w"], elig["render_h"], elig["margin"] * 100)
+                continue
+
+            except Exception as exc:
+                error_msg = str(exc)[:300]
+                logger.warning("[motion] Beat %d: depth render failed (%s), falling back to bounded",
+                              ordinal, error_msg)
+                # Fall back to bounded on render failure
+                artifact_id = str(uuid.uuid4())
+                sb.table("video_artifacts").insert({
+                    "artifact_id": artifact_id,
+                    "property_id": property_id,
+                    "kind": "clip",
+                    "direction_id": direction_id,
+                    "concept_id": direction.get("concept_id"),
+                    "photo_id": photo_id,
+                    "input_hash": hashlib.sha256(f"depth-fallback-{photo_id}-{ordinal}".encode()).hexdigest(),
+                    "storage_url": source_url,
+                    "duration_seconds": duration,
+                    "model": None,
+                    "vendor": "creatomate",
+                    "beat_ordinal": ordinal,
+                    "requested_motion": requested_motion,
+                    "technique": "bounded",
+                    "motion_params": {
+                        "downgraded": True,
+                        "original_technique": "depth",
+                        "failure_reason": error_msg,
+                    },
+                    "cost_estimate_usd": 0,
+                    "status": "ready",
+                    "created_by_agent": "skills/generate_motion",
+                }).execute()
+                clips_rendered += 1
+                technique_counts["bounded"] += 1
+                continue
 
         # ── Locked: Runway with locked-camera prompt ───────────────────
         if technique == "locked":

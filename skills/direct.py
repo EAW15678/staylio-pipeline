@@ -1237,6 +1237,21 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
     beat based on what the frame actually contains — there is no default.
     - "bounded": the camera is a viewport travelling across the still
       photograph. Nothing in the frame moves. $0 per clip.
+    - "depth": the camera performs an authored parallax move through
+      a depth-projected version of the still photograph. The scene gains
+      dimensional depth — foreground and background separate and move at
+      different rates, like a real camera. Best for wide-angle exteriors,
+      pool/deck shots, and rooms with strong foreground-to-background
+      layering. depth_structure must be "deep" for this to work.
+      Depth beats can be any duration. Set intensity to "restrained"
+      (4% displacement, subtle) or "moderate" (8%, visible but clean).
+      ⚠️ depth does NOT animate content — water stays still, foliage
+      does not sway. If the frame contains genuine life (water, fire,
+      foliage), prefer "locked" to bring that life to the film.
+      ⚠️ depth is INELIGIBLE for frames with thin foreground structures
+      (chandeliers, pendant lights, balusters, thin chair legs) — these
+      smear under reprojection. The system will automatically fall back
+      to bounded if ineligible; you do not need to guard against this.
     - "locked": the camera holds still and the CONTENT animates — water
       rippling, a pool surface catching light, fire flickering, foliage
       and grass moving, steam rising, curtains breathing, clouds
@@ -1253,11 +1268,15 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
     rather than assembled. A film composed entirely of bounded beats is
     a slideshow, and a slideshow is a FAILED direction regardless of how
     well it scores on anything else.
-    Bounded is the right choice for frames with nothing moving in them —
-    a made bed, a vanity, an empty room. Use it there deliberately, not
-    as a fallback.
+    Use "depth" for exterior or wide-angle frames that have strong
+    depth layering but nothing that should naturally move — a driveway
+    at dusk, a building facade, a rooftop view, an empty deck.
+    Bounded is the right choice for frames with nothing moving AND
+    shallow depth — a made bed, a vanity, a detail shot. Use it there
+    deliberately, not as a fallback.
     Text-bearing frames (contains_text=true) MUST be technique="bounded"
-    with requested_motion="push_in". Never locked, never generative.
+    with requested_motion="push_in". Never locked, never generative,
+    never depth.
 
 Return ONLY valid JSON:
 {{
@@ -1267,7 +1286,8 @@ Return ONLY valid JSON:
   "mode_rationale": "why this mode for this property, one line",
   "beats": [
     {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "tilt_up", "motion_prompt": "...", "duration_seconds": 4, "technique": "locked"}},
-    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 3, "technique": "bounded"}},
+    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "lateral_right", "motion_prompt": "", "duration_seconds": 3, "technique": "depth", "intensity": "restrained"}},
+    {{"ordinal": 3, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "...", "duration_seconds": 3, "technique": "bounded"}},
     ...
   ],
   "opening_type": "property" or "setting" or "feature",
