@@ -155,6 +155,14 @@ def onboard(
     if not r.is_ok and r.status != "held":
         return SkillResult.failed(reason=f"Workflow halted at observe: {r.reason}")
 
+    # ── 4b. Depth maps ──────────────────────────────────────────────────
+    # Deterministic derivatives of the photograph. Computed on Modal GPU,
+    # cached as renditions. Failure is non-fatal — depth maps are an
+    # enhancement for the cinematic pipeline, not a critical output.
+    from skills.generate_depth_maps import generate_depth_maps
+    _run_skill("generate_depth_maps", generate_depth_maps, property_id, force=force)
+    # Result intentionally not checked — depth failure must not halt onboard.
+
     # ── 5. Enhance ───────────────────────────────────────────────────────
     # enhance operates on CANONICALS ONLY, after dedupe and observe.
     from skills.enhance import enhance
