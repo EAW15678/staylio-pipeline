@@ -1346,6 +1346,16 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
       with requested_motion="push_in". Never static, never generative,
       never depth.
 
+12. ATMOSPHERE PER BEAT: each beat has an "atmosphere" field.
+    - "preserve" (default): keep the existing photograph's lighting as-is.
+      Use this for most beats.
+    - "warm": apply a restrained warm late-afternoon treatment — golden
+      light on surfaces, slightly warmer overall tone. Use sparingly and
+      deliberately for emotional payoff beats — a sunset reveal, a
+      golden-hour deck, a closing moment. A film where every beat is
+      "warm" loses the effect.
+    atmosphere is independent of technique and content_motion.
+
 Return ONLY valid JSON:
 {{
   "hero_proposition": "the single strongest booking driver, one line",
@@ -1353,9 +1363,9 @@ Return ONLY valid JSON:
   "directing_mode": "The Reveal | The Weekend | The Escape | The Gathering | The Playground | The Retreat | The Design Film | The Destination",
   "mode_rationale": "why this mode for this property, one line",
   "beats": [
-    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "lateral_right", "motion_prompt": "", "duration_seconds": 3, "technique": "depth", "intensity": "restrained", "content_motion": ["water", "foliage"]}},
-    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "", "duration_seconds": 5, "technique": "static", "content_motion": ["fire"]}},
-    {{"ordinal": 3, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "", "duration_seconds": 3, "technique": "bounded", "content_motion": []}},
+    {{"ordinal": 1, "photo_id": "uuid", "requested_motion": "lateral_right", "motion_prompt": "", "duration_seconds": 3, "technique": "depth", "intensity": "restrained", "content_motion": ["water", "foliage"], "atmosphere": "warm"}},
+    {{"ordinal": 2, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "", "duration_seconds": 5, "technique": "static", "content_motion": ["fire"], "atmosphere": "preserve"}},
+    {{"ordinal": 3, "photo_id": "uuid", "requested_motion": "push_in", "motion_prompt": "", "duration_seconds": 3, "technique": "bounded", "content_motion": [], "atmosphere": "preserve"}},
     ...
   ],
   "opening_type": "property" or "setting" or "feature",

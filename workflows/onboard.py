@@ -262,6 +262,17 @@ def onboard(
         if not r.is_ok:
             raise RuntimeError(f"generate_motion failed: {r.reason}")
 
+        # ── 11b. Finish beats (Aleph) ──────────────────────────────────
+        # Optional Aleph finishing on eligible clips. Non-fatal.
+        from skills.finish_beats import finish_beats
+        step_id_v = record_step(sb, run_id, "finish_beats")
+        r = finish_beats(property_id, direction_id=direction_id, force=force)
+        complete_step(sb, step_id_v, status="complete" if r.is_ok else "failed",
+                      metadata=r.data if r.data else None,
+                      error_message=r.reason if not r.is_ok else None)
+        skills_run.append(("finish_beats", r.status, r.data))
+        # Result NOT checked — finishing failure does not halt pipeline
+
         # ── 12. Assemble ────────────────────────────────────────────────
         from skills.assemble import assemble
         step_id_v = record_step(sb, run_id, "assemble")
