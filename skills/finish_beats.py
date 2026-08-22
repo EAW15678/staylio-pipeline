@@ -51,7 +51,7 @@ GROUNDING_RULES = {
     },
     "clouds": {
         "check": lambda obs: _any_in_fields(obs, ["sky", "cloud", "clouds"],
-                                             ["beyond_frame_element", "visual_summary", "foreground_elements"]),
+                                             ["beyond_frame_element", "alt_text", "foreground_elements"]),
         "prompt_phrase": "subtle movement of the existing clouds",
     },
     "curtains": {
@@ -253,7 +253,7 @@ def finish_beats(
     # Load observations for grounding
     obs_resp = sb.table("observations").select(
         "photo_id, motion_risk, foreground_elements, located_amenities, "
-        "beyond_frame_element, visual_summary, contains_text"
+        "beyond_frame_element, alt_text, contains_text"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     obs_map = {o["photo_id"]: o for o in (obs_resp.data or [])}
 
