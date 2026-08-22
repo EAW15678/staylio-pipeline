@@ -115,9 +115,9 @@ def generate_motion(
     if not beats:
         return SkillResult.noop("No beats in this direction.", {})
 
-    # ── Load observations for motion_risk and depth routing ──────────────
+    # ── Load observations for motion_risk, depth, and hanging-fixture scan
     obs_resp = sb.table("observations").select(
-        "photo_id, motion_risk, depth_structure"
+        "photo_id, motion_risk, depth_structure, alt_text, foreground_elements"
     ).eq("property_id", property_id).is_("superseded_at", "null").execute()
     motion_risk_by_photo = {
         o["photo_id"]: o.get("motion_risk") or []
@@ -125,6 +125,14 @@ def generate_motion(
     }
     depth_structure_by_photo = {
         o["photo_id"]: o.get("depth_structure") or ""
+        for o in (obs_resp.data or [])
+    }
+    alt_text_by_photo = {
+        o["photo_id"]: o.get("alt_text") or ""
+        for o in (obs_resp.data or [])
+    }
+    foreground_by_photo = {
+        o["photo_id"]: o.get("foreground_elements") or []
         for o in (obs_resp.data or [])
     }
 
@@ -254,6 +262,8 @@ def generate_motion(
                 motion_risks=motion_risk_by_photo.get(photo_id, []),
                 requested_motion=requested_motion,
                 intensity=intensity,
+                alt_text=alt_text_by_photo.get(photo_id, ""),
+                foreground_elements=foreground_by_photo.get(photo_id, []),
             )
 
             if not elig["eligible"]:

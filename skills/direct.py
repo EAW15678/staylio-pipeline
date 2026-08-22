@@ -862,6 +862,8 @@ def direct(
                         photo_id=pid, image_width=img_w, image_height=img_h,
                         has_depth_map=has_dm, depth_structure=ds,
                         motion_risks=risks, requested_motion=traj, intensity=inten,
+                        alt_text=obs.get("alt_text") or "",
+                        foreground_elements=obs.get("foreground_elements") or [],
                     )
                     combo = f"{traj}/{inten}"
                     if elig["eligible"]:

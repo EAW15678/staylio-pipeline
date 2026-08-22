@@ -65,6 +65,30 @@ EMPIRICAL_RISK_OVERRIDES = {
 }
 
 
+# ── TEMPORARY supplemental hanging-fixture scan ──────────────────────
+# Stopgap: scans alt_text and foreground_elements for hanging-fixture
+# hazard terms that motion_risk does not reliably capture.
+# This is NOT the durable architecture. The durable system should use
+# structured depth_motion_hazards in the observation record.
+# See THIN-1 report for the follow-up requirement.
+_HANGING_FIXTURE_TERMS = [
+    "chandelier", "pendant light", "pendant lights",
+    "sputnik chandelier", "hanging light", "hanging fixture",
+]
+
+
+def _has_hanging_fixture_hazard(alt_text: str, foreground_elements: list) -> bool:
+    """TEMPORARY: scan alt_text and foreground_elements for hanging fixtures.
+
+    Returns True if any hanging-fixture term is found.
+    This is a stopgap — see THIN-1 for the durable follow-up.
+    """
+    combined = (alt_text or "").lower()
+    for fe in (foreground_elements or []):
+        combined += " " + str(fe).lower()
+    return any(term in combined for term in _HANGING_FIXTURE_TERMS)
+
+
 def check_depth_eligibility(
     photo_id: str,
     image_width: int,
@@ -74,6 +98,8 @@ def check_depth_eligibility(
     motion_risks: list,
     requested_motion: str,
     intensity: str = DEFAULT_INTENSITY,
+    alt_text: str = "",
+    foreground_elements: list = None,
 ) -> dict:
     """Check whether a photograph is eligible for depth motion.
 
@@ -104,7 +130,12 @@ def check_depth_eligibility(
     if central_risks:
         return {"eligible": False, "reason": f"central thin-structure risk: {', '.join(central_risks)}"}
 
-    # 3b. Peripheral thin structures → check empirical overrides
+    # 3b. TEMPORARY: supplemental hanging-fixture scan (THIN-1 stopgap)
+    if _has_hanging_fixture_hazard(alt_text, foreground_elements):
+        return {"eligible": False,
+                "reason": "hanging-fixture hazard detected in alt_text/foreground_elements (THIN-1 stopgap)"}
+
+    # 3c. Peripheral thin structures → check empirical overrides
     peripheral_risks = risk_set & PERIPHERAL_THIN_STRUCTURE_RISKS
     if peripheral_risks:
         all_overridden = True
