@@ -343,20 +343,27 @@ def finish_beats(
         aleph_hash = hashlib.sha256(hash_input.encode()).hexdigest()
 
         if not force:
-            existing = sb.table("video_artifacts").select("artifact_id", count="exact").eq(
-                "input_hash", aleph_hash
-            ).eq("kind", "clip").eq("status", "ready").is_(
-                "superseded_at", "null"
-            ).limit(0).execute()
+            # Check for existing artifact with same hash — ready OR rejected/failed
+            # This prevents re-purchasing the same failed generation on every run
+            existing = sb.table("video_artifacts").select(
+                "artifact_id, status", count="exact"
+            ).eq("input_hash", aleph_hash).eq("kind", "clip").limit(1).execute()
             if existing.count > 0:
+                ex_status = existing.data[0]["status"] if existing.data else "ready"
                 report["action"] = "cached"
-                report["reason"] = "matching finished artifact exists"
+                report["reason"] = f"matching artifact exists (status={ex_status})"
                 beat_reports.append(report)
                 skipped += 1
                 continue
 
-        # Call Aleph
+        # Bounded clips store an image URL, not a video — Aleph requires video
         video_url = clip["storage_url"]
+        if clip.get("technique") == "bounded":
+            report["action"] = "skipped"
+            report["reason"] = "bounded clip has image source, not video — Aleph requires video input"
+            beat_reports.append(report)
+            skipped += 1
+            continue
         try:
             task = runway_client.video_to_video.create(
                 model="aleph2",  # type: ignore
@@ -392,6 +399,25 @@ def finish_beats(
         except Exception as exc:
             error_msg = str(exc)[:300]
             logger.warning("[finish] Beat %d: Aleph failed — %s", ordinal, error_msg)
+            # Record failed attempt so force=False doesn't re-purchase
+            sb.table("video_artifacts").insert({
+                "artifact_id": str(uuid_mod.uuid4()),
+                "property_id": property_id,
+                "kind": "clip",
+                "direction_id": direction_id,
+                "photo_id": photo_id,
+                "input_hash": aleph_hash,
+                "storage_url": "",
+                "duration_seconds": clip.get("duration_seconds"),
+                "model": "aleph2",
+                "vendor": "runway",
+                "beat_ordinal": ordinal,
+                "technique": clip.get("technique"),
+                "motion_params": {"finishing": "aleph", "error": error_msg},
+                "cost_estimate_usd": 0,
+                "status": "failed",
+                "created_by_agent": "skills/finish_beats",
+            }).execute()
             report["action"] = "aleph_failed"
             report["reason"] = error_msg
             beat_reports.append(report)
@@ -415,6 +441,26 @@ def finish_beats(
 
             if not truth["pass"]:
                 logger.warning("[finish] Beat %d: truth gate FAILED — using pre-Aleph render", ordinal)
+                # Record rejected attempt so force=False doesn't re-purchase
+                sb.table("video_artifacts").insert({
+                    "artifact_id": str(uuid_mod.uuid4()),
+                    "property_id": property_id,
+                    "kind": "clip",
+                    "direction_id": direction_id,
+                    "photo_id": photo_id,
+                    "input_hash": aleph_hash,
+                    "storage_url": "",
+                    "duration_seconds": clip.get("duration_seconds"),
+                    "model": "aleph2",
+                    "vendor": "runway",
+                    "beat_ordinal": ordinal,
+                    "technique": clip.get("technique"),
+                    "motion_params": {"finishing": "aleph", "truth_gate": "fail",
+                                      "truth_results": truth["results"]},
+                    "cost_estimate_usd": 0,
+                    "status": "rejected",
+                    "created_by_agent": "skills/finish_beats",
+                }).execute()
                 report["action"] = "truth_failed"
                 report["reason"] = "truth gate failed, using pre-Aleph fallback"
                 beat_reports.append(report)
