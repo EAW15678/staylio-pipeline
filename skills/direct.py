@@ -822,6 +822,13 @@ def direct(
     guest_texts = [e.get("written_text") or e.get("verbal_text") or "" for e in guest_evidence if (e.get("written_text") or e.get("verbal_text"))]
 
     # ── Build frames for prompt ─────────────────────────────────────────
+    # Load photo dimensions for depth eligibility
+    photo_dim_resp = sb.table("photographs").select(
+        "photo_id, image_width, image_height"
+    ).eq("property_id", property_id).eq("is_canonical", True).execute()
+    photo_dims = {p["photo_id"]: (p.get("image_width") or 0, p.get("image_height") or 0)
+                  for p in (photo_dim_resp.data or [])}
+
     frames = []
     for obs in observations:
         pid = obs["photo_id"]
@@ -829,7 +836,56 @@ def direct(
         display_url = urls.get("enhanced") or urls.get("original", "")
         if not display_url:
             continue
-        frames.append({**obs, "url": display_url})
+        frame = {**obs, "url": display_url}
+
+        # ── Compute depth eligibility constraints per frame ────────
+        from skills.depth_motion import check_depth_eligibility, EMPIRICAL_RISK_OVERRIDES
+        img_w, img_h = photo_dims.get(pid, (0, 0))
+        has_dm = bool(urls.get("depth_map"))
+        ds = obs.get("depth_structure") or ""
+        risks = obs.get("motion_risk") or []
+
+        # Test a set of trajectories and intensities
+        trajectories = ["lateral_right", "lateral_left", "push_in", "tilt_up"]
+        intensities = ["restrained", "moderate"]
+        validated = []
+        constrained = []
+        unvalidated = []
+        limiting_reasons = set()
+
+        if not has_dm or ds in ("shallow", "flat"):
+            frame["depth_constraints"] = f"depth unavailable ({('no depth map' if not has_dm else f'depth_structure={ds}')})"
+        else:
+            for traj in trajectories:
+                for inten in intensities:
+                    elig = check_depth_eligibility(
+                        photo_id=pid, image_width=img_w, image_height=img_h,
+                        has_depth_map=has_dm, depth_structure=ds,
+                        motion_risks=risks, requested_motion=traj, intensity=inten,
+                    )
+                    combo = f"{traj}/{inten}"
+                    if elig["eligible"]:
+                        if elig.get("constraints"):
+                            constrained.append(combo)
+                        else:
+                            validated.append(combo)
+                    else:
+                        unvalidated.append(combo)
+                        limiting_reasons.add(elig["reason"])
+
+            if validated or constrained:
+                parts = [f"depth available. validated: {', '.join(validated)}"]
+                if constrained:
+                    parts.append(f"constrained: {', '.join(constrained)}")
+                if unvalidated:
+                    parts.append(f"unvalidated: {', '.join(unvalidated)}")
+                if limiting_reasons:
+                    parts.append(f"limits: {'; '.join(limiting_reasons)}")
+                frame["depth_constraints"] = ". ".join(parts)
+            else:
+                frame["depth_constraints"] = f"depth unavailable ({'; '.join(limiting_reasons)})"
+
+        frames.append(frame)
 
     if not frames:
         return SkillResult.failed(reason="No frames with rendition URLs")
@@ -1073,9 +1129,9 @@ def _build_prompt(concept, frames, prop, owner_ctx, guest_evidence, voice_candid
 
     frame_lines = []
     fields = ["photo_id", "motion_affordance", "motion_risk", "depth_tier",
-              "space_direction", "time_of_day_read", "negative_space",
+              "depth_structure", "space_direction", "time_of_day_read", "negative_space",
               "focal_point", "subject_singularity", "located_amenities",
-              "curated_section", "quality_score"]
+              "curated_section", "quality_score", "depth_constraints"]
     for f in frames[:30]:
         parts = [f"    {k}: {json.dumps(f.get(k), default=str)}" for k in fields if f.get(k) is not None]
         frame_lines.append("  Frame:\n" + "\n".join(parts))
@@ -1263,12 +1319,28 @@ NARRATION FIELDS — TWO SEPARATE OUTPUTS:
     beat on a pool photo should have content_motion=["water"] — the
     camera moves AND the water moves. These are not alternatives.
 
+    ⚠️ DEPTH CONSTRAINTS: each frame has a depth_constraints field.
+    When technique="depth", you MUST choose a trajectory/intensity
+    combination that is listed in "validated" or "constrained". You
+    MUST NOT use a combination listed in "unvalidated" — the system
+    will reject it and fall back to bounded, and the film will not
+    match your direction.
+    The limiting_reasons field explains WHY certain combinations are
+    unavailable — use this to make informed creative choices rather
+    than blindly picking from the validated list.
+
     GUIDELINES:
     - A film composed entirely of bounded beats is a slideshow.
-    - Frames with depth_structure="deep" and strong layering → "depth".
+    - Frames with depth_available=true → prefer "depth" with a
+      validated trajectory. Depth gives the film dimensional movement.
     - Frames with genuine environmental life (water, fire, foliage) →
       set content_motion to name what should move. Camera can be
       "depth", "static", or "bounded" independently.
+    - "static" is a legitimate cinematic choice — the camera holds
+      still while the scene moves. A static pool shot with water
+      rippling, a static fireplace with fire — these are powerful.
+      A static beat MUST be exactly 5.0 or 10.0 seconds (Runway
+      constraint).
     - Shallow-depth frames with nothing moving → "bounded".
     - Text-bearing frames (contains_text=true) MUST be technique="bounded"
       with requested_motion="push_in". Never static, never generative,
