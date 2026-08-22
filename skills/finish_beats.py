@@ -187,7 +187,7 @@ def _truth_gate(pre_aleph_path, post_aleph_path):
             # Thresholds (empirically reasonable)
             # edge_diff > 0.15 = major structural change
             # max_grid_diff > 60 = a large region changed dramatically
-            frame_pass = edge_diff < 0.15 and max_grid_diff < 60
+            frame_pass = bool(edge_diff < 0.15 and max_grid_diff < 60)
 
             results.append({
                 "frame": name,
@@ -201,7 +201,7 @@ def _truth_gate(pre_aleph_path, post_aleph_path):
         except Exception as exc:
             results.append({"frame": name, "pass": False, "reason": str(exc)[:200]})
 
-    overall_pass = all(r["pass"] for r in results)
+    overall_pass = bool(all(r["pass"] for r in results))
     return {
         "pass": overall_pass,
         "frames_checked": frame_names,
